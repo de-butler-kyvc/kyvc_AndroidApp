@@ -1,8 +1,5 @@
 KYvC Git 운영 전략:
-브랜치는 main, develop, feature/*만 사용한다.
-main은 prod 자동배포 기준, develop은 dev 자동배포 기준, feature/*는 기능 개발용이며 배포하지 않는다.
-main, develop 브랜치는 직접 커밋/푸쉬할 수 없으며 PR 병합만 허용한다.
-작업 흐름은 feature/* → develop → main이다.
+
 커밋 메시지는 type(scope): 작업 내용 형식을 사용한다.
 type은 feat, fix, refactor, test, docs, chore를 사용한다.
 scope는 back, back-admin, front, front-admin, core, core-admin, infra, -를 사용한다.

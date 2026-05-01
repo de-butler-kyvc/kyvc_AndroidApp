@@ -1,0 +1,1 @@
+git 관련해서 사용하는 것들은 PROJECT_GUIDELINES.md 읽고 규칙을 따르도록해

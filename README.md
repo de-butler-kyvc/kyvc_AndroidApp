@@ -10,15 +10,17 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Target SDK**: 36
 
 ## 📌 주요 작업 내용
-### WebView 로컬 테스트 환경 구축 (2025-05-22)
-- `app/src/main/assets/index.html` 생성 (테스트용 웹 페이지)
-- `MainActivity.kt` 로드 URL을 로컬 에셋(`file:///android_asset/index.html`)으로 변경
-- Web-to-Native 통신 실험을 위한 JS 인터페이스 기초 준비
+### Wallet 및 Bridge 기능 구현 (2025-05-22)
+- **Infrastructure**: Room DB, XRPL4J(6.0.0), JCS(Json Canonicalization), Kotlin Serialization 설정 완료
+- **Wallet Core**: XRPL 계정 생성 및 `CredentialAccept` 트랜잭션 제출 기능 기초 구현
+- **Storage**: `CredentialEntity`를 통한 VC 로컬 저장소 구축
+- **Bridge**: 웹에서 안드로이드 기능을 호출할 수 있는 `Android` 브릿지 객체 등록
+- **UI**: 지민님이 제공한 고도화된 브릿지 테스트 페이지(`index.html`) 적용
 
 ## 🚀 향후 작업 계획
 - [x] **MCP 연동 환경 구성**: AI 어시스턴트 협업을 위한 `mcp-context.md` 및 환경 설정 완료
 - [ ] 베이스 아키텍처 설정 (Clean Architecture + MVVM)
-- [x] **WebView 기능 구현**: 기초 WebView 환경 구축 및 테스트 웹 로드 완료
-- [ ] **WebView Bridge 구현**: Web-to-Native 통신 인터페이스 추가
-- [ ] **VC(Verifiable Credentials) 인증 시스템**: 로컬 저장소 기반 VC 대조 및 인증 로직 구현
-- [ ] **Blockchain Wallet 연동**: 경량 지갑 구현 (VC 저장, XRPL 통신, Key 서명 등)
+- [x] **WebView Bridge 구현**: Web-to-Native 통신 인터페이스 추가 및 테스트 페이지 연동 완료
+- [x] **Blockchain Wallet 연동**: 경량 지갑 기반 구축 (계정 생성, XRPL 통신 기초)
+- [ ] **VC(Verifiable Credentials) 인증 시스템**: 실데이터 기반 VC 대조 및 인증 로직 고도화
+- [ ] **VP(Verifiable Presentation) 생성**: JCS 기반 서명 알고리즘 완성

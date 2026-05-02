@@ -1,15 +1,13 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.serialization)
+    alias(libs.plugins.ksp)
 }
 
 android {
     namespace = "com.example.kyvc_androidapp"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    compileSdk = 36 
 
     defaultConfig {
         applicationId = "com.example.kyvc_androidapp"
@@ -48,6 +46,22 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+
+    // Room
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
+
+    // XRPL
+    implementation(libs.xrpl4j.model)
+    implementation(libs.xrpl4j.client)
+    implementation(libs.xrpl4j.crypto.bouncycastle)
+    implementation(libs.bouncycastle.bcprov)
+
+    // Crypto & Utilities
+    implementation(libs.jcs)
+    implementation(libs.kotlinx.serialization.json)
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

@@ -6,8 +6,13 @@ junitVersion = "1.1.5"
 espressoCore = "3.5.1"
 lifecycleRuntimeKtx = "2.6.1"
 activityCompose = "1.8.0"
-kotlin = "2.2.10"
+kotlin = "2.1.10"
 composeBom = "2026.02.01"
+room = "2.6.1"
+xrpl4j = "6.0.0"
+bouncycastle = "1.78.1"
+jcs = "1.1"
+ksp = "2.1.10-1.0.30"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -24,8 +29,20 @@ androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "u
 androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+xrpl4j-model = { group = "org.xrpl", name = "xrpl4j-model", version.ref = "xrpl4j" }
+xrpl4j-client = { group = "org.xrpl", name = "xrpl4j-client", version.ref = "xrpl4j" }
+xrpl4j-crypto-bouncycastle = { group = "org.xrpl", name = "xrpl4j-crypto-bouncycastle", version.ref = "xrpl4j" }
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
+jcs = { group = "io.github.erdtman", name = "java-json-canonicalization", version.ref = "jcs" }
+kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-serialization-json", version = "1.6.3" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
+serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
+ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 

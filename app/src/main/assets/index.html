@@ -1,39 +1,585 @@
 <!DOCTYPE html>
-<html>
+<html lang="ko">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KYvC Test Page</title>
-    <style>
-        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; background-color: #f0f2f5; }
-        h1 { color: #1a73e8; }
-        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; width: 80%; }
-        button { background-color: #1a73e8; color: white; border: none; padding: 12px 24px; border-radius: 8px; font-size: 16px; cursor: pointer; margin-top: 20px; }
-        button:active { background-color: #1557b0; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>KYC Wallet WebView Bridge Detail Test</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --primary: #2563eb;
+      --primary-dark: #1e40af;
+      --ok: #16a34a;
+      --warn: #f59e0b;
+      --danger: #dc2626;
+      --dark: #0f172a;
+      --soft-blue: #eff6ff;
+      --soft-green: #ecfdf5;
+      --soft-yellow: #fffbeb;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    header {
+      padding: 22px 16px 18px;
+      background: linear-gradient(145deg, #0f172a, #1d4ed8 58%, #38bdf8);
+      color: white;
+      border-bottom-left-radius: 24px;
+      border-bottom-right-radius: 24px;
+    }
+
+    .top-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .badge {
+      padding: 6px 9px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.16);
+      font-size: 11px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    h1 { margin: 0; font-size: 22px; line-height: 1.25; }
+    header p { margin: 8px 0 0; font-size: 13px; opacity: 0.9; line-height: 1.45; }
+
+    main { padding: 14px; max-width: 720px; margin: 0 auto; }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+    }
+    .summary .box {
+      background: rgba(255,255,255,0.14);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 14px;
+      padding: 10px;
+    }
+    .summary .label { font-size: 11px; opacity: 0.75; }
+    .summary .value { margin-top: 4px; font-size: 15px; font-weight: 900; }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 15px;
+      margin-bottom: 12px;
+      box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+    }
+
+    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .card h2 { margin: 0; font-size: 16px; }
+    .mini-status {
+      padding: 5px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--primary-dark);
+      background: var(--soft-blue);
+    }
+    .mini-status.ok { color: var(--ok); background: var(--soft-green); }
+    .mini-status.warn { color: #b45309; background: var(--soft-yellow); }
+
+    .desc { margin: 0 0 12px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+
+    .timeline { display: flex; gap: 6px; margin: 12px 0; }
+    .step {
+      flex: 1;
+      height: 7px;
+      border-radius: 999px;
+      background: #dbeafe;
+      transition: 0.2s;
+    }
+    .step.active { background: var(--primary); }
+    .step.done { background: var(--ok); }
+
+    textarea, input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      padding: 11px;
+      font-size: 13px;
+      outline: none;
+      background: #fbfdff;
+    }
+    textarea { min-height: 112px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    label { display: block; margin: 10px 0 6px; font-size: 12px; font-weight: 800; color: #374151; }
+
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 13px;
+      padding: 13px 14px;
+      background: var(--primary);
+      color: white;
+      font-size: 14px;
+      font-weight: 900;
+      cursor: pointer;
+      transition: transform 0.08s ease, opacity 0.15s ease;
+    }
+    button:active { transform: scale(0.985); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: #374151; }
+    button.ok { background: var(--ok); }
+    button.warn { background: var(--warn); }
+    button.danger { background: var(--danger); }
+    button.ghost { background: #eef2ff; color: var(--primary-dark); }
+
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .mt8 { margin-top: 8px; }
+    .mt12 { margin-top: 12px; }
+
+    .result-panel {
+      display: none;
+      border-radius: 14px;
+      padding: 11px;
+      margin-top: 10px;
+      background: #f9fafb;
+      border: 1px dashed #cbd5e1;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .result-panel.show { display: block; }
+    .result-panel b { color: var(--primary-dark); }
+
+    .vc-card {
+      background: linear-gradient(135deg, #111827, #1e3a8a);
+      color: white;
+      border-radius: 18px;
+      padding: 15px;
+      margin-top: 10px;
+    }
+    .vc-card .small { font-size: 11px; opacity: 0.72; }
+    .vc-card .big { margin-top: 5px; font-size: 18px; font-weight: 900; }
+    .vc-card .row { display: flex; justify-content: space-between; gap: 8px; margin-top: 13px; font-size: 12px; }
+
+    .qr-box {
+      display: grid;
+      place-items: center;
+      height: 150px;
+      border-radius: 16px;
+      background: repeating-linear-gradient(45deg, #111827 0 8px, #f9fafb 8px 16px);
+      border: 8px solid white;
+      box-shadow: inset 0 0 0 1px #cbd5e1;
+      margin-bottom: 10px;
+      color: white;
+      font-weight: 900;
+      text-shadow: 0 1px 2px #000;
+    }
+
+    .toast {
+      position: fixed;
+      left: 14px;
+      right: 14px;
+      bottom: 14px;
+      z-index: 20;
+      padding: 13px 14px;
+      background: var(--dark);
+      color: white;
+      border-radius: 14px;
+      font-size: 13px;
+      font-weight: 800;
+      opacity: 0;
+      transform: translateY(16px);
+      pointer-events: none;
+      transition: 0.2s;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    .log {
+      height: 230px;
+      overflow-y: auto;
+      background: #020617;
+      color: #bbf7d0;
+      border-radius: 14px;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+  </style>
 </head>
 <body>
-    <div class="card">
-        <h1>KYvC 임시 웹사이트</h1>
-        <p>이 화면은 앱 내부의 <b>assets</b> 폴더에서 로드되었습니다.</p>
-        <p id="status">네이티브 대기 중...</p>
-        <button onclick="callNative()">안드로이드 기능 호출</button>
+  <header>
+    <div class="top-row">
+      <div>
+        <h1>KYC Wallet WebView Bridge</h1>
+        <p>웹 버튼 → Android 네이티브 함수 호출 → 콜백 수신까지 테스트하는 임시 페이지입니다.</p>
+      </div>
+      <div class="badge" id="bridgeBadge">확인중</div>
     </div>
+    <div class="summary">
+      <div class="box"><div class="label">VC</div><div class="value" id="vcCount">0개</div></div>
+      <div class="box"><div class="label">서명</div><div class="value" id="signCount">0회</div></div>
+      <div class="box"><div class="label">XRPL</div><div class="value" id="xrplCount">0건</div></div>
+    </div>
+  </header>
 
-    <script>
-        function callNative() {
-            // 나중에 안드로이드에서 설정할 브릿지 이름: AndroidBridge
-            if (window.AndroidBridge) {
-                window.AndroidBridge.showToast("웹에서 보낸 메시지입니다!");
-            } else {
-                alert("안드로이드 브릿지가 연결되지 않았습니다.");
-            }
-        }
+  <main>
+    <section class="card">
+      <div class="card-head">
+        <h2>1. Bridge 연결</h2>
+        <span class="mini-status" id="bridgeText">대기</span>
+      </div>
+      <p class="desc">WebView에서 <b>addJavascriptInterface</b>로 등록한 <b>window.Android</b> 객체를 확인합니다.</p>
+      <div class="timeline"><div class="step" id="s1"></div><div class="step" id="s2"></div><div class="step" id="s3"></div></div>
+      <div class="grid">
+        <button onclick="checkBridge()">Bridge 확인</button>
+        <button class="ghost" onclick="simulateAndroidCallback()">콜백 시뮬레이션</button>
+      </div>
+      <div class="result-panel" id="bridgeResult"></div>
+    </section>
 
-        // 안드로이드에서 이 함수를 호출할 수 있습니다.
-        function setStatus(message) {
-            document.getElementById('status').innerText = message;
+    <section class="card">
+      <div class="card-head">
+        <h2>2. VC 저장</h2>
+        <span class="mini-status" id="vcStatus">미저장</span>
+      </div>
+      <p class="desc">발급된 법인 KYC VC를 Wallet에 저장하는 테스트입니다.</p>
+      <div class="vc-card">
+        <div class="small">Corporate KYC Credential</div>
+        <div class="big" id="vcCorpName">테스트 법인 주식회사</div>
+        <div class="row"><span id="vcBizNo">123-45-67890</span><span id="vcState">APPROVED</span></div>
+      </div>
+      <label>VC JSON</label>
+      <textarea id="vcInput"></textarea>
+      <div class="grid mt8">
+        <button class="secondary" onclick="randomizeVC()">샘플 변경</button>
+        <button class="ok" onclick="saveVC()">VC 저장 호출</button>
+      </div>
+      <div class="result-panel" id="vcResult"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>3. XRPL 기록</h2>
+        <span class="mini-status" id="xrplStatus">대기</span>
+      </div>
+      <p class="desc">VC 해시 또는 상태 메타데이터를 XRPL에 기록하는 테스트입니다.</p>
+      <label>Credential Hash</label>
+      <input id="xrplHash" />
+      <div class="grid mt8">
+        <button class="secondary" onclick="makeHash()">해시 생성</button>
+        <button onclick="submitToXRPL()">XRPL 기록 호출</button>
+      </div>
+      <div class="result-panel" id="xrplResult"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>4. Key 서명</h2>
+        <span class="mini-status" id="signStatus">대기</span>
+      </div>
+      <p class="desc">VP 제출 전 Holder 키로 challenge 값을 서명하는 상황을 가정합니다.</p>
+      <label>서명 메시지</label>
+      <input id="signMessage" />
+      <div class="grid mt8">
+        <button class="secondary" onclick="makeChallenge()">Challenge 생성</button>
+        <button class="warn" onclick="signMessage()">서명 호출</button>
+      </div>
+      <div class="result-panel" id="signResult"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>5. QR 액션</h2>
+        <span class="mini-status" id="qrStatus">대기</span>
+      </div>
+      <p class="desc">금융사 화면에서 제시한 VC 발급 QR 또는 VP 요청 QR을 스캔하는 테스트입니다.</p>
+      <div class="qr-box" id="qrPreview">QR PREVIEW</div>
+      <select id="qrType" onchange="updateQRPreview()">
+        <option value="VC_ISSUE">VC 발급 QR</option>
+        <option value="VP_REQUEST">VP 제출 요청 QR</option>
+        <option value="LOGIN_REQUEST">기업 로그인 QR</option>
+      </select>
+      <div class="grid mt8">
+        <button class="secondary" onclick="updateQRPreview()">QR 갱신</button>
+        <button onclick="scanQR()">QR 스캔 호출</button>
+      </div>
+      <div class="result-panel" id="qrResult"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>6. 테스트 로그</h2>
+        <span class="mini-status ok" id="logStatus">READY</span>
+      </div>
+      <div class="grid3 mt8">
+        <button class="ghost" onclick="copyLog()">로그 복사</button>
+        <button class="secondary" onclick="downloadLog()">로그 저장</button>
+        <button class="danger" onclick="clearLog()">초기화</button>
+      </div>
+      <div class="log mt12" id="log"></div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const state = { vc: 0, sign: 0, xrpl: 0 };
+
+    const sampleVC = {
+      id: "vc-kyc-001",
+      type: ["VerifiableCredential", "CorporateKycCredential"],
+      issuer: "did:kyvc:issuer:bank-a",
+      issuanceDate: new Date().toISOString(),
+      credentialSubject: {
+        corporateName: "테스트 법인 주식회사",
+        businessNumber: "123-45-67890",
+        representativeName: "홍길동",
+        beneficialOwner: "김실소유",
+        kycStatus: "APPROVED"
+      },
+      proof: {
+        type: "Ed25519Signature2020",
+        proofPurpose: "assertionMethod",
+        signature: "sample-signature"
+      }
+    };
+
+    function $(id) { return document.getElementById(id); }
+
+    function updateSummary() {
+      $("vcCount").textContent = state.vc + "개";
+      $("signCount").textContent = state.sign + "회";
+      $("xrplCount").textContent = state.xrpl + "건";
+    }
+
+    function showToast(message) {
+      const t = $("toast");
+      t.textContent = message;
+      t.classList.add("show");
+      setTimeout(() => t.classList.remove("show"), 1600);
+    }
+
+    function panel(id, html) {
+      const el = $(id);
+      el.innerHTML = html;
+      el.classList.add("show");
+    }
+
+    function log(message, data) {
+      const time = new Date().toLocaleTimeString();
+      const body = data ? `\n${JSON.stringify(data, null, 2)}` : "";
+      $("log").textContent = `[${time}] ${message}${body}\n\n` + $("log").textContent;
+    }
+
+    function hasAndroidBridge() { return !!window.Android; }
+
+    function checkBridge() {
+      const ok = hasAndroidBridge();
+      $("bridgeBadge").textContent = ok ? "BRIDGE ON" : "BROWSER MODE";
+      $("bridgeText").textContent = ok ? "연결됨" : "Mock 모드";
+      $("bridgeText").className = ok ? "mini-status ok" : "mini-status warn";
+      ["s1", "s2", "s3"].forEach((id, i) => $(id).className = "step " + (ok || i < 2 ? "done" : "active"));
+      panel("bridgeResult", ok
+        ? "<b>성공:</b> window.Android 객체가 확인되었습니다."
+        : "<b>Mock 모드:</b> 일반 브라우저에서는 Android 객체가 없으므로 가짜 결과만 표시합니다.");
+      log(ok ? "Bridge 연결 확인" : "Bridge 없음. Mock 모드로 동작");
+      showToast(ok ? "Bridge 연결됨" : "브라우저 Mock 모드");
+    }
+
+    function callAndroid(functionName, payload) {
+      log(`웹 → Android 호출: Android.${functionName}`, payload);
+
+      if (!hasAndroidBridge()) {
+        const mockResult = { ok: true, mock: true, functionName, payload, time: new Date().toISOString() };
+        window.onAndroidResult(JSON.stringify(mockResult));
+        return mockResult;
+      }
+
+      try {
+        if (typeof window.Android[functionName] !== "function") {
+          log(`Android.${functionName} 함수 없음`);
+          showToast(`Android.${functionName} 미구현`);
+          return null;
         }
-    </script>
+        const arg = typeof payload === "string" ? payload : JSON.stringify(payload);
+        return window.Android[functionName](arg);
+      } catch (error) {
+        log("Android 호출 실패", { message: error.message });
+        showToast("Android 호출 실패");
+        return null;
+      }
+    }
+
+    function randomHex(size = 24) {
+      const chars = "abcdef0123456789";
+      let out = "0x";
+      for (let i = 0; i < size; i++) out += chars[Math.floor(Math.random() * chars.length)];
+      return out;
+    }
+
+    function randomizeVC() {
+      const names = ["테스트 법인 주식회사", "아주 핀테크 주식회사", "KYvC 데모 컴퍼니", "블루체인 코리아"];
+      const vc = structuredClone(sampleVC);
+      vc.id = "vc-kyc-" + Math.floor(Math.random() * 900 + 100);
+      vc.issuanceDate = new Date().toISOString();
+      vc.credentialSubject.corporateName = names[Math.floor(Math.random() * names.length)];
+      vc.credentialSubject.businessNumber = `${Math.floor(Math.random()*900+100)}-${Math.floor(Math.random()*90+10)}-${Math.floor(Math.random()*90000+10000)}`;
+      vc.proof.signature = randomHex(48);
+      $("vcInput").value = JSON.stringify(vc, null, 2);
+      renderVCCard(vc);
+      log("VC 샘플 변경", vc);
+    }
+
+    function renderVCCard(vc) {
+      $("vcCorpName").textContent = vc.credentialSubject.corporateName;
+      $("vcBizNo").textContent = vc.credentialSubject.businessNumber;
+      $("vcState").textContent = vc.credentialSubject.kycStatus;
+    }
+
+    function saveVC() {
+      try {
+        const vc = JSON.parse($("vcInput").value);
+        renderVCCard(vc);
+        callAndroid("saveVC", vc);
+        state.vc += 1;
+        updateSummary();
+        $("vcStatus").textContent = "저장 요청됨";
+        $("vcStatus").className = "mini-status ok";
+        panel("vcResult", `<b>저장 요청:</b> ${vc.id}<br/>법인명: ${vc.credentialSubject.corporateName}`);
+        showToast("VC 저장 호출 완료");
+      } catch (e) {
+        panel("vcResult", `<b>JSON 오류:</b> ${e.message}`);
+        log("VC JSON 형식 오류", { message: e.message });
+      }
+    }
+
+    function makeHash() {
+      $("xrplHash").value = randomHex(64);
+      log("XRPL 해시 생성", { hash: $("xrplHash").value });
+    }
+
+    function submitToXRPL() {
+      const hash = $("xrplHash").value.trim();
+      if (!hash) return showToast("해시를 입력하세요");
+      callAndroid("submitToXRPL", { hash, type: "VC_STATUS_HASH", network: "testnet" });
+      state.xrpl += 1;
+      updateSummary();
+      $("xrplStatus").textContent = "기록 요청됨";
+      $("xrplStatus").className = "mini-status ok";
+      panel("xrplResult", `<b>XRPL 기록 요청:</b><br/>${hash}`);
+      showToast("XRPL 기록 호출 완료");
+    }
+
+    function makeChallenge() {
+      $("signMessage").value = "vp-challenge-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
+      log("서명 Challenge 생성", { message: $("signMessage").value });
+    }
+
+    function signMessage() {
+      const message = $("signMessage").value.trim();
+      if (!message) return showToast("메시지를 입력하세요");
+      callAndroid("signMessage", { message, algorithm: "Ed25519" });
+      state.sign += 1;
+      updateSummary();
+      $("signStatus").textContent = "서명 요청됨";
+      $("signStatus").className = "mini-status ok";
+      panel("signResult", `<b>서명 요청:</b><br/>${message}`);
+      showToast("서명 호출 완료");
+    }
+
+    function updateQRPreview() {
+      const type = $("qrType").value;
+      $("qrPreview").textContent = type;
+      log("QR 미리보기 갱신", { type });
+    }
+
+    function scanQR() {
+      const purpose = $("qrType").value;
+      const payload = {
+        purpose,
+        requestId: "req-" + Date.now(),
+        endpoint: "https://demo.kyvc.local/callback",
+        expiresInSec: 180
+      };
+      callAndroid("scanQRCode", payload);
+      $("qrStatus").textContent = "스캔 요청됨";
+      $("qrStatus").className = "mini-status ok";
+      panel("qrResult", `<b>QR 스캔 요청:</b> ${purpose}<br/>requestId: ${payload.requestId}`);
+      showToast("QR 스캔 호출 완료");
+    }
+
+    function simulateAndroidCallback() {
+      window.onAndroidResult(JSON.stringify({
+        ok: true,
+        source: "Android Mock Callback",
+        action: "TEST_CALLBACK",
+        message: "Android에서 JS 콜백을 호출한 것처럼 시뮬레이션했습니다."
+      }));
+    }
+
+    function clearLog() {
+      $("log").textContent = "";
+      showToast("로그 초기화 완료");
+    }
+
+    async function copyLog() {
+      const text = $("log").textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast("로그 복사 완료");
+      } catch (e) {
+        showToast("클립보드 복사 실패");
+      }
+    }
+
+    function downloadLog() {
+      const blob = new Blob([$("log").textContent], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "webview-bridge-log.txt";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    window.onAndroidResult = function(resultJson) {
+      try {
+        const result = typeof resultJson === "string" ? JSON.parse(resultJson) : resultJson;
+        log("Android → Web 결과 수신", result);
+        showToast("Android 콜백 수신");
+      } catch (e) {
+        log("Android → Web 문자열 수신", { value: resultJson });
+      }
+    };
+
+    window.onVCStored = function(vcId) {
+      state.vc += 1;
+      updateSummary();
+      $("vcStatus").textContent = "저장 완료";
+      $("vcStatus").className = "mini-status ok";
+      log("VC 저장 완료 콜백", { vcId });
+    };
+
+    window.onSignatureCreated = function(signature) {
+      log("서명 생성 완료 콜백", { signature });
+      panel("signResult", `<b>서명 완료:</b><br/>${signature}`);
+    };
+
+    window.onQRCodeScanned = function(qrData) {
+      log("QR 스캔 완료 콜백", { qrData });
+    };
+
+    $("vcInput").value = JSON.stringify(sampleVC, null, 2);
+    $("xrplHash").value = randomHex(64);
+    $("signMessage").value = "vp-submit-request-" + Date.now();
+    updateQRPreview();
+    updateSummary();
+    checkBridge();
+  </script>
 </body>
 </html>

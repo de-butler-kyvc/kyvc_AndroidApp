@@ -10,10 +10,10 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Target SDK**: 36
 
 ## 📌 주요 작업 내용
-### WebView 테스트 및 기초 환경 구성 (2025-05-22)
-- `AndroidManifest.xml`에 인터넷 권한(`INTERNET`) 추가
-- `MainActivity.kt`에 Jetpack Compose `AndroidView` 기반 WebView 테스트 코드 구현 (Google 임시 로드)
-- 향후 브릿지 구현을 위한 JavaScript 설정 활성화
+### WebView 로컬 테스트 환경 구축 (2025-05-22)
+- `app/src/main/assets/index.html` 생성 (테스트용 웹 페이지)
+- `MainActivity.kt` 로드 URL을 로컬 에셋(`file:///android_asset/index.html`)으로 변경
+- Web-to-Native 통신 실험을 위한 JS 인터페이스 기초 준비
 
 ## 🚀 향후 작업 계획
 - [x] **MCP 연동 환경 구성**: AI 어시스턴트 협업을 위한 `mcp-context.md` 및 환경 설정 완료

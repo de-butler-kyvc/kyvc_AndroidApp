@@ -22,7 +22,7 @@ class MainActivity : ComponentActivity() {
             Kyvc_AndroidAppTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     WebViewScreen(
-                        url = "https://www.google.com",
+                        url = "file:///android_asset/index.html",
                         modifier = Modifier.padding(innerPadding)
                     )
                 }

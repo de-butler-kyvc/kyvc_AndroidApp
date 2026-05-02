@@ -16,6 +16,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Storage**: `CredentialEntity`를 통한 VC 로컬 저장소 구축
 - **Bridge**: 웹에서 안드로이드 기능을 호출할 수 있는 `Android` 브릿지 객체 등록
 - **UI**: 지민님이 제공한 고도화된 브릿지 테스트 페이지(`index.html`) 적용
+- **Build Fix**: AGP 9.2.0의 내장 Kotlin 지원과 KSP 간의 충돌 해결 (`android.disallowKotlinSourceSets=false`)
 
 ## 🚀 향후 작업 계획
 - [x] **MCP 연동 환경 구성**: AI 어시스턴트 협업을 위한 `mcp-context.md` 및 환경 설정 완료

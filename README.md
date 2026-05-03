@@ -30,8 +30,8 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Wallet Core**: XRPL 계정 생성 및 `CredentialAccept` 트랜잭션 제출 기능 기초 구현
 - **Storage**: `CredentialEntity`를 통한 VC 로컬 저장소 구축
 - **Bridge**: 웹에서 안드로이드 기능을 호출할 수 있는 `Android` 브릿지 객체 등록
-- **XRPL Submit**: `submitToXRPL` 브릿지에서 holder seed, issuer account, credential type을 검증한 뒤 XRPL testnet `CredentialAccept`를 제출하고 tx hash를 Room DB에 반영
-- **Issuer CredentialCreate**: `submitCredentialCreate` 브릿지에서 issuer seed로 XRPL testnet `CredentialCreate`를 제출해 ledger credential entry를 생성
+- **XRPL Submit**: `submitToXRPL` 브릿지에서 holder seed, issuer account, credential type을 검증한 뒤 XRPL devnet `CredentialAccept`를 제출하고 tx hash를 Room DB에 반영
+- **Issuer CredentialCreate**: `submitCredentialCreate` 브릿지에서 issuer seed로 XRPL devnet `CredentialCreate`를 제출해 ledger credential entry를 생성
 - **WebView Callback**: VC 저장 및 XRPL 제출 결과를 `window.onAndroidResult`로 반환하도록 테스트 페이지 연동
 - **UI**: 지민님이 제공한 고도화된 브릿지 테스트 페이지(`index.html`) 적용
 - **Build Fix**: AGP 9.2.0의 내장 Kotlin 지원과 KSP 간의 충돌 해결 (`android.disallowKotlinSourceSets=false`)
@@ -52,11 +52,10 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [x] 베이스 아키텍처 설정 (Clean Architecture + MVVM)
 - [x] **WebView Bridge 구현**: Web-to-Native 통신 인터페이스 추가 및 테스트 페이지 연동 완료
 - [x] **Blockchain Wallet 연동**: 경량 지갑 기반 구축 (계정 생성, XRPL 통신 기초)
-- [x] **CredentialAccept 제출 연동**: WebView 요청 기반 XRPL testnet 제출, holder account 검증, tx hash 저장
+- [x] **CredentialAccept 제출 연동**: WebView 요청 기반 XRPL devnet 제출, holder account 검증, tx hash 저장
 - [x] **Holder 지갑 상태 저장**: seed 생성, 암호화 저장, account/publicKey/DID 조회 브릿지 추가
 - [x] **VP 생성 기초 구현**: 저장된 holder seed로 secp256k1 JCS proof 생성 및 WebView 콜백 연결
 - [x] **QR 브릿지 연결**: QR 요청/결과를 WebView 콜백으로 전달하는 native bridge 추가
-- [ ] **VC(Verifiable Credentials) 인증 시스템**: 실데이터 기반 VC 대조 및 인증 로직 고도화
 - [x] **VC(Verifiable Credentials) 인증 시스템**: canonical hash, proof 구조, XRPL active 상태 검증
 - [x] **Verifier 제출 연동**: `/verifier/presentations/verify` 요청 구성 및 challenge 사용 상태 처리
 - [x] **저장 VC 목록/상태 갱신**: 로컬 credential 목록 조회와 XRPL 상태 일괄 동기화
@@ -85,7 +84,67 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **테스트 벡터 추가**
   - VC hash, VP proof, XRPL status 계산 결과를 고정 테스트로 만들어 회귀 방지
 
+## 현재 구현 상태 요약
+### 앱 내부에서 성공한 것
+- holder 지갑 생성/조회
+- holder account / DID / DID Document 조회
+- VC 로컬 저장
+- issuer / holder / credentialType 기본 정합성 검증
+- issuer-side `CredentialCreate` 제출
+- holder-side `CredentialAccept` 제출
+- XRPL credential status 조회
+- 저장 VC 목록 조회와 상태 일괄 갱신
+- verifier challenge 등록, 만료 관리, 중복 사용 차단
+- VP 생성 및 서명
+- verifier 제출 요청 POST
+- QR 스캔 브릿지
+- WebView 버튼 흐름 정리
+- dev-core 실서버 issuer VC 요청
+- dev-core 실서버 VC 인증
+- dev-core verifier challenge 수신
+- 실제 VC 기반 VP 생성 및 verifier 제출
+
+### 실제 dev-core 연동 검증 완료
+- 실제 issuer VC 요청 후 앱 저장 성공
+- 같은 VC의 `credentialStatus.issuer`, `credentialStatus.subject`, `credentialStatus.credentialType` 기준으로 XRPL devnet `CredentialAccept` 제출 성공
+- XRPL 상태 조회에서 `credentialEntryFound: true`, `credentialAccepted: true` 확인
+- `/verifier/credentials/verify` 응답에서 `ok: true`, `errors: []`, `policyErrors: []` 확인
+- verifier challenge 기반 holder VP 생성 및 제출 성공
+
+### 샘플 데이터 사용 시 주의할 것
+- VC 인증의 canonical hash 일치
+  - `credentialStatus.vcCoreHash`가 `sample-vc-core-hash`인 샘플은 인증에서 실패한다.
+  - 실서버 issuer가 발급한 VC에는 `canonicalHash 반영 후 저장`을 사용하지 않는다. VC 본문을 바꾸면 issuer proof 검증이 깨질 수 있다.
+- issuer proof 검증
+  - issuer DID Document가 없는 샘플 VC는 proof 서명 검증을 못 한다
+- XRPL status active 판정
+  - `CredentialCreate`와 `CredentialAccept`가 실제 ledger에 반영된 뒤에만 active로 보인다
+
+### 외부에서 준비되어야 하는 것
+- 실제 XRPL devnet classic address가 들어간 issuer 계좌
+- issuer seed
+- 실제 issuer가 발급한 VC 원문
+- 실제 `credentialStatus.vcCoreHash`
+- issuer DID Document 또는 issuer 공개키
+- verifier가 발급한 실제 challenge
+- verifier endpoint의 실제 응답 스키마
+- holder / issuer 둘 다 devnet에서 funded 상태인 계좌
+
+### 현재 테스트 판단 기준
+- `SUBMIT_CREDENTIAL_CREATE -> tesSUCCESS`
+- `SUBMIT_TO_XRPL -> tesSUCCESS`
+- `SIGN_MESSAGE -> ok: true`
+- `REGISTER_VERIFIER_CHALLENGE -> ok: true`
+- `SAVE_VC -> ok: true`
+- `GET_WALLET_INFO -> ok: true`
+- `VERIFY_CREDENTIAL_WITH_SERVER -> ok: true`, `errors: []`
+- `SUBMIT_TO_VERIFIER -> ok: true`
+- `VERIFY_VC`가 실서버 VC에서 실패하면 로컬 해시 규칙 차이일 수 있으므로, 최종 판정은 실서버 verifier 응답을 우선한다
+
 ## WebView Bridge 요청 형식
+
+## 사용 순서
+실서버 issuer/verifier를 붙여 테스트할 때는 아래 `실서버 테스트` 섹션의 순서를 우선 사용한다. `XRPL 발급(디버그)` 카드는 issuer seed를 직접 넣는 개발용 보조 흐름이다.
 
 `createWallet`은 Android 내부에서 secp256k1 holder seed를 만들고 Keystore 보호 AES-GCM 키로 암호화 저장한다. `getWalletInfo`는 seed를 반환하지 않고 holder account, public key, DID만 반환한다.
 
@@ -104,9 +163,9 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `submitCredentialCreate`는 issuer가 ledger에 `CredentialCreate`를 올릴 때 쓴다. 이 요청은 `issuerSeed`, `subjectAccount`, `credentialType`을 받으며, issuer seed는 앱에 저장하지 않는다. `vcJson`이 있으면 거기서 subject/type을 보강해서 사용한다. 성공/실패 결과는 `SUBMIT_CREDENTIAL_CREATE` action으로 반환된다.
 
-`CredentialCreate`가 `tecNO_TARGET`로 끝나면 subject account가 XRPL testnet에서 아직 활성화되지 않았다는 뜻이다. 이 경우 holder wallet을 faucet으로 충전해 ledger에 실제 계좌를 만든 뒤 다시 시도해야 한다.
+`CredentialCreate`가 `tecNO_TARGET`로 끝나면 subject account가 XRPL devnet에서 아직 활성화되지 않았다는 뜻이다. 이 경우 holder wallet을 faucet으로 충전해 ledger에 실제 계좌를 만든 뒤 다시 시도해야 한다.
 
-실제 테스트넷 값을 넣을 때는 `issuerAccount`에 XRPL testnet의 실제 classic address를 넣고, VC JSON의 `issuer` / `credentialStatus.issuer`도 같은 계정으로 맞춘다. DID는 `did:xrpl:1:{account}` 형태를 쓰되, `account` 부분은 반드시 실제 classic address여야 한다. `holderAccount`는 앱의 `getWalletInfo` 결과로 자동 채워지는 holder account를 쓰면 된다.
+실제 devnet 값을 넣을 때는 `issuerAccount`에 XRPL devnet의 실제 classic address를 넣고, VC JSON의 `issuer` / `credentialStatus.issuer`도 같은 계정으로 맞춘다. DID는 `did:xrpl:1:{account}` 형태를 쓰되, `account` 부분은 반드시 실제 classic address여야 한다. `holderAccount`는 앱의 `getWalletInfo` 결과로 자동 채워지는 holder account를 쓰면 된다.
 
 예를 들어 placeholder인 `rIssuerAccountForTestnet` 같은 문자열은 XRPL 주소가 아니므로 status 조회, verifier 제출, XRPL 제출 모두 실패한다. 샘플 VC를 쓸 때는 issuer 관련 필드를 실계정으로 교체하고, VC 저장 후 다시 status 조회를 해야 한다.
 
@@ -123,3 +182,49 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 `submitPresentationToVerifier`는 `signMessage`로 생성한 VP와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `presentation`, `did_documents`, `policy`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.
 
 `listCredentials`는 앱에 저장된 VC를 목록으로 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
+
+## 실서버 테스트
+가이드의 실제 issuer/verifier 서버를 붙여 테스트할 때는 앱의 `실서버 issuer / verifier` 카드를 먼저 쓴다.
+
+### 입력값
+- `Core Base URL`: `https://dev-core-kyvc.khuoo.synology.me`
+- `KYC Level`: 서버 정책에 맞는 값
+- `Jurisdiction`: 서버 정책에 맞는 값
+- PEM, issuer seed, issuer account는 실서버 카드에서 입력하지 않는다. issuer 키와 DID 등록은 서버 내부에서 관리한다.
+- VC 인증 단계에서 issuer address나 issuer secret을 verifier로 보내지 않는다. verifier는 VC 안의 `issuer` DID와 서버에 등록된 DID Document로 issuer proof를 검증한다.
+
+### 동작
+- `실제 VC 요청`은 `POST /issuer/credentials/kyc` 를 호출한다.
+- `실제 Challenge 요청`은 `POST /verifier/presentations/challenges` 를 호출한다.
+- `실제 VC 인증 요청`은 현재 VC JSON을 `POST /verifier/credentials/verify` 로 보낸다.
+- issuer 응답이 오면 앱이 `VC 저장 / 검증` 카드의 VC JSON을 자동으로 채우고 `VC 저장`을 다시 실행한다.
+- verifier challenge가 오면 앱이 `Challenge` 입력칸을 채우고 로컬 challenge 저장도 같이 한다.
+
+### 추천 순서
+1. `Bridge 확인`
+2. `지갑 생성/조회`
+3. `실서버 issuer / verifier` 카드에서 `실제 VC 요청`
+4. `VC 저장 / 검증` 카드에서 `VC 저장 호출`
+5. `VC 저장 / 검증` 카드에서 `XRPL 상태 조회`
+6. `VC 저장 / 검증` 카드에서 `VC 인증`
+7. `XRPL 발급(디버그)` 또는 서버 발급 흐름으로 같은 VC에 대한 `CredentialAccept 제출`
+8. `VC 저장 / 검증` 카드에서 `XRPL 상태 조회` 결과 `active: true`, `accepted: true` 확인
+9. `실서버 issuer / verifier` 카드에서 `실제 VC 인증 요청`
+10. `실서버 issuer / verifier` 카드에서 `실제 Challenge 요청`
+11. `Key 서명 / VP` 카드에서 `VP 생성 호출`
+12. `Verifier 제출 호출`
+
+### 참고
+- 서버가 HTTPS를 안 열고 있으면 `Core Base URL`에 `http://...` 전체 주소를 직접 넣는다.
+- 서버가 `issuer_private_key_pem` 누락으로 422를 반환하면 dev-core 배포가 아직 PEM optional 계약으로 갱신되지 않은 상태다.
+- PEM 없이 실제 인증만 확인하려면 이미 발급된 VC를 `VC 저장 / 검증` 카드에 넣고 `실제 VC 인증 요청`을 실행한다.
+- 실서버 verifier가 `DID Document not found`를 반환하면 issuer DID가 core 서버에 등록되어 있지 않은 상태다. 앱은 VC의 `issuer` DID와 `proof.verificationMethod` DID 양쪽을 기준으로 `/dids/{account}/diddoc.json`를 조회해 verifier 요청에 포함하려고 시도한다.
+- VC의 `issuer`가 가리키는 계정과 `proof.verificationMethod`가 가리키는 계정이 다르면 verifier가 어느 DID를 기준으로 proof를 검증하는지 서버 계약과 맞춰야 한다. 서버에도 두 DID Document가 모두 등록되어 있거나, VC 발급 서버가 같은 issuer DID로 VC와 proof를 만들어야 한다.
+- `XRPL Credential status is not active`는 해당 VC의 XRPL Credential entry가 아직 holder에게 accepted 상태가 아니라는 뜻이다. issuer 발급 후 같은 VC의 `credentialStatus.issuer`, `credentialStatus.subject`, `credentialStatus.credentialType`으로 `CredentialAccept 제출`을 먼저 실행하고, `XRPL 상태 조회`에서 `active: true`, `accepted: true`가 나온 뒤 verifier 제출을 진행한다.
+- VP 제출 로그에서 `presentation.verifiableCredential[0]`와 요청의 `vcJson`이 서로 다른 VC라면 이전 VP가 남아 있는 상태다. 현재 UI는 VC가 바뀌면 기존 VP를 폐기하고, 제출 전에도 현재 VC와 VP 내부 VC가 다르면 제출을 차단한다. 이 경우 `실제 Challenge 요청` 후 현재 VC로 `VP 생성 호출`을 다시 실행한다.
+- issuer secret은 `VC 인증` 요청에 필요한 값이 아니다. 필요하다면 서버의 issuer DID 등록 또는 VC 발급 API 쪽에서만 사용된다.
+- `rIssuerAccountForTestnet`가 들어간 샘플 VC는 저장, 상태 조회, VP 생성, 서버 인증 모두 차단된다. 실제 테스트에는 issuer가 `did:xrpl:1:r...` 형태이고 `credentialStatus.issuer`도 같은 `r...` classic address인 VC를 써야 한다.
+- 디버그 카드에서 `Issuer Seed`에는 `s...` seed를, `Issuer Account`에는 `r...` classic address를 넣는다. 앱은 둘을 반대로 넣은 경우 화면에서 자동 교정한다.
+- XRPL 응답의 `tecDUPLICATE`는 새 트랜잭션 성공이 아니라 같은 ledger object가 이미 있다는 뜻이다. 앱은 이 경우를 “이미 존재”로 표시하고, 상태 확인은 `XRPL 상태 조회`에서 active 여부로 판단한다.
+- `XRPL 발급(디버그)` 카드는 issuer seed를 직접 넣는 개발용 흐름이다.
+- 실제 issuer/verifier 연동을 확인할 때는 디버그 카드보다 실서버 카드를 먼저 쓴다.

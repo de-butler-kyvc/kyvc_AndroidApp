@@ -26,7 +26,7 @@ import com.google.common.primitives.UnsignedLong
 import java.security.MessageDigest
 import java.time.Instant
 
-class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/") {
+class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/") {
     private val rpcUrl = rpcUrl
     private val xrplClient = XrplClient(rpcUrl.toHttpUrl())
     private val signatureService = BcSignatureService()
@@ -247,7 +247,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
                 address.contains("placeholder", ignoreCase = true) ||
                 address.contains("accountfortestnet", ignoreCase = true)
             ) {
-                "This looks like sample data. Replace it with a real XRPL testnet classic address."
+                "This looks like sample data. Replace it with a real XRPL devnet classic address."
             } else {
                 "Use the XRPL classic address itself, not a DID."
             }
@@ -270,7 +270,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
             )
         }.getOrElse { error ->
             throw IllegalArgumentException(
-                "$label must exist on XRPL testnet and be funded before submitting this transaction: ${error.message}",
+                "$label must exist on XRPL devnet and be funded before submitting this transaction: ${error.message}",
                 error
             )
         }

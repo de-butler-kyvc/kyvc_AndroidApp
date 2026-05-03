@@ -7,14 +7,10 @@ import org.xrpl.xrpl4j.model.client.common.LedgerSpecifier
 import org.xrpl.xrpl4j.model.transactions.Address
 import org.xrpl.xrpl4j.model.transactions.CredentialAccept
 import org.xrpl.xrpl4j.model.transactions.XrpCurrencyAmount
-import org.xrpl.xrpl4j.wallet.Wallet
 import org.xrpl.xrpl4j.crypto.signing.SingleSignedTransaction
 import org.xrpl.xrpl4j.crypto.keys.Seed
-import org.xrpl.xrpl4j.crypto.keys.PrivateKey
-import org.xrpl.xrpl4j.crypto.signing.SingleSignedTransaction
 import org.xrpl.xrpl4j.crypto.signing.bc.BcSignatureService
 import org.xrpl.xrpl4j.model.transactions.CredentialType
-
 import org.xrpl.xrpl4j.model.client.transactions.SubmitResult
 import org.xrpl.xrpl4j.crypto.keys.PublicKey
 

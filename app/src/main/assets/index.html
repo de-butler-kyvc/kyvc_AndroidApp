@@ -244,7 +244,24 @@
 
     <section class="card">
       <div class="card-head">
-        <h2>2. VC 저장</h2>
+        <h2>2. Holder 지갑</h2>
+        <span class="mini-status" id="walletStatus">미생성</span>
+      </div>
+      <p class="desc">Android 내부 Keystore로 보호되는 holder seed를 만들고 XRPL account/DID를 확인합니다.</p>
+      <label>Holder Account</label>
+      <input id="walletAccount" readonly />
+      <label>Holder DID</label>
+      <input id="walletDid" readonly />
+      <div class="grid mt8">
+        <button onclick="createWallet()">지갑 생성/조회</button>
+        <button class="secondary" onclick="getWalletInfo()">지갑 정보 조회</button>
+      </div>
+      <div class="result-panel" id="walletResult"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>3. VC 저장</h2>
         <span class="mini-status" id="vcStatus">미저장</span>
       </div>
       <p class="desc">발급된 법인 KYC VC를 Wallet에 저장하는 테스트입니다.</p>
@@ -264,12 +281,20 @@
 
     <section class="card">
       <div class="card-head">
-        <h2>3. XRPL 기록</h2>
+        <h2>4. XRPL 기록</h2>
         <span class="mini-status" id="xrplStatus">대기</span>
       </div>
       <p class="desc">VC 해시 또는 상태 메타데이터를 XRPL에 기록하는 테스트입니다.</p>
       <label>Credential Hash</label>
       <input id="xrplHash" />
+      <label>Credential ID</label>
+      <input id="credentialId" placeholder="저장한 VC id" />
+      <label>Issuer Account</label>
+      <input id="issuerAccount" placeholder="rIssuer..." />
+      <label>Holder Account</label>
+      <input id="holderAccount" placeholder="rHolder..." />
+      <label>Credential Type (hex)</label>
+      <input id="credentialType" placeholder="56435F..." />
       <div class="grid mt8">
         <button class="secondary" onclick="makeHash()">해시 생성</button>
         <button onclick="submitToXRPL()">XRPL 기록 호출</button>
@@ -279,25 +304,27 @@
 
     <section class="card">
       <div class="card-head">
-        <h2>4. Key 서명</h2>
+        <h2>5. Key 서명</h2>
         <span class="mini-status" id="signStatus">대기</span>
       </div>
       <p class="desc">VP 제출 전 Holder 키로 challenge 값을 서명하는 상황을 가정합니다.</p>
-      <label>서명 메시지</label>
+      <label>Challenge</label>
       <input id="signMessage" />
+      <label>Domain</label>
+      <input id="signDomain" value="kyvc.local" />
       <div class="grid mt8">
         <button class="secondary" onclick="makeChallenge()">Challenge 생성</button>
-        <button class="warn" onclick="signMessage()">서명 호출</button>
+        <button class="warn" onclick="signMessage()">VP 생성 호출</button>
       </div>
       <div class="result-panel" id="signResult"></div>
     </section>
 
     <section class="card">
       <div class="card-head">
-        <h2>5. QR 액션</h2>
+        <h2>6. QR 액션</h2>
         <span class="mini-status" id="qrStatus">대기</span>
       </div>
-      <p class="desc">금융사 화면에서 제시한 VC 발급 QR 또는 VP 요청 QR을 스캔하는 테스트입니다.</p>
+      <p class="desc">발급자/검증자 화면에서 제시한 VC 발급 QR 또는 VP 요청 QR을 스캔하는 테스트입니다.</p>
       <div class="qr-box" id="qrPreview">QR PREVIEW</div>
       <select id="qrType" onchange="updateQRPreview()">
         <option value="VC_ISSUE">VC 발급 QR</option>
@@ -313,7 +340,7 @@
 
     <section class="card">
       <div class="card-head">
-        <h2>6. 테스트 로그</h2>
+        <h2>7. 테스트 로그</h2>
         <span class="mini-status ok" id="logStatus">READY</span>
       </div>
       <div class="grid3 mt8">
@@ -333,14 +360,24 @@
     const sampleVC = {
       id: "vc-kyc-001",
       type: ["VerifiableCredential", "CorporateKycCredential"],
-      issuer: "did:kyvc:issuer:bank-a",
+      issuer: "did:xrpl:1:rIssuerAccountForTestnet",
       issuanceDate: new Date().toISOString(),
+      validFrom: new Date().toISOString(),
+      expirationDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
       credentialSubject: {
+        id: "did:xrpl:1:rHolderAccountForTestnet",
         corporateName: "테스트 법인 주식회사",
         businessNumber: "123-45-67890",
         representativeName: "홍길동",
         beneficialOwner: "김실소유",
         kycStatus: "APPROVED"
+      },
+      credentialStatus: {
+        type: "XRPLCredentialStatus",
+        issuer: "rIssuerAccountForTestnet",
+        subject: "rHolderAccountForTestnet",
+        credentialType: "56435F5354415455535F56313A54455354",
+        vcCoreHash: "sample-vc-core-hash"
       },
       proof: {
         type: "Ed25519Signature2020",
@@ -422,6 +459,39 @@
       return out;
     }
 
+    function applyWallet(result) {
+      if (!result?.account) return;
+      $("walletAccount").value = result.account;
+      $("walletDid").value = result.did;
+      $("holderAccount").value = result.account;
+      syncVcWithWallet();
+    }
+
+    function syncVcWithWallet() {
+      const account = $("walletAccount").value.trim();
+      const did = $("walletDid").value.trim();
+      if (!account || !did) return null;
+      const vc = JSON.parse($("vcInput").value);
+      vc.credentialSubject.id = did;
+      vc.credentialStatus.subject = account;
+      $("vcInput").value = JSON.stringify(vc, null, 2);
+      $("holderAccount").value = account;
+      renderVCCard(vc);
+      return vc;
+    }
+
+    function createWallet() {
+      callAndroid("createWallet", { overwrite: false });
+      $("walletStatus").textContent = "생성 요청됨";
+      $("walletStatus").className = "mini-status ok";
+      showToast("지갑 생성 요청");
+    }
+
+    function getWalletInfo() {
+      callAndroid("getWalletInfo", {});
+      showToast("지갑 정보 조회 요청");
+    }
+
     function randomizeVC() {
       const names = ["테스트 법인 주식회사", "아주 핀테크 주식회사", "KYvC 데모 컴퍼니", "블루체인 코리아"];
       const vc = structuredClone(sampleVC);
@@ -430,7 +500,9 @@
       vc.credentialSubject.corporateName = names[Math.floor(Math.random() * names.length)];
       vc.credentialSubject.businessNumber = `${Math.floor(Math.random()*900+100)}-${Math.floor(Math.random()*90+10)}-${Math.floor(Math.random()*90000+10000)}`;
       vc.proof.signature = randomHex(48);
+      vc.credentialStatus.vcCoreHash = randomHex(64);
       $("vcInput").value = JSON.stringify(vc, null, 2);
+      syncVcWithWallet();
       renderVCCard(vc);
       log("VC 샘플 변경", vc);
     }
@@ -443,15 +515,17 @@
 
     function saveVC() {
       try {
-        const vc = JSON.parse($("vcInput").value);
+        const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
         renderVCCard(vc);
         callAndroid("saveVC", vc);
-        state.vc += 1;
-        updateSummary();
-        $("vcStatus").textContent = "저장 요청됨";
-        $("vcStatus").className = "mini-status ok";
+        $("credentialId").value = vc.id || "";
+        $("issuerAccount").value = vc.credentialStatus?.issuer || "";
+        $("holderAccount").value = vc.credentialStatus?.subject || "";
+        $("credentialType").value = vc.credentialStatus?.credentialType || "";
+        $("vcStatus").textContent = "저장 중";
+        $("vcStatus").className = "mini-status";
         panel("vcResult", `<b>저장 요청:</b> ${vc.id}<br/>법인명: ${vc.credentialSubject.corporateName}`);
-        showToast("VC 저장 호출 완료");
+        showToast("VC 저장 요청됨");
       } catch (e) {
         panel("vcResult", `<b>JSON 오류:</b> ${e.message}`);
         log("VC JSON 형식 오류", { message: e.message });
@@ -466,13 +540,21 @@
     function submitToXRPL() {
       const hash = $("xrplHash").value.trim();
       if (!hash) return showToast("해시를 입력하세요");
-      callAndroid("submitToXRPL", { hash, type: "VC_STATUS_HASH", network: "testnet" });
-      state.xrpl += 1;
-      updateSummary();
-      $("xrplStatus").textContent = "기록 요청됨";
-      $("xrplStatus").className = "mini-status ok";
+      const vc = syncVcWithWallet();
+      callAndroid("submitToXRPL", {
+        hash,
+        credentialId: $("credentialId").value.trim(),
+        issuerAccount: $("issuerAccount").value.trim(),
+        holderAccount: $("holderAccount").value.trim(),
+        credentialType: $("credentialType").value.trim(),
+        credentialStatus: vc?.credentialStatus,
+        type: "CredentialAccept",
+        network: "testnet"
+      });
+      $("xrplStatus").textContent = "제출 중";
+      $("xrplStatus").className = "mini-status";
       panel("xrplResult", `<b>XRPL 기록 요청:</b><br/>${hash}`);
-      showToast("XRPL 기록 호출 완료");
+      showToast("XRPL 기록 요청됨");
     }
 
     function makeChallenge() {
@@ -483,13 +565,17 @@
     function signMessage() {
       const message = $("signMessage").value.trim();
       if (!message) return showToast("메시지를 입력하세요");
-      callAndroid("signMessage", { message, algorithm: "Ed25519" });
-      state.sign += 1;
-      updateSummary();
-      $("signStatus").textContent = "서명 요청됨";
-      $("signStatus").className = "mini-status ok";
-      panel("signResult", `<b>서명 요청:</b><br/>${message}`);
-      showToast("서명 호출 완료");
+      const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
+      callAndroid("signMessage", {
+        challenge: message,
+        domain: $("signDomain").value.trim(),
+        credentialId: $("credentialId").value.trim(),
+        vcJson: JSON.stringify(vc)
+      });
+      $("signStatus").textContent = "VP 생성 중";
+      $("signStatus").className = "mini-status";
+      panel("signResult", `<b>VP 생성 요청:</b><br/>${message}`);
+      showToast("VP 생성 요청됨");
     }
 
     function updateQRPreview() {
@@ -508,9 +594,9 @@
       };
       callAndroid("scanQRCode", payload);
       $("qrStatus").textContent = "스캔 요청됨";
-      $("qrStatus").className = "mini-status ok";
+      $("qrStatus").className = "mini-status";
       panel("qrResult", `<b>QR 스캔 요청:</b> ${purpose}<br/>requestId: ${payload.requestId}`);
-      showToast("QR 스캔 호출 완료");
+      showToast("QR 스캔 요청됨");
     }
 
     function simulateAndroidCallback() {
@@ -551,7 +637,57 @@
       try {
         const result = typeof resultJson === "string" ? JSON.parse(resultJson) : resultJson;
         log("Android → Web 결과 수신", result);
-        showToast("Android 콜백 수신");
+        if (result.action === "SUBMIT_TO_XRPL") {
+          $("xrplStatus").textContent = result.ok ? "제출 완료" : "제출 실패";
+          $("xrplStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("xrplResult", result.ok
+            ? `<b>XRPL 제출 완료:</b><br/>${result.txHash}<br/>${result.engineResult}`
+            : `<b>XRPL 제출 실패:</b><br/>${result.error}`);
+          if (result.ok) {
+            state.xrpl += 1;
+            updateSummary();
+          }
+        }
+        if (result.action === "CREATE_WALLET" || result.action === "GET_WALLET_INFO") {
+          $("walletStatus").textContent = result.ok ? "준비됨" : "오류";
+          $("walletStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          if (result.ok) {
+            applyWallet(result);
+            panel("walletResult", `<b>Holder Account:</b><br/>${result.account}<br/><b>DID:</b><br/>${result.did}`);
+          } else {
+            panel("walletResult", `<b>지갑 오류:</b><br/>${result.error}`);
+          }
+        }
+        if (result.action === "SAVE_VC") {
+          $("vcStatus").textContent = result.ok ? "저장 완료" : "저장 실패";
+          $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          if (result.ok) {
+            state.vc += 1;
+            updateSummary();
+          }
+        }
+        if (result.action === "SIGN_MESSAGE") {
+          $("signStatus").textContent = result.ok ? "VP 생성 완료" : "VP 생성 실패";
+          $("signStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("signResult", result.ok
+            ? `<b>Proof:</b><br/>${result.proofValue}<br/><b>Holder:</b><br/>${result.holder}`
+            : `<b>VP 생성 실패:</b><br/>${result.error}`);
+          if (result.ok) {
+            state.sign += 1;
+            updateSummary();
+          }
+        }
+        if (result.action === "SCAN_QR_CODE") {
+          $("qrStatus").textContent = result.ok ? (result.mode === "scanned" ? "스캔 완료" : "요청 수신") : "스캔 실패";
+          $("qrStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("qrResult", result.ok
+            ? `<b>QR ${result.mode === "scanned" ? "스캔 완료" : "요청 수신"}:</b><br/>${result.qrData || result.requestId}<br/>${result.endpoint ? `callback: ${result.endpoint}` : ""}`
+            : `<b>QR 스캔 실패:</b><br/>${result.error}`);
+          if (result.ok && result.qrData && typeof window.onQRCodeScanned === "function") {
+            window.onQRCodeScanned(result.qrData);
+          }
+        }
+        showToast(result.ok === false ? "요청 실패" : "요청 성공");
       } catch (e) {
         log("Android → Web 문자열 수신", { value: resultJson });
       }
@@ -576,10 +712,15 @@
 
     $("vcInput").value = JSON.stringify(sampleVC, null, 2);
     $("xrplHash").value = randomHex(64);
+    $("credentialId").value = sampleVC.id;
+    $("issuerAccount").value = sampleVC.credentialStatus.issuer;
+    $("holderAccount").value = sampleVC.credentialStatus.subject;
+    $("credentialType").value = sampleVC.credentialStatus.credentialType;
     $("signMessage").value = "vp-submit-request-" + Date.now();
     updateQRPreview();
     updateSummary();
     checkBridge();
+    getWalletInfo();
   </script>
 </body>
 </html>

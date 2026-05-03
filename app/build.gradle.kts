@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.serialization)
     alias(libs.plugins.ksp)
@@ -7,12 +8,12 @@ plugins {
 
 android {
     namespace = "com.example.kyvc_androidapp"
-    compileSdk = 36 
+    compileSdk = 35 
 
     defaultConfig {
         applicationId = "com.example.kyvc_androidapp"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -32,8 +33,28 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
+    kotlin {
+        jvmToolchain(11)
+    }
+
     buildFeatures {
         compose = true
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            excludes += "META-INF/INDEX.LIST"
+        }
+    }
+
+    configurations.all {
+        resolutionStrategy {
+            force(libs.bouncycastle.bcprov)
+            exclude(group = "org.bouncycastle", module = "bcprov-jdk15to18")
+        }
     }
 }
 
@@ -53,10 +74,19 @@ dependencies {
     ksp(libs.androidx.room.compiler)
 
     // XRPL
-    implementation(libs.xrpl4j.model)
+    implementation(libs.xrpl4j.core)
     implementation(libs.xrpl4j.client)
-    implementation(libs.xrpl4j.crypto.bouncycastle)
     implementation(libs.bouncycastle.bcprov)
+
+    // Camera / QR scanning
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode.scanning)
+
+    // Guava (Force Android version to resolve capabilities conflict)
+    implementation(libs.google.guava)
 
     // Crypto & Utilities
     implementation(libs.jcs)

@@ -1,24 +1,35 @@
 package com.example.kyvc_androidapp.wallet.core
 
 import com.example.kyvc_androidapp.domain.model.XrplAccount
-import org.xrpl.xrpl4j.wallet.DefaultWalletFactory
-import org.xrpl.xrpl4j.wallet.Wallet
+import com.google.common.collect.Lists
+import com.google.common.primitives.UnsignedInteger
+import org.xrpl.xrpl4j.codec.addresses.AddressBase58
+import org.xrpl.xrpl4j.crypto.keys.Base58EncodedSecret
+import org.xrpl.xrpl4j.crypto.keys.Seed
 
 class WalletManager {
-    private val walletFactory = DefaultWalletFactory.getInstance()
-
-    fun createRandomWallet(isTestnet: Boolean = true): Wallet {
-        return walletFactory.randomWallet(isTestnet)
+    fun createRandomSeed(): Seed {
+        return Seed.secp256k1Seed()
     }
 
-    fun fromSeed(seed: String, isTestnet: Boolean = true): Wallet {
-        return walletFactory.fromSeed(seed, isTestnet)
+    fun fromSeed(seed: String): Seed {
+        return Seed.fromBase58EncodedSecret(Base58EncodedSecret.of(seed))
     }
 
-    fun getXrplAccount(wallet: Wallet): XrplAccount {
+    fun seedToBase58(seed: Seed): String {
+        val decodedSeed = seed.decodedSeed()
+        return AddressBase58.encode(
+            decodedSeed.bytes(),
+            Lists.newArrayList(decodedSeed.version()),
+            UnsignedInteger.valueOf(decodedSeed.bytes().length().toLong())
+        )
+    }
+
+    fun getXrplAccount(seed: Seed): XrplAccount {
+        val publicKey = seed.deriveKeyPair().publicKey()
         return XrplAccount(
-            address = wallet.classicAddress().value(),
-            publicKey = wallet.publicKey()
+            address = publicKey.deriveAddress().value(),
+            publicKey = publicKey.base16Value()
         )
     }
 }

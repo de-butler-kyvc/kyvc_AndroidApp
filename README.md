@@ -48,7 +48,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 
 ## 🚀 향후 작업 계획
 - [x] **MCP 연동 환경 구성**: AI 어시스턴트 협업을 위한 `mcp-context.md` 및 환경 설정 완료
-- [ ] 베이스 아키텍처 설정 (Clean Architecture + MVVM)
+- [x] 베이스 아키텍처 설정 (Clean Architecture + MVVM)
 - [x] **WebView Bridge 구현**: Web-to-Native 통신 인터페이스 추가 및 테스트 페이지 연동 완료
 - [x] **Blockchain Wallet 연동**: 경량 지갑 기반 구축 (계정 생성, XRPL 통신 기초)
 - [x] **CredentialAccept 제출 연동**: WebView 요청 기반 XRPL testnet 제출, holder account 검증, tx hash 저장
@@ -61,6 +61,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [x] **저장 VC 목록/상태 갱신**: 로컬 credential 목록 조회와 XRPL 상태 일괄 동기화
 - [x] **Challenge Guard**: verifier challenge 등록, 만료 확인, 중복 제출 차단
 - [x] **Issuer proof 검증 지원**: issuer DID Document가 있는 VC의 proof 서명 검증
+- [x] **기본 아키텍처 분리**: AppContainer, CredentialRepository, MainViewModel로 데이터/진입점 구조화
 
 ## 여기서 더 구현할 수 있는 것
 - **Issuer proof 검증**

@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
@@ -17,20 +18,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.lifecycleScope
 import com.example.kyvc_androidapp.ui.theme.Kyvc_AndroidAppTheme
-
-import androidx.room.Room
 import com.example.kyvc_androidapp.bridge.WalletBridge
-import com.example.kyvc_androidapp.data.local.AppDatabase
 import com.example.kyvc_androidapp.scanner.QrScannerActivity
-import com.example.kyvc_androidapp.wallet.core.WalletManager
-import com.example.kyvc_androidapp.wallet.core.WalletStateStore
-import com.example.kyvc_androidapp.wallet.core.XrplClientHelper
+import com.example.kyvc_androidapp.ui.main.MainViewModel
 
 class MainActivity : ComponentActivity() {
-    private lateinit var db: AppDatabase
+    private val mainViewModel: MainViewModel by viewModels()
     private lateinit var bridge: WalletBridge
-    private val walletManager = WalletManager()
-    private val xrplHelper = XrplClientHelper()
     private val qrScanLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val requestJson = result.data?.getStringExtra(QrScannerActivity.EXTRA_REQUEST_JSON)
         val qrData = result.data?.getStringExtra(QrScannerActivity.EXTRA_QR_DATA)
@@ -48,19 +42,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        db = Room.databaseBuilder(
-            applicationContext,
-            AppDatabase::class.java, "kyvc-wallet-db"
-        ).build()
 
         enableEdgeToEdge()
+        val container = mainViewModel.appContainer
         bridge = WalletBridge(
             context = this,
             scope = lifecycleScope,
-            walletStateStore = WalletStateStore(applicationContext, walletManager),
-            xrplHelper = xrplHelper,
-            db = db,
+            walletStateStore = container.walletStateStore,
+            xrplHelper = container.xrplHelper,
+            credentialRepository = container.credentialRepository,
             launchQrScanner = { requestJson ->
                 val intent = Intent(this, QrScannerActivity::class.java).apply {
                     putExtra(QrScannerActivity.EXTRA_REQUEST_JSON, requestJson)

@@ -6,8 +6,8 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.Toast
-import com.example.kyvc_androidapp.data.local.AppDatabase
 import com.example.kyvc_androidapp.data.local.entity.CredentialEntity
+import com.example.kyvc_androidapp.data.repository.CredentialRepository
 import com.example.kyvc_androidapp.wallet.core.VpSigner
 import com.example.kyvc_androidapp.wallet.core.WalletStateStore
 import com.example.kyvc_androidapp.wallet.core.XrplClientHelper
@@ -54,7 +54,7 @@ class WalletBridge(
     private val scope: CoroutineScope,
     private val walletStateStore: WalletStateStore,
     private val xrplHelper: XrplClientHelper,
-    private val db: AppDatabase,
+    private val credentialRepository: CredentialRepository,
     private val launchQrScanner: (String) -> Unit
 ) {
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
@@ -147,7 +147,7 @@ class WalletBridge(
                     validUntil = json.text("validUntil") ?: json.text("expirationDate").orEmpty()
                 )
                 require(entity.credentialId.isNotBlank()) { "credentialId or id is required" }
-                db.credentialDao().insertCredential(entity)
+                credentialRepository.insertCredential(entity)
                 scope.launch(Dispatchers.Main) {
                     Toast.makeText(context, "VC Saved Successfully", Toast.LENGTH_SHORT).show()
                     emitCallback("SAVE_VC", true) {
@@ -173,7 +173,7 @@ class WalletBridge(
                 val request = Json.parseToJsonElement(jsonPayload).jsonObject
                 val savedCredential = request.text("credentialId")
                     ?.takeIf { it.isNotBlank() }
-                    ?.let { db.credentialDao().getCredentialById(it) }
+                    ?.let { credentialRepository.getCredentialById(it) }
                 val vcJson = resolveVcJson(request)
                 val vc = Json.parseToJsonElement(vcJson).jsonObject
                 validateCredentialAgainstWallet(vc, walletStateStore.getWalletStateOrNull())
@@ -208,7 +208,7 @@ class WalletBridge(
                         else -> savedCredential
                     }
                     if (nextCredential != savedCredential) {
-                        db.credentialDao().updateCredential(nextCredential)
+                        credentialRepository.updateCredential(nextCredential)
                     }
                 }
 
@@ -252,7 +252,7 @@ class WalletBridge(
                 val request = Json.parseToJsonElement(jsonPayload).jsonObject
                 val savedCredential = request.text("credentialId")
                     ?.takeIf { it.isNotBlank() }
-                    ?.let { db.credentialDao().getCredentialById(it) }
+                    ?.let { credentialRepository.getCredentialById(it) }
                 val vcJson = resolveVcJson(request)
                 val vc = Json.parseToJsonElement(vcJson).jsonObject
                 val walletState = walletStateStore.getWalletStateOrNull()
@@ -349,7 +349,7 @@ class WalletBridge(
     fun listCredentials(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                val credentials = db.credentialDao().getAllCredentialsOnce()
+                val credentials = credentialRepository.getAllCredentialsOnce()
                 withContext(Dispatchers.Main) {
                     emitCallback("LIST_CREDENTIALS", true) {
                         put(
@@ -391,7 +391,7 @@ class WalletBridge(
     fun refreshAllCredentialStatuses(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                val credentials = db.credentialDao().getAllCredentialsOnce()
+                val credentials = credentialRepository.getAllCredentialsOnce()
                 val results = credentials.map { credential ->
                     val status = xrplHelper.getCredentialStatus(
                         issuerAddress = credential.issuerAccount,
@@ -405,7 +405,7 @@ class WalletBridge(
                         else -> credential
                     }
                     if (updated != credential) {
-                        db.credentialDao().updateCredential(updated)
+                        credentialRepository.updateCredential(updated)
                     }
                     buildJsonObject {
                         put("credentialId", credential.credentialId)
@@ -486,7 +486,7 @@ class WalletBridge(
 
                 val savedCredential = request.text("credentialId")
                     ?.takeIf { it.isNotBlank() }
-                    ?.let { db.credentialDao().getCredentialById(it) }
+                    ?.let { credentialRepository.getCredentialById(it) }
                 val vcJson = resolveVcJson(request)
                 val vcObject = Json.parseToJsonElement(vcJson).jsonObject
                 validateCredentialAgainstWallet(vcObject, walletStateStore.getWalletStateOrNull())
@@ -524,7 +524,7 @@ class WalletBridge(
                 val txHash = result.transactionResult().hash().value()
 
                 savedCredential?.let {
-                    db.credentialDao().updateCredential(
+                    credentialRepository.updateCredential(
                         it.copy(
                             acceptedAt = nowUtcIso(),
                             credentialAcceptHash = txHash
@@ -1135,7 +1135,7 @@ class WalletBridge(
         request.text("credentialId")
             ?.takeIf { it.isNotBlank() }
             ?.let { credentialId ->
-                db.credentialDao().getCredentialById(credentialId)?.vcJson?.let { return it }
+                credentialRepository.getCredentialById(credentialId)?.vcJson?.let { return it }
             }
         throw IllegalArgumentException("vcJson, credential, or credentialId is required")
     }

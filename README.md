@@ -104,6 +104,8 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `submitCredentialCreate`는 issuer가 ledger에 `CredentialCreate`를 올릴 때 쓴다. 이 요청은 `issuerSeed`, `subjectAccount`, `credentialType`을 받으며, issuer seed는 앱에 저장하지 않는다. `vcJson`이 있으면 거기서 subject/type을 보강해서 사용한다. 성공/실패 결과는 `SUBMIT_CREDENTIAL_CREATE` action으로 반환된다.
 
+`CredentialCreate`가 `tecNO_TARGET`로 끝나면 subject account가 XRPL testnet에서 아직 활성화되지 않았다는 뜻이다. 이 경우 holder wallet을 faucet으로 충전해 ledger에 실제 계좌를 만든 뒤 다시 시도해야 한다.
+
 실제 테스트넷 값을 넣을 때는 `issuerAccount`에 XRPL testnet의 실제 classic address를 넣고, VC JSON의 `issuer` / `credentialStatus.issuer`도 같은 계정으로 맞춘다. DID는 `did:xrpl:1:{account}` 형태를 쓰되, `account` 부분은 반드시 실제 classic address여야 한다. `holderAccount`는 앱의 `getWalletInfo` 결과로 자동 채워지는 holder account를 쓰면 된다.
 
 예를 들어 placeholder인 `rIssuerAccountForTestnet` 같은 문자열은 XRPL 주소가 아니므로 status 조회, verifier 제출, XRPL 제출 모두 실패한다. 샘플 VC를 쓸 때는 issuer 관련 필드를 실계정으로 교체하고, VC 저장 후 다시 status 조회를 해야 한다.

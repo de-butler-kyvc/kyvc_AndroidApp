@@ -43,6 +43,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         val publicKey: PublicKey = keyPair.publicKey()
         val address = publicKey.deriveAddress()
 
+        ensureAccountExists(validatedIssuer, "issuerAddress")
         val accountInfo = xrplClient.accountInfo(
             AccountInfoRequestParams.builder()
                 .account(address)
@@ -75,6 +76,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         val publicKey: PublicKey = keyPair.publicKey()
         val issuerAddress = publicKey.deriveAddress()
 
+        ensureAccountExists(validatedSubject, "subjectAddress")
         val accountInfo = xrplClient.accountInfo(
             AccountInfoRequestParams.builder()
                 .account(issuerAddress)
@@ -256,6 +258,22 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
 
     private fun utf8ToHex(value: String): String {
         return value.toByteArray(Charsets.UTF_8).joinToString(separator = "") { "%02X".format(it) }
+    }
+
+    private suspend fun ensureAccountExists(address: String, label: String) {
+        runCatching {
+            xrplClient.accountInfo(
+                AccountInfoRequestParams.builder()
+                    .account(Address.of(address))
+                    .ledgerSpecifier(LedgerSpecifier.VALIDATED)
+                    .build()
+            )
+        }.getOrElse { error ->
+            throw IllegalArgumentException(
+                "$label must exist on XRPL testnet and be funded before submitting this transaction: ${error.message}",
+                error
+            )
+        }
     }
 
     data class CredentialStatusResult(

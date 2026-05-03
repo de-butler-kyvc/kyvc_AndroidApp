@@ -294,28 +294,31 @@
 
     <section class="card">
       <div class="card-head">
-        <h2>4. XRPL 기록</h2>
+        <h2>4. XRPL 발급 / 수락</h2>
         <span class="mini-status" id="xrplStatus">대기</span>
       </div>
-      <p class="desc">VC 해시 또는 상태 메타데이터를 XRPL에 기록하는 테스트입니다.</p>
-      <label>Credential Hash</label>
-      <input id="xrplHash" />
-      <label>Credential ID</label>
-      <input id="credentialId" placeholder="저장한 VC id" />
-      <label>Issuer Account</label>
-      <input id="issuerAccount" placeholder="rIssuer..." />
+      <p class="desc">Issuer가 먼저 CredentialCreate로 ledger entry를 만들고, Holder가 그 다음 CredentialAccept를 제출합니다. subject 계정은 XRPL testnet에서 이미 활성화되어 있어야 합니다.</p>
+      <div class="mini-status warn" style="display:inline-block;margin-bottom:8px;">순서: 발급 → 저장 → 수락 → 상태 조회</div>
       <label>Issuer Seed</label>
       <input id="issuerSeed" type="password" autocomplete="off" placeholder="테스트넷 issuer seed" />
+      <label>Issuer Account</label>
+      <input id="issuerAccount" placeholder="rIssuer..." />
       <label>Holder Account</label>
       <input id="holderAccount" placeholder="rHolder..." />
       <label>Credential Type (hex)</label>
       <input id="credentialType" placeholder="56435F..." />
-      <div class="grid mt8">
-        <button class="secondary" onclick="makeHash()">해시 생성</button>
-        <button onclick="submitToXRPL()">XRPL 기록 호출</button>
-      </div>
       <div class="mt8">
         <button class="ok" onclick="submitCredentialCreate()">CredentialCreate 호출</button>
+      </div>
+      <div class="desc" style="margin-top:10px;">Holder 수락용 값은 아래에서 다시 확인합니다. 이미 만든 holder account가 testnet에서 활성화되어 있지 않으면 `tecNO_TARGET`가 뜹니다.</div>
+      <label>Credential ID</label>
+      <input id="credentialId" placeholder="저장한 VC id" />
+      <label>Credential Hash</label>
+      <input id="xrplHash" />
+      <div class="mini-status" style="display:inline-block;margin-top:8px;">Holder 수락</div>
+      <div class="grid mt8">
+        <button class="secondary" onclick="makeHash()">해시 생성</button>
+        <button onclick="submitToXRPL()">CredentialAccept 제출</button>
       </div>
       <div class="result-panel" id="xrplResult"></div>
     </section>

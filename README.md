@@ -9,6 +9,21 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Min SDK**: 24
 - **Target SDK**: 36
 
+## 용어 정리
+- **Holder Wallet**: VC를 보관하고, XRPL에서 `CredentialAccept`를 제출하는 지갑 앱입니다.
+- **Holder Account**: XRPL 상의 holder 계정입니다. 이 계정으로 트랜잭션 서명과 상태 확인을 합니다.
+- **DID**: 분산 신원 식별자입니다. 이 프로젝트에서는 `did:xrpl:1:{account}` 형식을 사용합니다.
+- **VC(Verifiable Credential)**: 발급자가 만든 증명서 원문입니다. 앱은 이를 저장하고 검증합니다.
+- **VP(Verifiable Presentation)**: holder가 verifier에게 제출하는 증명 묶음입니다. VC와 proof를 함께 담습니다.
+- **Challenge**: verifier가 VP 제출 전에 주는 일회성 값입니다. 재사용하면 안 됩니다.
+- **CredentialAccept**: holder가 XRPL ledger에서 VC를 수락하는 트랜잭션입니다.
+- **CredentialStatus**: XRPL ledger에서 VC의 active/inactive 상태를 나타내는 정보입니다.
+- **CredentialType**: XRPL ledger entry를 식별하는 타입 값입니다. VC와 XRPL status 조회에서 함께 사용합니다.
+- **vcCoreHash**: VC 본문을 canonical JSON으로 정규화한 뒤 계산한 핵심 해시입니다.
+- **Holder DID Document**: verifier가 VP proof 검증에 쓰는 holder 공개키 문서입니다.
+- **Proof**: VC 또는 VP가 서명되었음을 증명하는 메타데이터입니다.
+- **Canonical JSON**: 키 순서를 고정하고 공백을 제거한 표준화 JSON입니다. 해시와 서명 입력에 사용합니다.
+
 ## 📌 주요 작업 내용
 ### Wallet 및 Bridge 기능 구현 (2025-05-22)
 - **Infrastructure**: Room DB, XRPL4J(6.0.0), JCS(Json Canonicalization), Kotlin Serialization 설정 완료
@@ -40,6 +55,28 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [ ] **VC(Verifiable Credentials) 인증 시스템**: 실데이터 기반 VC 대조 및 인증 로직 고도화
 - [x] **VC(Verifiable Credentials) 인증 시스템**: canonical hash, proof 구조, XRPL active 상태 검증
 - [x] **Verifier 제출 연동**: `/verifier/presentations/verify` 요청 구성 및 challenge 사용 상태 처리
+
+## 여기서 더 구현할 수 있는 것
+- **Issuer proof 검증**
+  - VC 저장 시 issuer 공개키로 VC proof를 직접 검증
+  - 현재는 주로 형식, 계정 정합성, XRPL 상태를 검증한다
+- **Challenge 보관/만료 관리**
+  - verifier challenge를 로컬에 저장하고 만료 전에만 VP 제출 허용
+  - 이미 사용한 challenge 재사용 차단
+- **QR 요청 파서 강화**
+  - QR 안의 실제 요청 스키마를 분리해서 `VC 발급`, `VP 제출`, `로그인`을 명확히 구분
+- **백업/복구**
+  - holder seed 또는 복구용 백업 키를 안전하게 내보내고 복원하는 흐름 추가
+- **VC 목록 화면**
+  - 저장된 VC를 리스트로 보여주고, active/expired/revoked 상태를 한눈에 확인
+- **상태 자동 갱신**
+  - 앱 시작 시 또는 주기적으로 XRPL status를 재조회해서 저장된 VC 상태를 동기화
+- **실제 verifier 서버 연동 안정화**
+  - 현재는 검증 요청 포맷을 맞추는 수준이므로, 운영용 endpoint/응답 스키마에 맞춘 정교화 필요
+- **오류 메시지 세분화**
+  - `holder mismatch`, `expired`, `inactive`, `verificationMethod not authorized` 같은 실패 원인을 UI에 분리 표시
+- **테스트 벡터 추가**
+  - VC hash, VP proof, XRPL status 계산 결과를 고정 테스트로 만들어 회귀 방지
 
 ## WebView Bridge 요청 형식
 

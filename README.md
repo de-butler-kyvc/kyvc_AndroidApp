@@ -105,6 +105,8 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 예를 들어 placeholder인 `rIssuerAccountForTestnet` 같은 문자열은 XRPL 주소가 아니므로 status 조회, verifier 제출, XRPL 제출 모두 실패한다. 샘플 VC를 쓸 때는 issuer 관련 필드를 실계정으로 교체하고, VC 저장 후 다시 status 조회를 해야 한다.
 
+웹 화면에서 `issuerAccount`를 바꾸면 현재 `vcInput`의 `issuer`와 `credentialStatus.issuer`도 같이 갱신되도록 연결되어 있다. 즉, issuer 입력칸만 바꾼 뒤 `saveVC`나 `signMessage`를 눌러도 VC JSON이 같은 값으로 맞춰진다. 다만 이미 DB에 저장된 예전 VC는 자동으로 바뀌지 않으므로, 필요하면 다시 저장해야 한다.
+
 `scanQRCode`는 발급자/검증자가 제시하는 요청 QR을 읽는 용도다. 현재 구현은 QR에 담긴 요청 JSON 또는 텍스트를 읽어 `requestId`, `purpose`, `endpoint`, `expiresInSec`, `qrData`를 추출하고, 스캔 결과를 `SCAN_QR_CODE` 콜백으로 WebView에 반환한다. 즉, 임의의 정적 이미지가 아니라 VP 요청, VC 발급 요청, 로그인 요청처럼 실제 플로우를 시작하는 QR을 대상으로 한다.
 
 `checkCredentialStatus`는 VC의 issuer/holder/credentialType으로 XRPL `Credential` ledger entry의 index를 계산해 현재 validated ledger에서 조회한다. 응답의 `Flags`에 accepted bit가 켜져 있고 expiration이 유효하면 active로 판정한다.

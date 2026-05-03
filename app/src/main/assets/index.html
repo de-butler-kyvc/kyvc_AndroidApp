@@ -501,6 +501,11 @@
       const vc = JSON.parse($("vcInput").value);
       vc.credentialSubject.id = did;
       vc.credentialStatus.subject = account;
+      const issuerAccount = $("issuerAccount").value.trim();
+      if (isValidXrplClassicAddress(issuerAccount)) {
+        vc.issuer = `did:xrpl:1:${issuerAccount}`;
+        vc.credentialStatus.issuer = issuerAccount;
+      }
       $("vcInput").value = JSON.stringify(vc, null, 2);
       $("holderAccount").value = account;
       renderVCCard(vc);
@@ -908,6 +913,9 @@
     $("holderAccount").value = sampleVC.credentialStatus.subject;
     $("credentialType").value = sampleVC.credentialStatus.credentialType;
     $("signMessage").value = "vp-submit-request-" + Date.now();
+    $("issuerAccount").addEventListener("input", () => {
+      syncVcWithWallet();
+    });
     updateQRPreview();
     updateSummary();
     checkBridge();

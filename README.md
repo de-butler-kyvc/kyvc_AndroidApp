@@ -118,6 +118,8 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `verifyVC`는 저장된 VC 또는 요청된 VC를 canonical JSON으로 정규화한 뒤 `vcCoreHash`와 비교하고, proof 구조와 XRPL active 상태까지 함께 검사한다. 이 검증은 로컬 holder wallet 기준으로 동작하며, WebView는 `VERIFY_VC` 콜백으로 상세 실패 사유를 받는다.
 
+`VERIFY_VC` 결과에 `canonicalHash`가 나오면 화면의 `canonicalHash 반영 후 저장` 버튼으로 `credentialStatus.vcCoreHash`를 실제 값으로 교체한 뒤 다시 `VC 저장` 또는 `VC 인증`을 실행한다. 샘플 VC의 `sample-vc-core-hash`는 인증용 값이 아니므로 그대로 두면 `vcCoreHash mismatch`가 난다.
+
 `submitPresentationToVerifier`는 `signMessage`로 생성한 VP와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `presentation`, `did_documents`, `policy`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.
 
 `listCredentials`는 앱에 저장된 VC를 목록으로 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.

@@ -42,6 +42,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **XRPL Status**: credential ledger entry index를 계산해 `ledger_entry`로 status를 조회하고 active 여부를 `CHECK_CREDENTIAL_STATUS` 콜백으로 반환
 - **Verifier Submit**: `submitPresentationToVerifier` 브릿지에서 signed VP, holder DID Document, policy, XRPL status 요구조건을 묶어 `/verifier/presentations/verify` 요청을 POST
 - **VC Verify**: `verifyVC` 브릿지에서 canonical VC hash, proof 구조, XRPL active 상태를 검사해 로컬 인증 결과를 반환
+- **Issuer Proof Verify**: issuer DID Document가 포함된 VC에 대해 secp256k1/ECDSA proof 검증 지원
 - **Credential List**: 저장된 VC 목록을 불러오고, XRPL 상태를 일괄 재조회해 저장 상태를 동기화
 - **Challenge Guard**: verifier challenge를 로컬에 등록하고 만료/중복 사용을 차단
 
@@ -59,11 +60,12 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [x] **Verifier 제출 연동**: `/verifier/presentations/verify` 요청 구성 및 challenge 사용 상태 처리
 - [x] **저장 VC 목록/상태 갱신**: 로컬 credential 목록 조회와 XRPL 상태 일괄 동기화
 - [x] **Challenge Guard**: verifier challenge 등록, 만료 확인, 중복 제출 차단
+- [x] **Issuer proof 검증 지원**: issuer DID Document가 있는 VC의 proof 서명 검증
 
 ## 여기서 더 구현할 수 있는 것
 - **Issuer proof 검증**
   - VC 저장 시 issuer 공개키로 VC proof를 직접 검증
-  - 현재는 주로 형식, 계정 정합성, XRPL 상태를 검증한다
+  - 현재는 issuer DID Document가 포함된 VC에 한해 검증한다
 - **Challenge 보관/만료 관리**
   - verifier challenge를 로컬에 저장하고 만료 전에만 VP 제출 허용
 - **QR 요청 파서 강화**

@@ -35,6 +35,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.lang.ref.WeakReference
+import java.math.BigInteger
+import java.security.KeyFactory
 import java.time.Instant
 import java.time.format.DateTimeParseException
 import java.text.SimpleDateFormat
@@ -42,7 +44,10 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.security.MessageDigest
+import java.security.Signature
 import android.util.Base64
+import org.bouncycastle.jce.spec.ECPublicKeySpec
+import org.bouncycastle.jce.spec.ECNamedCurveSpec
 
 class WalletBridge(
     private val context: Context,
@@ -117,6 +122,10 @@ class WalletBridge(
             try {
                 val json = Json.parseToJsonElement(jsonPayload).jsonObject
                 validateCredentialAgainstWallet(json, walletStateStore.getWalletStateOrNull())
+                val issuerProof = verifyIssuerProof(json)
+                require(!issuerProof.supported || issuerProof.verified) {
+                    issuerProof.error ?: "issuer proof verification failed"
+                }
                 val status = json.obj("credentialStatus")
                 val subject = json.obj("credentialSubject")
                 val issuerDid = json.text("issuerDid") ?: json.text("issuer").orEmpty()
@@ -266,6 +275,7 @@ class WalletBridge(
                     holderAddress = holderAccount,
                     credentialTypeHex = credentialType
                 )
+                val issuerProof = verifyIssuerProof(vc)
 
                 val issues = mutableListOf<String>()
                 if (declaredHash.isNullOrBlank()) {
@@ -288,6 +298,9 @@ class WalletBridge(
                         issues += "proof.proofPurpose is missing"
                     }
                 }
+                if (issuerProof.supported && !issuerProof.verified) {
+                    issues += issuerProof.error ?: "issuer proof verification failed"
+                }
                 if (!activeStatus.active) {
                     issues += activeStatus.error ?: "XRPL Credential status is not active"
                 }
@@ -306,6 +319,9 @@ class WalletBridge(
                         put("statusFound", activeStatus.found)
                         put("statusAccepted", activeStatus.accepted)
                         put("checkedAtUtc", activeStatus.checkedAtUtc)
+                        put("issuerProofSupported", issuerProof.supported)
+                        put("issuerProofVerified", issuerProof.verified)
+                        issuerProof.status?.let { put("issuerProofStatus", it) }
                         if (issues.isNotEmpty()) {
                             put("issues", JsonArray(issues.map { JsonPrimitive(it) }))
                         }
@@ -905,6 +921,123 @@ class WalletBridge(
         return digest.joinToString("") { "%02X".format(it) }
     }
 
+    private fun verifyIssuerProof(vcObject: JsonObject): IssuerProofVerification {
+        val issuerDocument = vcObject.jsonObjectOrNull("issuerDidDocument")
+            ?: vcObject.jsonObjectOrNull("issuerDocument")
+            ?: vcObject.jsonObjectOrNull("issuer_document")
+            ?: return IssuerProofVerification(supported = false, verified = false, status = "issuer DID Document missing", error = null)
+
+        val proof = vcObject.obj("proof")
+            ?: return IssuerProofVerification(supported = true, verified = false, status = "proof missing", error = "proof is missing")
+
+        val verificationMethodId = proof.text("verificationMethod")
+            ?: issuerDocument["verificationMethod"]
+                ?.let { methods ->
+                    (methods as? kotlinx.serialization.json.JsonArray)
+                        ?.firstOrNull()
+                        ?.jsonObject
+                        ?.text("id")
+                }
+            ?: return IssuerProofVerification(supported = true, verified = false, status = "verificationMethod missing", error = "issuer verificationMethod is missing")
+
+        val method = findVerificationMethod(issuerDocument, verificationMethodId)
+            ?: return IssuerProofVerification(supported = true, verified = false, status = "verificationMethod not found", error = "issuer verificationMethod not found")
+
+        val publicKeyJwk = method.obj("publicKeyJwk")
+            ?: return IssuerProofVerification(supported = true, verified = false, status = "publicKeyJwk missing", error = "issuer publicKeyJwk is missing")
+
+        val signatureValue = proof.text("signature")
+            ?: proof.text("proofValue")
+            ?: proof.text("jws")
+            ?: return IssuerProofVerification(supported = true, verified = false, status = "signature missing", error = "issuer proof signature is missing")
+
+        val signatureBytes = decodeSignatureBytes(signatureValue)
+            ?: return IssuerProofVerification(supported = true, verified = false, status = "signature format unsupported", error = "issuer proof signature format is unsupported")
+
+        val canonicalVc = canonicalizeWithoutProof(vcObject)
+        val publicKey = publicKeyFromJwk(publicKeyJwk)
+            ?: return IssuerProofVerification(supported = true, verified = false, status = "public key invalid", error = "issuer public key is invalid")
+        val verified = runCatching {
+            val verifier = Signature.getInstance("SHA256withECDSA", "BC")
+            verifier.initVerify(publicKey)
+            verifier.update(canonicalVc.toByteArray(Charsets.UTF_8))
+            verifier.verify(signatureBytes)
+        }.getOrDefault(false)
+
+        return if (verified) {
+            IssuerProofVerification(
+                supported = true,
+                verified = true,
+                status = "verified",
+                error = null
+            )
+        } else {
+            IssuerProofVerification(
+                supported = true,
+                verified = false,
+                status = "signature invalid",
+                error = "issuer proof signature verification failed"
+            )
+        }
+    }
+
+    private fun canonicalizeWithoutProof(vcObject: JsonObject): String {
+        val coreObject = buildJsonObject {
+            vcObject.forEach { (key, value) ->
+                if (key != "proof") {
+                    put(key, value)
+                }
+            }
+        }
+        return JsonCanonicalizer(coreObject.toString()).encodedString
+    }
+
+    private fun findVerificationMethod(issuerDocument: JsonObject, verificationMethodId: String): JsonObject? {
+        val methods = issuerDocument["verificationMethod"] as? JsonArray ?: return null
+        return methods.firstOrNull { element ->
+            val method = element as? JsonObject ?: return@firstOrNull false
+            method.text("id") == verificationMethodId
+        } as? JsonObject
+    }
+
+    private fun publicKeyFromJwk(jwk: JsonObject): java.security.PublicKey? {
+        val x = jwk.text("x") ?: return null
+        val y = jwk.text("y") ?: return null
+        val curveSpec = ECNamedCurveTable.getParameterSpec("secp256k1")
+        val xBytes = Base64.decode(x, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val yBytes = Base64.decode(y, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        val pointBytes = ByteArray(1 + xBytes.size + yBytes.size)
+        pointBytes[0] = 0x04
+        xBytes.copyInto(pointBytes, destinationOffset = 1)
+        yBytes.copyInto(pointBytes, destinationOffset = 1 + xBytes.size)
+        val point = curveSpec.curve.decodePoint(pointBytes)
+        val keySpec = ECPublicKeySpec(point, curveSpec)
+        return runCatching {
+            KeyFactory.getInstance("EC", "BC").generatePublic(keySpec)
+        }.getOrNull()
+    }
+
+    private fun decodeSignatureBytes(signatureValue: String): ByteArray? {
+        if (signatureValue.isBlank()) return null
+        val candidate = if (signatureValue.count { it == '.' } == 2) {
+            signatureValue.substringAfterLast('.')
+        } else {
+            signatureValue
+        }
+        return runCatching {
+            Base64.decode(candidate, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        }.getOrNull()
+    }
+
+    private fun JsonObject.jsonObjectOrNull(name: String): JsonObject? {
+        val element = this[name] ?: return null
+        return when (element) {
+            is JsonObject -> element
+            is JsonPrimitive -> runCatching { Json.parseToJsonElement(element.content).jsonObject }.getOrNull()
+            else -> null
+        }
+    }
+
     private fun markVerifierChallengeUsed(challenge: String) {
         val record = getVerifierChallengeRecord(challenge) ?: return
         storeVerifierChallenge(
@@ -959,6 +1092,13 @@ class WalletBridge(
         val raw = verifierPrefs.getString("challenge:${challengeDigest(challenge)}", null) ?: return null
         return runCatching { JSONObject(raw) }.getOrNull()
     }
+
+    private data class IssuerProofVerification(
+        val supported: Boolean,
+        val verified: Boolean,
+        val status: String,
+        val error: String?
+    )
 
     private fun postJson(endpoint: String, body: String): String {
         val url = endpoint.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid verifier endpoint: $endpoint")

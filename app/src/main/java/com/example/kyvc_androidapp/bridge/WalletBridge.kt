@@ -22,6 +22,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import org.erdtman.jcs.JsonCanonicalizer
 import org.bouncycastle.jce.ECNamedCurveTable
 import org.xrpl.xrpl4j.crypto.keys.Seed
 import kotlinx.serialization.json.Json
@@ -39,6 +40,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.security.MessageDigest
 import android.util.Base64
 
 class WalletBridge(
@@ -225,6 +227,99 @@ class WalletBridge(
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Credential status check failed: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback("CHECK_CREDENTIAL_STATUS", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun verifyVC(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val request = Json.parseToJsonElement(jsonPayload).jsonObject
+                val savedCredential = request.text("credentialId")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { db.credentialDao().getCredentialById(it) }
+                val vcJson = resolveVcJson(request)
+                val vc = Json.parseToJsonElement(vcJson).jsonObject
+                val walletState = walletStateStore.getWalletStateOrNull()
+                validateCredentialAgainstWallet(vc, walletState)
+
+                val status = vc.obj("credentialStatus")
+                    ?: throw IllegalArgumentException("credentialStatus is required")
+                val proof = vc.obj("proof")
+                val issuerAccount = status.text("issuer")
+                    ?: accountFromDid(vc.text("issuer").orEmpty())
+                val holderAccount = status.text("subject")
+                    ?: walletState?.account
+                    ?: throw IllegalArgumentException("holderAccount is required")
+                val credentialType = status.text("credentialType")
+                    ?: throw IllegalArgumentException("credentialStatus.credentialType is required")
+                val canonicalHash = computeVcCoreHash(vc)
+                val declaredHash = status.text("vcCoreHash") ?: savedCredential?.vcCoreHash
+                val activeStatus = xrplHelper.getCredentialStatus(
+                    issuerAddress = issuerAccount,
+                    holderAddress = holderAccount,
+                    credentialTypeHex = credentialType
+                )
+
+                val issues = mutableListOf<String>()
+                if (declaredHash.isNullOrBlank()) {
+                    issues += "vcCoreHash is missing"
+                } else if (!declaredHash.equals(canonicalHash, ignoreCase = true)) {
+                    issues += "vcCoreHash mismatch"
+                }
+                if (proof == null) {
+                    issues += "proof is missing"
+                } else {
+                    val proofType = proof.text("type")
+                    if (proofType.isNullOrBlank()) {
+                        issues += "proof.type is missing"
+                    }
+                    if (proof.text("proofValue").isNullOrBlank() && proof.text("signature").isNullOrBlank()) {
+                        issues += "proof value is missing"
+                    }
+                    val proofPurpose = proof.text("proofPurpose")
+                    if (proofPurpose.isNullOrBlank()) {
+                        issues += "proof.proofPurpose is missing"
+                    }
+                }
+                if (!activeStatus.active) {
+                    issues += activeStatus.error ?: "XRPL Credential status is not active"
+                }
+
+                val ok = issues.isEmpty()
+                withContext(Dispatchers.Main) {
+                    emitCallback("VERIFY_VC", ok) {
+                        put("credentialId", savedCredential?.credentialId.orEmpty())
+                        put("issuerAccount", issuerAccount)
+                        put("holderAccount", holderAccount)
+                        put("credentialType", credentialType)
+                        put("canonicalHash", canonicalHash)
+                        declaredHash?.let { put("declaredHash", it) }
+                        put("proofPresent", proof != null)
+                        put("statusActive", activeStatus.active)
+                        put("statusFound", activeStatus.found)
+                        put("statusAccepted", activeStatus.accepted)
+                        put("checkedAtUtc", activeStatus.checkedAtUtc)
+                        if (issues.isNotEmpty()) {
+                            put("issues", JsonArray(issues.map { JsonPrimitive(it) }))
+                        }
+                        activeStatus.error?.let { put("statusError", it) }
+                    }
+                    Toast.makeText(
+                        context,
+                        if (ok) "VC verified" else "VC verification failed",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "verifyVC failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "VC verification failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    emitCallback("VERIFY_VC", false) {
                         put("error", e.message ?: "Unknown error")
                     }
                 }
@@ -656,6 +751,19 @@ class WalletBridge(
             put("acceptedKycLevels", acceptedKycLevels)
             put("acceptedJurisdictions", acceptedJurisdictions)
         }
+    }
+
+    private fun computeVcCoreHash(vcObject: JsonObject): String {
+        val coreObject = buildJsonObject {
+            vcObject.forEach { (key, value) ->
+                if (key != "proof") {
+                    put(key, value)
+                }
+            }
+        }
+        val canonical = JsonCanonicalizer(coreObject.toString()).encodedString
+        val digest = MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02X".format(it) }
     }
 
     private fun postJson(endpoint: String, body: String): String {

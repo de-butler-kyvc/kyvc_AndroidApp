@@ -26,6 +26,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **VC Validation**: VC 저장/서명/상태조회 전에 `credentialSubject.id`, `credentialStatus.subject`, `validFrom/validUntil`을 검증하고 holder wallet과 맞지 않으면 차단
 - **XRPL Status**: credential ledger entry index를 계산해 `ledger_entry`로 status를 조회하고 active 여부를 `CHECK_CREDENTIAL_STATUS` 콜백으로 반환
 - **Verifier Submit**: `submitPresentationToVerifier` 브릿지에서 signed VP, holder DID Document, policy, XRPL status 요구조건을 묶어 `/verifier/presentations/verify` 요청을 POST
+- **VC Verify**: `verifyVC` 브릿지에서 canonical VC hash, proof 구조, XRPL active 상태를 검사해 로컬 인증 결과를 반환
 
 ## 🚀 향후 작업 계획
 - [x] **MCP 연동 환경 구성**: AI 어시스턴트 협업을 위한 `mcp-context.md` 및 환경 설정 완료
@@ -37,6 +38,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [x] **VP 생성 기초 구현**: 저장된 holder seed로 secp256k1 JCS proof 생성 및 WebView 콜백 연결
 - [x] **QR 브릿지 연결**: QR 요청/결과를 WebView 콜백으로 전달하는 native bridge 추가
 - [ ] **VC(Verifiable Credentials) 인증 시스템**: 실데이터 기반 VC 대조 및 인증 로직 고도화
+- [x] **VC(Verifiable Credentials) 인증 시스템**: canonical hash, proof 구조, XRPL active 상태 검증
 - [x] **Verifier 제출 연동**: `/verifier/presentations/verify` 요청 구성 및 challenge 사용 상태 처리
 
 ## WebView Bridge 요청 형식
@@ -59,5 +61,7 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 `scanQRCode`는 발급자/검증자가 제시하는 요청 QR을 읽는 용도다. 현재 구현은 QR에 담긴 요청 JSON 또는 텍스트를 읽어 `requestId`, `purpose`, `endpoint`, `expiresInSec`, `qrData`를 추출하고, 스캔 결과를 `SCAN_QR_CODE` 콜백으로 WebView에 반환한다. 즉, 임의의 정적 이미지가 아니라 VP 요청, VC 발급 요청, 로그인 요청처럼 실제 플로우를 시작하는 QR을 대상으로 한다.
 
 `checkCredentialStatus`는 VC의 issuer/holder/credentialType으로 XRPL `Credential` ledger entry의 index를 계산해 현재 validated ledger에서 조회한다. 응답의 `Flags`에 accepted bit가 켜져 있고 expiration이 유효하면 active로 판정한다.
+
+`verifyVC`는 저장된 VC 또는 요청된 VC를 canonical JSON으로 정규화한 뒤 `vcCoreHash`와 비교하고, proof 구조와 XRPL active 상태까지 함께 검사한다. 이 검증은 로컬 holder wallet 기준으로 동작하며, WebView는 `VERIFY_VC` 콜백으로 상세 실패 사유를 받는다.
 
 `submitPresentationToVerifier`는 `signMessage`로 생성한 VP와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `presentation`, `did_documents`, `policy`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.

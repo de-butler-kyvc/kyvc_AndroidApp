@@ -279,8 +279,12 @@
       <div class="mt8">
         <button class="ghost" onclick="checkCredentialStatus()">XRPL 상태 조회</button>
       </div>
+      <div class="mt8">
+        <button class="warn" onclick="verifyVC()">VC 인증</button>
+      </div>
       <div class="result-panel" id="vcResult"></div>
       <div class="result-panel" id="credentialStatusResult"></div>
+      <div class="result-panel" id="vcVerifyResult"></div>
     </section>
 
     <section class="card">
@@ -562,6 +566,26 @@
       }
     }
 
+    function verifyVC() {
+      try {
+        const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
+        callAndroid("verifyVC", {
+          credentialId: $("credentialId").value.trim() || vc.id,
+          issuerAccount: $("issuerAccount").value.trim(),
+          holderAccount: $("holderAccount").value.trim(),
+          credentialType: $("credentialType").value.trim(),
+          vcJson: JSON.stringify(vc)
+        });
+        $("vcStatus").textContent = "인증 중";
+        $("vcStatus").className = "mini-status";
+        panel("vcVerifyResult", `<b>VC 인증 요청:</b> ${vc.id}`);
+        showToast("VC 인증 요청됨");
+      } catch (e) {
+        panel("vcVerifyResult", `<b>VC 인증 오류:</b> ${e.message}`);
+        log("VC 인증 요청 실패", { message: e.message });
+      }
+    }
+
     function makeHash() {
       $("xrplHash").value = randomHex(64);
       log("XRPL 해시 생성", { hash: $("xrplHash").value });
@@ -740,6 +764,13 @@
           panel("credentialStatusResult", result.ok
             ? `<b>상태 조회 완료:</b><br/>found: ${result.found}<br/>active: ${result.active}<br/>accepted: ${result.accepted}<br/>index: ${result.credentialIndex}<br/>checkedAt: ${result.checkedAtUtc}`
             : `<b>상태 조회 실패:</b><br/>${result.error}`);
+        }
+        if (result.action === "VERIFY_VC") {
+          $("vcStatus").textContent = result.ok ? "인증 완료" : "인증 실패";
+          $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("vcVerifyResult", result.ok
+            ? `<b>VC 인증 완료:</b><br/>canonicalHash: ${result.canonicalHash}<br/>statusActive: ${result.statusActive}<br/>proofPresent: ${result.proofPresent}`
+            : `<b>VC 인증 실패:</b><br/>${(result.issues || [result.error || "unknown"]).join("<br/>")}`);
         }
         if (result.action === "SIGN_MESSAGE") {
           $("signStatus").textContent = result.ok ? "VP 생성 완료" : "VP 생성 실패";

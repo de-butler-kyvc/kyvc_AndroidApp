@@ -12,7 +12,9 @@ import org.xrpl.xrpl4j.client.XrplClient
 import org.xrpl.xrpl4j.model.client.accounts.AccountInfoRequestParams
 import org.xrpl.xrpl4j.model.client.common.LedgerSpecifier
 import org.xrpl.xrpl4j.model.transactions.Address
+import org.xrpl.xrpl4j.model.transactions.CredentialCreate
 import org.xrpl.xrpl4j.model.transactions.CredentialAccept
+import org.xrpl.xrpl4j.model.transactions.CredentialUri
 import org.xrpl.xrpl4j.model.transactions.XrpCurrencyAmount
 import org.xrpl.xrpl4j.crypto.signing.SingleSignedTransaction
 import org.xrpl.xrpl4j.crypto.keys.Seed
@@ -20,6 +22,7 @@ import org.xrpl.xrpl4j.crypto.signing.bc.BcSignatureService
 import org.xrpl.xrpl4j.model.transactions.CredentialType
 import org.xrpl.xrpl4j.model.client.transactions.SubmitResult
 import org.xrpl.xrpl4j.crypto.keys.PublicKey
+import com.google.common.primitives.UnsignedLong
 import java.security.MessageDigest
 import java.time.Instant
 
@@ -57,6 +60,49 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
             .build()
 
         val signedTx: SingleSignedTransaction<CredentialAccept> = signatureService.sign(keyPair.privateKey(), credentialAccept)
+        return xrplClient.submit(signedTx)
+    }
+
+    suspend fun submitCredentialCreate(
+        seed: Seed,
+        subjectAddress: String,
+        credentialTypeHex: String,
+        expirationDays: Long? = null,
+        credentialUri: String? = null
+    ): SubmitResult<CredentialCreate> {
+        val validatedSubject = requireClassicAddress("subjectAddress", subjectAddress)
+        val keyPair = seed.deriveKeyPair()
+        val publicKey: PublicKey = keyPair.publicKey()
+        val issuerAddress = publicKey.deriveAddress()
+
+        val accountInfo = xrplClient.accountInfo(
+            AccountInfoRequestParams.builder()
+                .account(issuerAddress)
+                .ledgerSpecifier(LedgerSpecifier.VALIDATED)
+                .build()
+        )
+
+        val builder = CredentialCreate.builder()
+            .account(issuerAddress)
+            .subject(Address.of(validatedSubject))
+            .credentialType(CredentialType.of(credentialTypeHex))
+            .sequence(accountInfo.accountData().sequence())
+            .fee(XrpCurrencyAmount.ofDrops(12))
+            .signingPublicKey(publicKey)
+
+        if (expirationDays != null && expirationDays > 0) {
+            val expirationSeconds = Instant.now()
+                .plusSeconds(expirationDays * 24L * 60L * 60L)
+                .epochSecond - RIPPLE_EPOCH_OFFSET
+            builder.expiration(UnsignedLong.valueOf(expirationSeconds))
+        }
+
+        credentialUri
+            ?.takeIf { it.isNotBlank() }
+            ?.let { builder.uri(CredentialUri.of(utf8ToHex(it))) }
+
+        val credentialCreate = builder.build()
+        val signedTx: SingleSignedTransaction<CredentialCreate> = signatureService.sign(keyPair.privateKey(), credentialCreate)
         return xrplClient.submit(signedTx)
     }
 
@@ -206,6 +252,10 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
             throw IllegalArgumentException("$label must be a real XRPL classic address (25-35 chars, starts with r): $address. $hint")
         }
         return address
+    }
+
+    private fun utf8ToHex(value: String): String {
+        return value.toByteArray(Charsets.UTF_8).joinToString(separator = "") { "%02X".format(it) }
     }
 
     data class CredentialStatusResult(

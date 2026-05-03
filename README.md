@@ -31,6 +31,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Storage**: `CredentialEntity`를 통한 VC 로컬 저장소 구축
 - **Bridge**: 웹에서 안드로이드 기능을 호출할 수 있는 `Android` 브릿지 객체 등록
 - **XRPL Submit**: `submitToXRPL` 브릿지에서 holder seed, issuer account, credential type을 검증한 뒤 XRPL testnet `CredentialAccept`를 제출하고 tx hash를 Room DB에 반영
+- **Issuer CredentialCreate**: `submitCredentialCreate` 브릿지에서 issuer seed로 XRPL testnet `CredentialCreate`를 제출해 ledger credential entry를 생성
 - **WebView Callback**: VC 저장 및 XRPL 제출 결과를 `window.onAndroidResult`로 반환하도록 테스트 페이지 연동
 - **UI**: 지민님이 제공한 고도화된 브릿지 테스트 페이지(`index.html`) 적용
 - **Build Fix**: AGP 9.2.0의 내장 Kotlin 지원과 KSP 간의 충돌 해결 (`android.disallowKotlinSourceSets=false`)
@@ -100,6 +101,8 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 ```
 
 Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의 `holderAccount`가 다르면 제출하지 않는다. 성공/실패 결과는 `window.onAndroidResult` 콜백의 `SUBMIT_TO_XRPL` action으로 전달된다.
+
+`submitCredentialCreate`는 issuer가 ledger에 `CredentialCreate`를 올릴 때 쓴다. 이 요청은 `issuerSeed`, `subjectAccount`, `credentialType`을 받으며, issuer seed는 앱에 저장하지 않는다. `vcJson`이 있으면 거기서 subject/type을 보강해서 사용한다. 성공/실패 결과는 `SUBMIT_CREDENTIAL_CREATE` action으로 반환된다.
 
 실제 테스트넷 값을 넣을 때는 `issuerAccount`에 XRPL testnet의 실제 classic address를 넣고, VC JSON의 `issuer` / `credentialStatus.issuer`도 같은 계정으로 맞춘다. DID는 `did:xrpl:1:{account}` 형태를 쓰되, `account` 부분은 반드시 실제 classic address여야 한다. `holderAccount`는 앱의 `getWalletInfo` 결과로 자동 채워지는 holder account를 쓰면 된다.
 

@@ -304,6 +304,8 @@
       <input id="credentialId" placeholder="저장한 VC id" />
       <label>Issuer Account</label>
       <input id="issuerAccount" placeholder="rIssuer..." />
+      <label>Issuer Seed</label>
+      <input id="issuerSeed" type="password" autocomplete="off" placeholder="테스트넷 issuer seed" />
       <label>Holder Account</label>
       <input id="holderAccount" placeholder="rHolder..." />
       <label>Credential Type (hex)</label>
@@ -311,6 +313,9 @@
       <div class="grid mt8">
         <button class="secondary" onclick="makeHash()">해시 생성</button>
         <button onclick="submitToXRPL()">XRPL 기록 호출</button>
+      </div>
+      <div class="mt8">
+        <button class="ok" onclick="submitCredentialCreate()">CredentialCreate 호출</button>
       </div>
       <div class="result-panel" id="xrplResult"></div>
     </section>
@@ -645,6 +650,27 @@
       showToast("XRPL 기록 요청됨");
     }
 
+    function submitCredentialCreate() {
+      try {
+        const issuerSeed = $("issuerSeed").value.trim();
+        if (!issuerSeed) return showToast("issuer seed를 입력하세요");
+        const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
+        callAndroid("submitCredentialCreate", {
+          issuerSeed,
+          issuerAccount: $("issuerAccount").value.trim(),
+          subjectAccount: $("holderAccount").value.trim(),
+          credentialType: $("credentialType").value.trim(),
+          credentialId: $("credentialId").value.trim(),
+          vcJson: JSON.stringify(vc)
+        });
+        panel("xrplResult", `<b>CredentialCreate 요청:</b><br/>issuer: ${$("issuerAccount").value.trim()}<br/>subject: ${$("holderAccount").value.trim()}`);
+        showToast("CredentialCreate 요청됨");
+      } catch (e) {
+        panel("xrplResult", `<b>CredentialCreate 오류:</b><br/>${e.message}`);
+        log("CredentialCreate 요청 실패", { message: e.message });
+      }
+    }
+
     function makeChallenge() {
       const challenge = "vp-challenge-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
       const domain = $("signDomain").value.trim() || "kyvc.local";
@@ -780,6 +806,13 @@
             updateSummary();
           }
         }
+        if (result.action === "SUBMIT_CREDENTIAL_CREATE") {
+          $("xrplStatus").textContent = result.ok ? "발급 완료" : "발급 실패";
+          $("xrplStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("xrplResult", result.ok
+            ? `<b>CredentialCreate 완료:</b><br/>${result.txHash}<br/>${result.engineResult}`
+            : `<b>CredentialCreate 실패:</b><br/>${result.error}`);
+        }
         if (result.action === "CREATE_WALLET" || result.action === "GET_WALLET_INFO") {
           $("walletStatus").textContent = result.ok ? "준비됨" : "오류";
           $("walletStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
@@ -912,6 +945,7 @@
     setIssuerField(sampleVC.credentialStatus.issuer);
     $("holderAccount").value = sampleVC.credentialStatus.subject;
     $("credentialType").value = sampleVC.credentialStatus.credentialType;
+    $("issuerSeed").value = "";
     $("signMessage").value = "vp-submit-request-" + Date.now();
     $("issuerAccount").addEventListener("input", () => {
       syncVcWithWallet();

@@ -25,6 +25,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.erdtman.jcs.JsonCanonicalizer
 import org.bouncycastle.jce.ECNamedCurveTable
+import org.xrpl.xrpl4j.crypto.keys.Base58EncodedSecret
 import org.xrpl.xrpl4j.crypto.keys.Seed
 import org.xrpl.xrpl4j.model.transactions.Address
 import kotlinx.serialization.json.Json
@@ -552,6 +553,75 @@ class WalletBridge(
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "XRPL submission failed: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback("SUBMIT_TO_XRPL", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun submitCredentialCreate(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val request = Json.parseToJsonElement(jsonPayload).jsonObject
+                val issuerSeedValue = request.text("issuerSeed")
+                    ?: request.text("seed")
+                    ?: throw IllegalArgumentException("issuerSeed is required")
+                val seed = parseSeed(issuerSeedValue)
+                val issuerAccount = seed.deriveKeyPair().publicKey().deriveAddress().value()
+
+                val vcJson = request.text("vcJson")
+                val vcObject = vcJson?.let { Json.parseToJsonElement(it).jsonObject }
+                val subjectAccount = request.text("subjectAccount")
+                    ?: request.text("holderAccount")
+                    ?: vcObject?.obj("credentialStatus")?.text("subject")
+                    ?: accountFromDid(vcObject?.obj("credentialSubject")?.text("id").orEmpty())
+                    ?: walletStateStore.getWalletStateOrNull()?.account
+                    ?: throw IllegalArgumentException("subjectAccount is required")
+                val credentialType = request.text("credentialType")
+                    ?: vcObject?.obj("credentialStatus")?.text("credentialType")
+                    ?: throw IllegalArgumentException("credentialType is required")
+                val expirationDays = request.text("expirationDays")?.toLongOrNull()
+                    ?: request.text("expiresInDays")?.toLongOrNull()
+                val credentialUri = request.text("credentialUri")
+                    ?: request.text("uri")
+
+                val expectedIssuerAccount = request.text("issuerAccount")
+                    ?: request.text("issuer")
+                    ?: vcObject?.obj("credentialStatus")?.text("issuer")
+                if (!expectedIssuerAccount.isNullOrBlank()) {
+                    require(expectedIssuerAccount == issuerAccount) {
+                        "issuer account mismatch: seed=$issuerAccount, expected=$expectedIssuerAccount"
+                    }
+                }
+
+                val result = xrplHelper.submitCredentialCreate(
+                    seed = seed,
+                    subjectAddress = subjectAccount,
+                    credentialTypeHex = credentialType,
+                    expirationDays = expirationDays,
+                    credentialUri = credentialUri
+                )
+                val txHash = result.transactionResult().hash().value()
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "CredentialCreate submitted: ${result.engineResult()}", Toast.LENGTH_LONG).show()
+                    emitCallback("SUBMIT_CREDENTIAL_CREATE", true) {
+                        put("issuerAccount", issuerAccount)
+                        put("subjectAccount", subjectAccount)
+                        put("credentialType", credentialType)
+                        put("txHash", txHash)
+                        put("engineResult", result.engineResult())
+                        put("engineResultMessage", result.engineResultMessage())
+                        put("accepted", result.accepted())
+                        put("applied", result.applied())
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "submitCredentialCreate failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "CredentialCreate failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    emitCallback("SUBMIT_CREDENTIAL_CREATE", false) {
                         put("error", e.message ?: "Unknown error")
                     }
                 }
@@ -1134,6 +1204,14 @@ class WalletBridge(
     private fun accountFromDid(did: String): String {
         val prefix = "did:xrpl:1:"
         return if (did.startsWith(prefix)) did.removePrefix(prefix) else ""
+    }
+
+    private fun parseSeed(seedValue: String): Seed {
+        return try {
+            Seed.fromBase58EncodedSecret(Base58EncodedSecret.of(seedValue.trim()))
+        } catch (e: Exception) {
+            throw IllegalArgumentException("issuerSeed is invalid: ${e.message}", e)
+        }
     }
 
     private fun requireValidXrplClassicAddress(label: String, value: String): String {

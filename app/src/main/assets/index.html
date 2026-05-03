@@ -407,6 +407,14 @@
 
     function $(id) { return document.getElementById(id); }
 
+    function isValidXrplClassicAddress(value) {
+      return /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/.test((value || "").trim());
+    }
+
+    function setIssuerField(value) {
+      $("issuerAccount").value = isValidXrplClassicAddress(value) ? value.trim() : "";
+    }
+
     function updateSummary() {
       $("vcCount").textContent = state.vc + "개";
       $("signCount").textContent = state.sign + "회";
@@ -538,7 +546,7 @@
         renderVCCard(vc);
         callAndroid("saveVC", vc);
         $("credentialId").value = vc.id || "";
-        $("issuerAccount").value = vc.credentialStatus?.issuer || "";
+        setIssuerField(vc.credentialStatus?.issuer || "");
         $("holderAccount").value = vc.credentialStatus?.subject || "";
         $("credentialType").value = vc.credentialStatus?.credentialType || "";
         $("vcStatus").textContent = "저장 중";
@@ -896,7 +904,7 @@
     $("vcInput").value = JSON.stringify(sampleVC, null, 2);
     $("xrplHash").value = randomHex(64);
     $("credentialId").value = sampleVC.id;
-    $("issuerAccount").value = sampleVC.credentialStatus.issuer;
+    setIssuerField(sampleVC.credentialStatus.issuer);
     $("holderAccount").value = sampleVC.credentialStatus.subject;
     $("credentialType").value = sampleVC.credentialStatus.credentialType;
     $("signMessage").value = "vp-submit-request-" + Date.now();

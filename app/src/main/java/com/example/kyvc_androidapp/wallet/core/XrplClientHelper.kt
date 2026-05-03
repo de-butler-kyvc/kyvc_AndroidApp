@@ -35,6 +35,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         issuerAddress: String,
         credentialTypeHex: String
     ): SubmitResult<CredentialAccept> {
+        val validatedIssuer = requireClassicAddress("issuerAddress", issuerAddress)
         val keyPair = seed.deriveKeyPair()
         val publicKey: PublicKey = keyPair.publicKey()
         val address = publicKey.deriveAddress()
@@ -48,7 +49,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
 
         val credentialAccept = CredentialAccept.builder()
             .account(address)
-            .issuer(Address.of(issuerAddress))
+            .issuer(Address.of(validatedIssuer))
             .credentialType(CredentialType.of(credentialTypeHex))
             .sequence(accountInfo.accountData().sequence())
             .fee(XrpCurrencyAmount.ofDrops(12))
@@ -64,9 +65,39 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         holderAddress: String,
         credentialTypeHex: String
     ): CredentialStatusResult {
+        val validatedIssuer = runCatching { requireClassicAddress("issuerAddress", issuerAddress) }.getOrElse {
+            return CredentialStatusResult(
+                credentialIndex = "",
+                found = false,
+                active = false,
+                accepted = false,
+                issuerAccount = issuerAddress,
+                holderAccount = holderAddress,
+                credentialType = credentialTypeHex,
+                flags = null,
+                expiration = null,
+                checkedAtUtc = Instant.now().toString(),
+                error = it.message
+            )
+        }
+        val validatedHolder = runCatching { requireClassicAddress("holderAddress", holderAddress) }.getOrElse {
+            return CredentialStatusResult(
+                credentialIndex = "",
+                found = false,
+                active = false,
+                accepted = false,
+                issuerAccount = issuerAddress,
+                holderAccount = holderAddress,
+                credentialType = credentialTypeHex,
+                flags = null,
+                expiration = null,
+                checkedAtUtc = Instant.now().toString(),
+                error = it.message
+            )
+        }
         val indexHex = credentialIndexHex(
-            issuerAddress = issuerAddress,
-            holderAddress = holderAddress,
+            issuerAddress = validatedIssuer,
+            holderAddress = validatedHolder,
             credentialTypeHex = credentialTypeHex
         )
         val body = JSONObject()
@@ -144,8 +175,8 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         holderAddress: String,
         credentialTypeHex: String
     ): String {
-        val issuerBytes = addressCodec.decodeAccountId(Address.of(issuerAddress)).toByteArray()
-        val holderBytes = addressCodec.decodeAccountId(Address.of(holderAddress)).toByteArray()
+        val issuerBytes = addressCodec.decodeAccountId(Address.of(requireClassicAddress("issuerAddress", issuerAddress))).toByteArray()
+        val holderBytes = addressCodec.decodeAccountId(Address.of(requireClassicAddress("holderAddress", holderAddress))).toByteArray()
         val credentialTypeBytes = UnsignedByteArray.fromHex(credentialTypeHex).toByteArray()
         val input = ByteArray(2 + holderBytes.size + issuerBytes.size + credentialTypeBytes.size)
         input[0] = 0x00
@@ -156,6 +187,25 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
 
         val digest = MessageDigest.getInstance("SHA-512").digest(input)
         return digest.copyOfRange(0, 32).joinToString("") { "%02X".format(it) }
+    }
+
+    private fun requireClassicAddress(label: String, value: String): String {
+        val address = value.trim()
+        require(address.isNotBlank()) { "$label is required" }
+        runCatching { Address.of(address) }.getOrElse {
+            val hint = if (
+                address.contains("testnet", ignoreCase = true) ||
+                address.contains("example", ignoreCase = true) ||
+                address.contains("placeholder", ignoreCase = true) ||
+                address.contains("accountfortestnet", ignoreCase = true)
+            ) {
+                "This looks like sample data. Replace it with a real XRPL testnet classic address."
+            } else {
+                "Use the XRPL classic address itself, not a DID."
+            }
+            throw IllegalArgumentException("$label must be a real XRPL classic address (25-35 chars, starts with r): $address. $hint")
+        }
+        return address
     }
 
     data class CredentialStatusResult(

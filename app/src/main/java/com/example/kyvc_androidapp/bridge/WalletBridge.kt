@@ -26,6 +26,7 @@ import kotlinx.serialization.json.put
 import org.erdtman.jcs.JsonCanonicalizer
 import org.bouncycastle.jce.ECNamedCurveTable
 import org.xrpl.xrpl4j.crypto.keys.Seed
+import org.xrpl.xrpl4j.model.transactions.Address
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONObject
@@ -823,17 +824,26 @@ class WalletBridge(
         val status = credential.obj("credentialStatus")
             ?: throw IllegalArgumentException("credentialStatus is required")
         val holderDid = credential.text("holderDid") ?: subject.text("id").orEmpty()
-        val holderAccount = status.text("subject") ?: accountFromDid(holderDid)
+        val holderAccount = requireValidXrplClassicAddress(
+            "credentialStatus.subject",
+            status.text("subject") ?: accountFromDid(holderDid)
+        )
         val issuerDid = credential.text("issuerDid") ?: credential.text("issuer").orEmpty()
-        val issuerAccount = status.text("issuer") ?: accountFromDid(issuerDid)
-        val subjectAccount = status.text("subject") ?: accountFromDid(holderDid)
+        val issuerAccount = requireValidXrplClassicAddress(
+            "credentialStatus.issuer",
+            status.text("issuer") ?: accountFromDid(issuerDid)
+        )
+        val subjectAccount = requireValidXrplClassicAddress(
+            "credentialStatus.subject",
+            status.text("subject") ?: accountFromDid(holderDid)
+        )
         val credentialType = status.text("credentialType")
 
         if (walletState != null) {
             require(holderDid == walletState.did) {
                 "holder DID mismatch: wallet=${walletState.did}, vc=$holderDid"
             }
-            require(holderAccount == walletState.account) {
+            require(holderAccount == requireValidXrplClassicAddress("wallet account", walletState.account)) {
                 "holder account mismatch: wallet=${walletState.account}, vc=$holderAccount"
             }
         }
@@ -841,7 +851,7 @@ class WalletBridge(
         require(subjectAccount == holderAccount) {
             "credentialStatus.subject mismatch: status=$subjectAccount, vc=$holderAccount"
         }
-        require(issuerAccount == accountFromDid(issuerDid)) {
+        require(issuerAccount == requireValidXrplClassicAddress("issuer DID account", accountFromDid(issuerDid))) {
             "credentialStatus.issuer mismatch: status=$issuerAccount, issuerDid=$issuerDid"
         }
         require(!credentialType.isNullOrBlank()) { "credentialStatus.credentialType is required" }
@@ -861,9 +871,6 @@ class WalletBridge(
                 }
             }
 
-        if (issuerAccount.isBlank()) {
-            throw IllegalArgumentException("issuer account is required")
-        }
         if (status.text("credentialType").isNullOrBlank()) {
             throw IllegalArgumentException("credentialStatus.credentialType is required")
         }
@@ -1127,6 +1134,25 @@ class WalletBridge(
     private fun accountFromDid(did: String): String {
         val prefix = "did:xrpl:1:"
         return if (did.startsWith(prefix)) did.removePrefix(prefix) else ""
+    }
+
+    private fun requireValidXrplClassicAddress(label: String, value: String): String {
+        val address = value.trim()
+        require(address.isNotBlank()) { "$label is required" }
+        runCatching { Address.of(address) }.getOrElse {
+            val hint = if (
+                address.contains("testnet", ignoreCase = true) ||
+                address.contains("example", ignoreCase = true) ||
+                address.contains("placeholder", ignoreCase = true) ||
+                address.contains("accountfortestnet", ignoreCase = true)
+            ) {
+                "This looks like sample data. Replace it with a real XRPL testnet classic address."
+            } else {
+                "Use the XRPL classic address itself, not a DID."
+            }
+            throw IllegalArgumentException("$label must be a real XRPL classic address (25-35 chars, starts with r): $address. $hint")
+        }
+        return address
     }
 
     private suspend fun resolveVcJson(request: JsonObject): String {

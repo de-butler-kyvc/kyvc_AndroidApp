@@ -101,6 +101,10 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 
 Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의 `holderAccount`가 다르면 제출하지 않는다. 성공/실패 결과는 `window.onAndroidResult` 콜백의 `SUBMIT_TO_XRPL` action으로 전달된다.
 
+실제 테스트넷 값을 넣을 때는 `issuerAccount`에 XRPL testnet의 실제 classic address를 넣고, VC JSON의 `issuer` / `credentialStatus.issuer`도 같은 계정으로 맞춘다. DID는 `did:xrpl:1:{account}` 형태를 쓰되, `account` 부분은 반드시 실제 classic address여야 한다. `holderAccount`는 앱의 `getWalletInfo` 결과로 자동 채워지는 holder account를 쓰면 된다.
+
+예를 들어 placeholder인 `rIssuerAccountForTestnet` 같은 문자열은 XRPL 주소가 아니므로 status 조회, verifier 제출, XRPL 제출 모두 실패한다. 샘플 VC를 쓸 때는 issuer 관련 필드를 실계정으로 교체하고, VC 저장 후 다시 status 조회를 해야 한다.
+
 `scanQRCode`는 발급자/검증자가 제시하는 요청 QR을 읽는 용도다. 현재 구현은 QR에 담긴 요청 JSON 또는 텍스트를 읽어 `requestId`, `purpose`, `endpoint`, `expiresInSec`, `qrData`를 추출하고, 스캔 결과를 `SCAN_QR_CODE` 콜백으로 WebView에 반환한다. 즉, 임의의 정적 이미지가 아니라 VP 요청, VC 발급 요청, 로그인 요청처럼 실제 플로우를 시작하는 QR을 대상으로 한다.
 
 `checkCredentialStatus`는 VC의 issuer/holder/credentialType으로 XRPL `Credential` ledger entry의 index를 계산해 현재 validated ledger에서 조회한다. 응답의 `Flags`에 accepted bit가 켜져 있고 expiration이 유효하면 active로 판정한다.

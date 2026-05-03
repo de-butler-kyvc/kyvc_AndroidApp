@@ -320,7 +320,13 @@
         <button class="secondary" onclick="makeChallenge()">Challenge 생성</button>
         <button class="warn" onclick="signMessage()">VP 생성 호출</button>
       </div>
+      <label>Verifier Endpoint</label>
+      <input id="verifierEndpoint" value="https://demo.kyvc.local/verifier/presentations/verify" />
+      <div class="mt8">
+        <button class="ok" onclick="submitPresentationToVerifier()">Verifier 제출 호출</button>
+      </div>
       <div class="result-panel" id="signResult"></div>
+      <div class="result-panel" id="verifierResult"></div>
     </section>
 
     <section class="card">
@@ -359,7 +365,7 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    const state = { vc: 0, sign: 0, xrpl: 0 };
+    const state = { vc: 0, sign: 0, xrpl: 0, lastPresentation: null, lastDidDocument: null, lastChallenge: null, lastDomain: null };
 
     const sampleVC = {
       id: "vc-kyc-001",
@@ -602,6 +608,42 @@
       showToast("VP 생성 요청됨");
     }
 
+    function submitPresentationToVerifier() {
+      try {
+        const presentation = state.lastPresentation;
+        const didDocument = state.lastDidDocument;
+        if (!presentation || !didDocument) {
+          return showToast("먼저 VP를 생성하세요");
+        }
+        const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
+        const policy = {
+          trustedIssuers: [vc.issuer].filter(Boolean),
+          acceptedKycLevels: vc.credentialSubject?.kycLevel ? [vc.credentialSubject.kycLevel] : [],
+          acceptedJurisdictions: vc.credentialSubject?.jurisdiction ? [vc.credentialSubject.jurisdiction] : []
+        };
+        callAndroid("submitPresentationToVerifier", {
+          endpoint: $("verifierEndpoint").value.trim(),
+          presentation,
+          didDocument,
+          policy,
+          require_status: true,
+          status_mode: "xrpl",
+          challenge: state.lastChallenge,
+          domain: state.lastDomain,
+          credentialId: $("credentialId").value.trim(),
+          issuerAccount: $("issuerAccount").value.trim(),
+          holderAccount: $("holderAccount").value.trim(),
+          credentialType: $("credentialType").value.trim(),
+          vcJson: JSON.stringify(vc)
+        });
+        panel("verifierResult", `<b>Verifier 제출 요청:</b><br/>${$("verifierEndpoint").value.trim()}`);
+        showToast("Verifier 제출 요청됨");
+      } catch (e) {
+        panel("verifierResult", `<b>Verifier 요청 오류:</b><br/>${e.message}`);
+        log("Verifier 제출 요청 실패", { message: e.message });
+      }
+    }
+
     function updateQRPreview() {
       const type = $("qrType").value;
       $("qrPreview").textContent = type;
@@ -706,9 +748,20 @@
             ? `<b>Proof:</b><br/>${result.proofValue}<br/><b>Holder:</b><br/>${result.holder}`
             : `<b>VP 생성 실패:</b><br/>${result.error}`);
           if (result.ok) {
+            state.lastPresentation = result.presentation || null;
+            state.lastDidDocument = result.didDocument || null;
+            state.lastChallenge = result.challenge || null;
+            state.lastDomain = result.domain || null;
             state.sign += 1;
             updateSummary();
           }
+        }
+        if (result.action === "SUBMIT_TO_VERIFIER") {
+          $("signStatus").textContent = result.ok ? "Verifier 제출 완료" : "Verifier 제출 실패";
+          $("signStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("verifierResult", result.ok
+            ? `<b>Verifier 응답:</b><br/>${JSON.stringify(result.response || result.details || {}, null, 2)}`
+            : `<b>Verifier 제출 실패:</b><br/>${result.error}`);
         }
         if (result.action === "SCAN_QR_CODE") {
           $("qrStatus").textContent = result.ok ? (result.mode === "scanned" ? "스캔 완료" : "요청 수신") : "스캔 실패";

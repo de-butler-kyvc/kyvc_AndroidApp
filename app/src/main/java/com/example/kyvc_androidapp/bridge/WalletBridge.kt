@@ -19,6 +19,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.bouncycastle.jce.ECNamedCurveTable
@@ -26,6 +27,11 @@ import org.xrpl.xrpl4j.crypto.keys.Seed
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONObject
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.lang.ref.WeakReference
 import java.time.Instant
 import java.time.format.DateTimeParseException
@@ -46,6 +52,7 @@ class WalletBridge(
     private var currentSeed: Seed? = null
     private var webViewRef: WeakReference<WebView>? = null
     private val vpSigner = VpSigner()
+    private val httpClient = OkHttpClient()
 
     fun attachWebView(webView: WebView) {
         webViewRef = WeakReference(webView)
@@ -378,6 +385,101 @@ class WalletBridge(
     }
 
     @JavascriptInterface
+    fun submitPresentationToVerifier(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val request = Json.parseToJsonElement(jsonPayload).jsonObject
+                val walletState = walletStateStore.requireWalletState()
+                val seed = walletStateStore.requireSeed()
+                currentSeed = seed
+
+                val vcJson = resolveVcJson(request)
+                val vcObject = Json.parseToJsonElement(vcJson).jsonObject
+                validateCredentialAgainstWallet(vcObject, walletState)
+
+                val presentation = request.obj("presentation")
+                    ?: throw IllegalArgumentException("presentation is required")
+                val didDocument = request.obj("didDocument")
+                    ?: request.obj("did_documents")?.get(walletState.did)?.jsonObject
+                    ?: throw IllegalArgumentException("didDocument is required")
+                val endpoint = request.text("endpoint")
+                    ?: request.text("verifierEndpoint")
+                    ?: request.text("url")
+                    ?: throw IllegalArgumentException("endpoint is required")
+                val statusMode = request.text("status_mode") ?: "xrpl"
+                val requireStatus = request["require_status"]?.jsonPrimitive?.booleanOrNull ?: true
+                val policy = request.obj("policy") ?: defaultVerifierPolicy(vcObject)
+
+                ensurePresentationMatchesWallet(presentation, didDocument, walletState)
+
+                if (requireStatus) {
+                    val status = vcObject.obj("credentialStatus")
+                        ?: throw IllegalArgumentException("credentialStatus is required")
+                    val issuerAccount = status.text("issuer") ?: accountFromDid(vcObject.text("issuer").orEmpty())
+                    val holderAccount = status.text("subject") ?: walletState.account
+                    val credentialType = status.text("credentialType")
+                        ?: throw IllegalArgumentException("credentialStatus.credentialType is required")
+                    val xrplStatus = xrplHelper.getCredentialStatus(
+                        issuerAddress = issuerAccount,
+                        holderAddress = holderAccount,
+                        credentialTypeHex = credentialType
+                    )
+                    require(xrplStatus.active) {
+                        xrplStatus.error ?: "XRPL Credential status is not active"
+                    }
+                }
+
+                val requestBody = buildJsonObject {
+                    put("presentation", presentation)
+                    put(
+                        "did_documents",
+                        buildJsonObject {
+                            put(walletState.did, didDocument)
+                        }
+                    )
+                    put("policy", policy)
+                    put("require_status", requireStatus)
+                    put("status_mode", statusMode)
+                }
+
+                val response = postJson(endpoint, requestBody.toString())
+                val responseJson = runCatching { JSONObject(response) }.getOrNull()
+                val ok = responseJson?.optBoolean("ok") == true
+                val errors = responseJson?.optJSONArray("errors")
+                val details = responseJson?.optJSONObject("details")
+
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, if (ok) "Verifier submission completed" else "Verifier submission failed", Toast.LENGTH_LONG).show()
+                    emitCallback("SUBMIT_TO_VERIFIER", ok) {
+                        put("endpoint", endpoint)
+                        put("status_mode", statusMode)
+                        put("require_status", requireStatus)
+                        if (responseJson != null) {
+                            put("response", Json.parseToJsonElement(responseJson.toString()))
+                        } else {
+                            put("responseText", response)
+                        }
+                        if (errors != null) {
+                            put("errors", Json.parseToJsonElement(errors.toString()))
+                        }
+                        if (details != null) {
+                            put("details", Json.parseToJsonElement(details.toString()))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "submitPresentationToVerifier failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Verifier submission failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    emitCallback("SUBMIT_TO_VERIFIER", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun scanQRCode(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
@@ -474,6 +576,8 @@ class WalletBridge(
         val holderAccount = status.text("subject") ?: accountFromDid(holderDid)
         val issuerDid = credential.text("issuerDid") ?: credential.text("issuer").orEmpty()
         val issuerAccount = status.text("issuer") ?: accountFromDid(issuerDid)
+        val subjectAccount = status.text("subject") ?: accountFromDid(holderDid)
+        val credentialType = status.text("credentialType")
 
         if (walletState != null) {
             require(holderDid == walletState.did) {
@@ -483,6 +587,14 @@ class WalletBridge(
                 "holder account mismatch: wallet=${walletState.account}, vc=$holderAccount"
             }
         }
+
+        require(subjectAccount == holderAccount) {
+            "credentialStatus.subject mismatch: status=$subjectAccount, vc=$holderAccount"
+        }
+        require(issuerAccount == accountFromDid(issuerDid)) {
+            "credentialStatus.issuer mismatch: status=$issuerAccount, issuerDid=$issuerDid"
+        }
+        require(!credentialType.isNullOrBlank()) { "credentialStatus.credentialType is required" }
 
         credential.text("validFrom")?.let { validFrom ->
             val validFromInstant = parseInstantOrNull(validFrom)
@@ -504,6 +616,61 @@ class WalletBridge(
         }
         if (status.text("credentialType").isNullOrBlank()) {
             throw IllegalArgumentException("credentialStatus.credentialType is required")
+        }
+    }
+
+    private fun ensurePresentationMatchesWallet(
+        presentation: JsonObject,
+        didDocument: JsonObject,
+        walletState: WalletStateStore.WalletState
+    ) {
+        val holder = presentation.text("holder") ?: throw IllegalArgumentException("presentation.holder is required")
+        require(holder == walletState.did) { "presentation holder mismatch: wallet=${walletState.did}, vp=$holder" }
+        val proof = presentation.obj("proof") ?: throw IllegalArgumentException("presentation.proof is required")
+        val verificationMethod = proof.text("verificationMethod")
+            ?: throw IllegalArgumentException("presentation.proof.verificationMethod is required")
+        val authentication = didDocument["authentication"] as? JsonArray ?: JsonArray(emptyList())
+        require(authentication.any { it.jsonPrimitive.contentOrNull == verificationMethod }) {
+            "verificationMethod is not authorized for authentication"
+        }
+    }
+
+    private fun defaultVerifierPolicy(vcObject: JsonObject): JsonObject {
+        val credentialSubject = vcObject.obj("credentialSubject")
+        val trustedIssuer = vcObject.text("issuer").orEmpty()
+        val acceptedKycLevels = credentialSubject
+            ?.text("kycLevel")
+            ?.let { JsonArray(listOf(JsonPrimitive(it))) }
+            ?: JsonArray(emptyList())
+        val acceptedJurisdictions = credentialSubject
+            ?.text("jurisdiction")
+            ?.let { JsonArray(listOf(JsonPrimitive(it))) }
+            ?: JsonArray(emptyList())
+
+        return buildJsonObject {
+            if (trustedIssuer.isNotBlank()) {
+                put("trustedIssuers", JsonArray(listOf(JsonPrimitive(trustedIssuer))))
+            } else {
+                put("trustedIssuers", JsonArray(emptyList()))
+            }
+            put("acceptedKycLevels", acceptedKycLevels)
+            put("acceptedJurisdictions", acceptedJurisdictions)
+        }
+    }
+
+    private fun postJson(endpoint: String, body: String): String {
+        val url = endpoint.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid verifier endpoint: $endpoint")
+        val request = Request.Builder()
+            .url(url)
+            .post(body.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("Verifier request failed (${response.code}): $responseBody")
+            }
+            return responseBody
         }
     }
 
@@ -616,5 +783,6 @@ class WalletBridge(
 
     private companion object {
         private const val TAG = "WalletBridge"
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }

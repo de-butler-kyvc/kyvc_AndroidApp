@@ -9,6 +9,9 @@ interface CredentialDao {
     @Query("SELECT * FROM credentials")
     fun getAllCredentials(): Flow<List<CredentialEntity>>
 
+    @Query("SELECT * FROM credentials ORDER BY credentialId ASC")
+    suspend fun getAllCredentialsOnce(): List<CredentialEntity>
+
     @Query("SELECT * FROM credentials WHERE credentialId = :id")
     suspend fun getCredentialById(id: String): CredentialEntity?
 

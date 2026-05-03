@@ -282,9 +282,14 @@
       <div class="mt8">
         <button class="warn" onclick="verifyVC()">VC 인증</button>
       </div>
+      <div class="grid mt8">
+        <button class="secondary" onclick="listCredentials()">VC 목록 조회</button>
+        <button class="ghost" onclick="refreshAllCredentialStatuses()">상태 전체 갱신</button>
+      </div>
       <div class="result-panel" id="vcResult"></div>
       <div class="result-panel" id="credentialStatusResult"></div>
       <div class="result-panel" id="vcVerifyResult"></div>
+      <div class="result-panel" id="credentialListResult"></div>
     </section>
 
     <section class="card">
@@ -369,7 +374,7 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    const state = { vc: 0, sign: 0, xrpl: 0, lastPresentation: null, lastDidDocument: null, lastChallenge: null, lastDomain: null };
+    const state = { vc: 0, sign: 0, xrpl: 0, credentials: [], lastPresentation: null, lastDidDocument: null, lastChallenge: null, lastDomain: null };
 
     const sampleVC = {
       id: "vc-kyc-001",
@@ -586,6 +591,22 @@
       }
     }
 
+    function listCredentials() {
+      callAndroid("listCredentials", {});
+      $("vcStatus").textContent = "목록 조회 중";
+      $("vcStatus").className = "mini-status";
+      panel("credentialListResult", "<b>저장된 VC 조회 요청:</b> 처리 중");
+      showToast("VC 목록 조회 요청됨");
+    }
+
+    function refreshAllCredentialStatuses() {
+      callAndroid("refreshAllCredentialStatuses", {});
+      $("vcStatus").textContent = "상태 갱신 중";
+      $("vcStatus").className = "mini-status";
+      panel("credentialListResult", "<b>상태 전체 갱신 요청:</b> 처리 중");
+      showToast("VC 상태 전체 갱신 요청됨");
+    }
+
     function makeHash() {
       $("xrplHash").value = randomHex(64);
       log("XRPL 해시 생성", { hash: $("xrplHash").value });
@@ -771,6 +792,36 @@
           panel("vcVerifyResult", result.ok
             ? `<b>VC 인증 완료:</b><br/>canonicalHash: ${result.canonicalHash}<br/>statusActive: ${result.statusActive}<br/>proofPresent: ${result.proofPresent}`
             : `<b>VC 인증 실패:</b><br/>${(result.issues || [result.error || "unknown"]).join("<br/>")}`);
+        }
+        if (result.action === "LIST_CREDENTIALS") {
+          $("vcStatus").textContent = result.ok ? "목록 확인" : "조회 실패";
+          $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          state.credentials = result.ok && Array.isArray(result.credentials) ? result.credentials : [];
+          const items = state.credentials.length
+            ? state.credentials.map((credential) => `
+                <div style="padding:10px 0;border-top:1px solid #e5e7eb">
+                  <b>${credential.credentialId}</b><br/>
+                  issuer: ${credential.issuerAccount}<br/>
+                  holder: ${credential.holderAccount}<br/>
+                  type: ${credential.credentialType}<br/>
+                  acceptedAt: ${credential.acceptedAt || "-"}<br/>
+                  inactiveAt: ${credential.revokedOrInactiveAt || "-"}
+                </div>
+              `).join("")
+            : "<i>저장된 VC가 없습니다.</i>";
+          panel("credentialListResult", result.ok
+            ? `<b>저장된 VC 목록</b><br/>${items}`
+            : `<b>VC 목록 조회 실패:</b><br/>${result.error}`);
+        }
+        if (result.action === "REFRESH_CREDENTIAL_STATUSES") {
+          $("vcStatus").textContent = result.ok ? "상태 갱신 완료" : "갱신 실패";
+          $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          const lines = result.ok && Array.isArray(result.results)
+            ? result.results.map((item) => `${item.credentialId}: ${item.active ? "active" : "inactive"} (${item.checkedAtUtc})`).join("<br/>")
+            : result.error;
+          panel("credentialListResult", result.ok
+            ? `<b>상태 갱신 결과</b><br/>${lines}`
+            : `<b>상태 갱신 실패:</b><br/>${lines}`);
         }
         if (result.action === "SIGN_MESSAGE") {
           $("signStatus").textContent = result.ok ? "VP 생성 완료" : "VP 생성 실패";

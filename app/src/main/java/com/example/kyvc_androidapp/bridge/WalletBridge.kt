@@ -1,6 +1,7 @@
 package com.example.kyvc_androidapp.bridge
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -51,6 +52,7 @@ class WalletBridge(
     private val db: AppDatabase,
     private val launchQrScanner: (String) -> Unit
 ) {
+    private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
     private var currentSeed: Seed? = null
     private var webViewRef: WeakReference<WebView>? = null
     private val vpSigner = VpSigner()
@@ -328,6 +330,93 @@ class WalletBridge(
     }
 
     @JavascriptInterface
+    fun listCredentials(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val credentials = db.credentialDao().getAllCredentialsOnce()
+                withContext(Dispatchers.Main) {
+                    emitCallback("LIST_CREDENTIALS", true) {
+                        put(
+                            "credentials",
+                            JsonArray(
+                                credentials.map { credential ->
+                                    buildJsonObject {
+                                        put("credentialId", credential.credentialId)
+                                        put("issuerDid", credential.issuerDid)
+                                        put("issuerAccount", credential.issuerAccount)
+                                        put("holderDid", credential.holderDid)
+                                        put("holderAccount", credential.holderAccount)
+                                        put("credentialType", credential.credentialType)
+                                        put("vcCoreHash", credential.vcCoreHash)
+                                        put("validFrom", credential.validFrom)
+                                        put("validUntil", credential.validUntil)
+                                        put("acceptedAt", credential.acceptedAt ?: "")
+                                        put("credentialAcceptHash", credential.credentialAcceptHash ?: "")
+                                        put("revokedOrInactiveAt", credential.revokedOrInactiveAt ?: "")
+                                        put("vcJson", credential.vcJson)
+                                    }
+                                }
+                            )
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "listCredentials failed", e)
+                withContext(Dispatchers.Main) {
+                    emitCallback("LIST_CREDENTIALS", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun refreshAllCredentialStatuses(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val credentials = db.credentialDao().getAllCredentialsOnce()
+                val results = credentials.map { credential ->
+                    val status = xrplHelper.getCredentialStatus(
+                        issuerAddress = credential.issuerAccount,
+                        holderAddress = credential.holderAccount,
+                        credentialTypeHex = credential.credentialType
+                    )
+                    val updated = when {
+                        status.active -> credential.copy(revokedOrInactiveAt = null)
+                        status.found && !status.active && credential.acceptedAt != null ->
+                            credential.copy(revokedOrInactiveAt = status.checkedAtUtc)
+                        else -> credential
+                    }
+                    if (updated != credential) {
+                        db.credentialDao().updateCredential(updated)
+                    }
+                    buildJsonObject {
+                        put("credentialId", credential.credentialId)
+                        put("active", status.active)
+                        put("found", status.found)
+                        put("accepted", status.accepted)
+                        put("checkedAtUtc", status.checkedAtUtc)
+                        status.error?.let { put("error", it) }
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    emitCallback("REFRESH_CREDENTIAL_STATUSES", true) {
+                        put("results", JsonArray(results))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "refreshAllCredentialStatuses failed", e)
+                withContext(Dispatchers.Main) {
+                    emitCallback("REFRESH_CREDENTIAL_STATUSES", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun submitToXRPL(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
@@ -504,8 +593,11 @@ class WalletBridge(
                 val statusMode = request.text("status_mode") ?: "xrpl"
                 val requireStatus = request["require_status"]?.jsonPrimitive?.booleanOrNull ?: true
                 val policy = request.obj("policy") ?: defaultVerifierPolicy(vcObject)
+                val challenge = presentation.obj("proof")?.text("challenge")
+                    ?: throw IllegalArgumentException("presentation.proof.challenge is required")
 
                 ensurePresentationMatchesWallet(presentation, didDocument, walletState)
+                require(!isVerifierChallengeUsed(challenge)) { "VP challenge was already used" }
 
                 if (requireStatus) {
                     val status = vcObject.obj("credentialStatus")
@@ -542,6 +634,9 @@ class WalletBridge(
                 val ok = responseJson?.optBoolean("ok") == true
                 val errors = responseJson?.optJSONArray("errors")
                 val details = responseJson?.optJSONObject("details")
+                if (ok) {
+                    markVerifierChallengeUsed(challenge)
+                }
 
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, if (ok) "Verifier submission completed" else "Verifier submission failed", Toast.LENGTH_LONG).show()
@@ -764,6 +859,21 @@ class WalletBridge(
         val canonical = JsonCanonicalizer(coreObject.toString()).encodedString
         val digest = MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray(Charsets.UTF_8))
         return digest.joinToString("") { "%02X".format(it) }
+    }
+
+    private fun isVerifierChallengeUsed(challenge: String): Boolean {
+        val key = challengeDigest(challenge)
+        return verifierPrefs.getBoolean(key, false)
+    }
+
+    private fun markVerifierChallengeUsed(challenge: String) {
+        val key = challengeDigest(challenge)
+        verifierPrefs.edit().putBoolean(key, true).apply()
+    }
+
+    private fun challengeDigest(challenge: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(challenge.toByteArray(Charsets.UTF_8))
+        return digest.joinToString(separator = "") { "%02x".format(it) }
     }
 
     private fun postJson(endpoint: String, body: String): String {

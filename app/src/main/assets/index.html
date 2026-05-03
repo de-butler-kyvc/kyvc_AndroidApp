@@ -633,8 +633,16 @@
     }
 
     function makeChallenge() {
-      $("signMessage").value = "vp-challenge-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
-      log("서명 Challenge 생성", { message: $("signMessage").value });
+      const challenge = "vp-challenge-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
+      const domain = $("signDomain").value.trim() || "kyvc.local";
+      $("signMessage").value = challenge;
+      callAndroid("registerVerifierChallenge", {
+        challenge,
+        domain,
+        issuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString()
+      });
+      log("서명 Challenge 생성", { message: challenge, domain });
     }
 
     function signMessage() {
@@ -822,6 +830,13 @@
           panel("credentialListResult", result.ok
             ? `<b>상태 갱신 결과</b><br/>${lines}`
             : `<b>상태 갱신 실패:</b><br/>${lines}`);
+        }
+        if (result.action === "REGISTER_VERIFIER_CHALLENGE") {
+          $("signStatus").textContent = result.ok ? "Challenge 등록됨" : "Challenge 등록 실패";
+          $("signStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("signResult", result.ok
+            ? `<b>Challenge 등록 완료:</b><br/>${result.challenge}<br/>domain: ${result.domain}<br/>expiresAt: ${result.expiresAt}`
+            : `<b>Challenge 등록 실패:</b><br/>${result.error}`);
         }
         if (result.action === "SIGN_MESSAGE") {
           $("signStatus").textContent = result.ok ? "VP 생성 완료" : "VP 생성 실패";

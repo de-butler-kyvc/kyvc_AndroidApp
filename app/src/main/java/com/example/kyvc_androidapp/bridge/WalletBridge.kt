@@ -417,6 +417,49 @@ class WalletBridge(
     }
 
     @JavascriptInterface
+    fun registerVerifierChallenge(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val request = parseJsonObjectOrEmpty(jsonPayload)
+                val challenge = request.text("challenge")
+                    ?: throw IllegalArgumentException("challenge is required")
+                val domain = request.text("domain") ?: "kyvc.local"
+                val issuedAt = request.text("issuedAt") ?: nowUtcIso()
+                val expiresAt = request.text("expiresAt")
+                    ?: request.text("expiry")
+                    ?: request.text("expiresAtUtc")
+                    ?: request.text("ttl")?.toLongOrNull()?.let { ttlSec ->
+                        Instant.now().plusSeconds(ttlSec).toString()
+                    }
+                    ?: Instant.now().plusSeconds(300).toString()
+
+                storeVerifierChallenge(
+                    challenge = challenge,
+                    domain = domain,
+                    issuedAt = issuedAt,
+                    expiresAt = expiresAt,
+                    used = false
+                )
+                withContext(Dispatchers.Main) {
+                    emitCallback("REGISTER_VERIFIER_CHALLENGE", true) {
+                        put("challenge", challenge)
+                        put("domain", domain)
+                        put("issuedAt", issuedAt)
+                        put("expiresAt", expiresAt)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "registerVerifierChallenge failed", e)
+                withContext(Dispatchers.Main) {
+                    emitCallback("REGISTER_VERIFIER_CHALLENGE", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun submitToXRPL(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
@@ -514,6 +557,7 @@ class WalletBridge(
                 val vcJson = resolveVcJson(request)
                 val vcObject = Json.parseToJsonElement(vcJson).jsonObject
                 validateCredentialAgainstWallet(vcObject, walletState)
+                ensureVerifierChallengeUsable(challenge, domain)
 
                 val vpWithoutProof = buildJsonObject {
                     put("@context", JsonArray(listOf(JsonPrimitive("https://www.w3.org/ns/credentials/v2"))))
@@ -597,7 +641,7 @@ class WalletBridge(
                     ?: throw IllegalArgumentException("presentation.proof.challenge is required")
 
                 ensurePresentationMatchesWallet(presentation, didDocument, walletState)
-                require(!isVerifierChallengeUsed(challenge)) { "VP challenge was already used" }
+                ensureVerifierChallengeUsable(challenge, request.text("domain"))
 
                 if (requireStatus) {
                     val status = vcObject.obj("credentialStatus")
@@ -861,19 +905,59 @@ class WalletBridge(
         return digest.joinToString("") { "%02X".format(it) }
     }
 
-    private fun isVerifierChallengeUsed(challenge: String): Boolean {
-        val key = challengeDigest(challenge)
-        return verifierPrefs.getBoolean(key, false)
-    }
-
     private fun markVerifierChallengeUsed(challenge: String) {
-        val key = challengeDigest(challenge)
-        verifierPrefs.edit().putBoolean(key, true).apply()
+        val record = getVerifierChallengeRecord(challenge) ?: return
+        storeVerifierChallenge(
+            challenge = record.optString("challenge"),
+            domain = record.optString("domain"),
+            issuedAt = record.optString("issuedAt"),
+            expiresAt = record.optString("expiresAt"),
+            used = true
+        )
     }
 
     private fun challengeDigest(challenge: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(challenge.toByteArray(Charsets.UTF_8))
         return digest.joinToString(separator = "") { "%02x".format(it) }
+    }
+
+    private fun ensureVerifierChallengeUsable(challenge: String, domain: String? = null) {
+        val record = getVerifierChallengeRecord(challenge)
+            ?: throw IllegalArgumentException("VP challenge was not issued by verifier")
+        val storedDomain = record.optString("domain").takeIf { it.isNotBlank() }
+        if (!domain.isNullOrBlank() && !storedDomain.isNullOrBlank()) {
+            require(domain == storedDomain) { "VP domain mismatch" }
+        }
+        val expiresAt = record.optString("expiresAt").takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("VP challenge expiration missing")
+        val expiresInstant = parseInstantOrNull(expiresAt)
+            ?: throw IllegalArgumentException("VP challenge expiration is invalid")
+        require(Instant.now().isBefore(expiresInstant)) { "VP challenge expired" }
+        require(!record.optBoolean("used", false)) { "VP challenge was already used" }
+    }
+
+    private fun storeVerifierChallenge(
+        challenge: String,
+        domain: String,
+        issuedAt: String,
+        expiresAt: String,
+        used: Boolean
+    ) {
+        val record = JSONObject()
+            .put("challenge", challenge)
+            .put("domain", domain)
+            .put("issuedAt", issuedAt)
+            .put("expiresAt", expiresAt)
+            .put("used", used)
+            .put("updatedAt", nowUtcIso())
+        verifierPrefs.edit()
+            .putString("challenge:${challengeDigest(challenge)}", record.toString())
+            .apply()
+    }
+
+    private fun getVerifierChallengeRecord(challenge: String): JSONObject? {
+        val raw = verifierPrefs.getString("challenge:${challengeDigest(challenge)}", null) ?: return null
+        return runCatching { JSONObject(raw) }.getOrNull()
     }
 
     private fun postJson(endpoint: String, body: String): String {

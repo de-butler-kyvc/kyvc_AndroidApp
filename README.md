@@ -43,7 +43,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Verifier Submit**: `submitPresentationToVerifier` 브릿지에서 signed VP, holder DID Document, policy, XRPL status 요구조건을 묶어 `/verifier/presentations/verify` 요청을 POST
 - **VC Verify**: `verifyVC` 브릿지에서 canonical VC hash, proof 구조, XRPL active 상태를 검사해 로컬 인증 결과를 반환
 - **Credential List**: 저장된 VC 목록을 불러오고, XRPL 상태를 일괄 재조회해 저장 상태를 동기화
-- **Challenge Guard**: verifier challenge의 재사용을 로컬에 저장해 차단
+- **Challenge Guard**: verifier challenge를 로컬에 등록하고 만료/중복 사용을 차단
 
 ## 🚀 향후 작업 계획
 - [x] **MCP 연동 환경 구성**: AI 어시스턴트 협업을 위한 `mcp-context.md` 및 환경 설정 완료
@@ -58,6 +58,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [x] **VC(Verifiable Credentials) 인증 시스템**: canonical hash, proof 구조, XRPL active 상태 검증
 - [x] **Verifier 제출 연동**: `/verifier/presentations/verify` 요청 구성 및 challenge 사용 상태 처리
 - [x] **저장 VC 목록/상태 갱신**: 로컬 credential 목록 조회와 XRPL 상태 일괄 동기화
+- [x] **Challenge Guard**: verifier challenge 등록, 만료 확인, 중복 제출 차단
 
 ## 여기서 더 구현할 수 있는 것
 - **Issuer proof 검증**
@@ -65,7 +66,6 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
   - 현재는 주로 형식, 계정 정합성, XRPL 상태를 검증한다
 - **Challenge 보관/만료 관리**
   - verifier challenge를 로컬에 저장하고 만료 전에만 VP 제출 허용
-  - 이미 사용한 challenge 재사용 차단
 - **QR 요청 파서 강화**
   - QR 안의 실제 요청 스키마를 분리해서 `VC 발급`, `VP 제출`, `로그인`을 명확히 구분
 - **백업/복구**
@@ -106,4 +106,4 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `submitPresentationToVerifier`는 `signMessage`로 생성한 VP와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `presentation`, `did_documents`, `policy`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.
 
-`listCredentials`는 앱에 저장된 VC를 목록으로 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
+`listCredentials`는 앱에 저장된 VC를 목록으로 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.

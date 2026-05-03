@@ -276,7 +276,11 @@
         <button class="secondary" onclick="randomizeVC()">샘플 변경</button>
         <button class="ok" onclick="saveVC()">VC 저장 호출</button>
       </div>
+      <div class="mt8">
+        <button class="ghost" onclick="checkCredentialStatus()">XRPL 상태 조회</button>
+      </div>
       <div class="result-panel" id="vcResult"></div>
+      <div class="result-panel" id="credentialStatusResult"></div>
     </section>
 
     <section class="card">
@@ -532,6 +536,26 @@
       }
     }
 
+    function checkCredentialStatus() {
+      try {
+        const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
+        callAndroid("checkCredentialStatus", {
+          credentialId: $("credentialId").value.trim() || vc.id,
+          issuerAccount: $("issuerAccount").value.trim(),
+          holderAccount: $("holderAccount").value.trim(),
+          credentialType: $("credentialType").value.trim(),
+          vcJson: JSON.stringify(vc)
+        });
+        $("vcStatus").textContent = "상태 조회 중";
+        $("vcStatus").className = "mini-status";
+        panel("credentialStatusResult", `<b>상태 조회 요청:</b> ${vc.id}`);
+        showToast("Credential 상태 조회 요청됨");
+      } catch (e) {
+        panel("credentialStatusResult", `<b>상태 조회 오류:</b> ${e.message}`);
+        log("Credential status 요청 실패", { message: e.message });
+      }
+    }
+
     function makeHash() {
       $("xrplHash").value = randomHex(64);
       log("XRPL 해시 생성", { hash: $("xrplHash").value });
@@ -665,6 +689,15 @@
             state.vc += 1;
             updateSummary();
           }
+        }
+        if (result.action === "CHECK_CREDENTIAL_STATUS") {
+          $("vcStatus").textContent = result.ok ? (result.active ? "활성" : "비활성") : "조회 실패";
+          $("vcStatus").className = result.ok
+            ? (result.active ? "mini-status ok" : "mini-status warn")
+            : "mini-status warn";
+          panel("credentialStatusResult", result.ok
+            ? `<b>상태 조회 완료:</b><br/>found: ${result.found}<br/>active: ${result.active}<br/>accepted: ${result.accepted}<br/>index: ${result.credentialIndex}<br/>checkedAt: ${result.checkedAtUtc}`
+            : `<b>상태 조회 실패:</b><br/>${result.error}`);
         }
         if (result.action === "SIGN_MESSAGE") {
           $("signStatus").textContent = result.ok ? "VP 생성 완료" : "VP 생성 실패";

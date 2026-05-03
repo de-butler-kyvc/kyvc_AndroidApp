@@ -27,6 +27,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONObject
 import java.lang.ref.WeakReference
+import java.time.Instant
+import java.time.format.DateTimeParseException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -103,6 +105,7 @@ class WalletBridge(
         scope.launch(Dispatchers.IO) {
             try {
                 val json = Json.parseToJsonElement(jsonPayload).jsonObject
+                validateCredentialAgainstWallet(json, walletStateStore.getWalletStateOrNull())
                 val status = json.obj("credentialStatus")
                 val subject = json.obj("credentialSubject")
                 val issuerDid = json.text("issuerDid") ?: json.text("issuer").orEmpty()
@@ -144,6 +147,85 @@ class WalletBridge(
     }
 
     @JavascriptInterface
+    fun checkCredentialStatus(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val request = Json.parseToJsonElement(jsonPayload).jsonObject
+                val savedCredential = request.text("credentialId")
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { db.credentialDao().getCredentialById(it) }
+                val vcJson = resolveVcJson(request)
+                val vc = Json.parseToJsonElement(vcJson).jsonObject
+                validateCredentialAgainstWallet(vc, walletStateStore.getWalletStateOrNull())
+                val status = vc.obj("credentialStatus")
+                    ?: throw IllegalArgumentException("credentialStatus is required")
+
+                val issuerAccount = request.text("issuerAccount")
+                    ?: status.text("issuer")
+                    ?: savedCredential?.issuerAccount
+                    ?: accountFromDid(request.text("issuerDid").orEmpty())
+                val holderAccount = request.text("holderAccount")
+                    ?: status.text("subject")
+                    ?: savedCredential?.holderAccount
+                    ?: walletStateStore.getWalletStateOrNull()?.account
+                    ?: throw IllegalArgumentException("holderAccount is required")
+                val credentialType = request.text("credentialType")
+                    ?: status.text("credentialType")
+                    ?: savedCredential?.credentialType
+                    ?: throw IllegalArgumentException("credentialType is required")
+
+                val result = xrplHelper.getCredentialStatus(
+                    issuerAddress = issuerAccount,
+                    holderAddress = holderAccount,
+                    credentialTypeHex = credentialType
+                )
+
+                if (savedCredential != null) {
+                    val nextCredential = when {
+                        result.active -> savedCredential.copy(revokedOrInactiveAt = null)
+                        result.found && !result.active && savedCredential.acceptedAt != null ->
+                            savedCredential.copy(revokedOrInactiveAt = result.checkedAtUtc)
+                        else -> savedCredential
+                    }
+                    if (nextCredential != savedCredential) {
+                        db.credentialDao().updateCredential(nextCredential)
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    emitCallback("CHECK_CREDENTIAL_STATUS", true) {
+                        put("credentialId", savedCredential?.credentialId.orEmpty())
+                        put("credentialIndex", result.credentialIndex)
+                        put("found", result.found)
+                        put("active", result.active)
+                        put("accepted", result.accepted)
+                        put("issuerAccount", result.issuerAccount)
+                        put("holderAccount", result.holderAccount)
+                        put("credentialType", result.credentialType)
+                        put("checkedAtUtc", result.checkedAtUtc)
+                        result.flags?.let { put("flags", it) }
+                        result.expiration?.let { put("expiration", it) }
+                        result.error?.let { put("error", it) }
+                    }
+                    Toast.makeText(
+                        context,
+                        if (result.active) "Credential active" else "Credential inactive",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "checkCredentialStatus failed", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Credential status check failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    emitCallback("CHECK_CREDENTIAL_STATUS", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun submitToXRPL(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
@@ -155,9 +237,12 @@ class WalletBridge(
                 val savedCredential = request.text("credentialId")
                     ?.takeIf { it.isNotBlank() }
                     ?.let { db.credentialDao().getCredentialById(it) }
+                val vcJson = resolveVcJson(request)
+                val vcObject = Json.parseToJsonElement(vcJson).jsonObject
+                validateCredentialAgainstWallet(vcObject, walletStateStore.getWalletStateOrNull())
                 val vcStatus = request.obj("credentialStatus")
                     ?: request.obj("credential")?.obj("credentialStatus")
-                    ?: request.text("vcJson")?.let { runCatching { Json.parseToJsonElement(it).jsonObject.obj("credentialStatus") }.getOrNull() }
+                    ?: vcObject.obj("credentialStatus")
 
                 val issuerAccount = request.text("issuerAccount")
                     ?: vcStatus?.text("issuer")
@@ -237,6 +322,7 @@ class WalletBridge(
                 currentSeed = seed
                 val vcJson = resolveVcJson(request)
                 val vcObject = Json.parseToJsonElement(vcJson).jsonObject
+                validateCredentialAgainstWallet(vcObject, walletState)
 
                 val vpWithoutProof = buildJsonObject {
                     put("@context", JsonArray(listOf(JsonPrimitive("https://www.w3.org/ns/credentials/v2"))))
@@ -373,6 +459,59 @@ class WalletBridge(
         }
         return runCatching { Json.parseToJsonElement(jsonPayload).jsonObject }.getOrElse {
             buildJsonObject { }
+        }
+    }
+
+    private fun validateCredentialAgainstWallet(
+        credential: JsonObject,
+        walletState: WalletStateStore.WalletState?
+    ) {
+        val subject = credential.obj("credentialSubject")
+            ?: throw IllegalArgumentException("credentialSubject is required")
+        val status = credential.obj("credentialStatus")
+            ?: throw IllegalArgumentException("credentialStatus is required")
+        val holderDid = credential.text("holderDid") ?: subject.text("id").orEmpty()
+        val holderAccount = status.text("subject") ?: accountFromDid(holderDid)
+        val issuerDid = credential.text("issuerDid") ?: credential.text("issuer").orEmpty()
+        val issuerAccount = status.text("issuer") ?: accountFromDid(issuerDid)
+
+        if (walletState != null) {
+            require(holderDid == walletState.did) {
+                "holder DID mismatch: wallet=${walletState.did}, vc=$holderDid"
+            }
+            require(holderAccount == walletState.account) {
+                "holder account mismatch: wallet=${walletState.account}, vc=$holderAccount"
+            }
+        }
+
+        credential.text("validFrom")?.let { validFrom ->
+            val validFromInstant = parseInstantOrNull(validFrom)
+            if (validFromInstant != null) {
+                require(!Instant.now().isBefore(validFromInstant)) { "VC is not yet valid" }
+            }
+        }
+        credential.text("validUntil")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { validUntil ->
+                val validUntilInstant = parseInstantOrNull(validUntil)
+                if (validUntilInstant != null) {
+                    require(Instant.now().isBefore(validUntilInstant)) { "VC has expired" }
+                }
+            }
+
+        if (issuerAccount.isBlank()) {
+            throw IllegalArgumentException("issuer account is required")
+        }
+        if (status.text("credentialType").isNullOrBlank()) {
+            throw IllegalArgumentException("credentialStatus.credentialType is required")
+        }
+    }
+
+    private fun parseInstantOrNull(value: String): Instant? {
+        return try {
+            Instant.parse(value)
+        } catch (_: DateTimeParseException) {
+            null
         }
     }
 

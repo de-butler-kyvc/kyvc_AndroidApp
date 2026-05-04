@@ -50,6 +50,7 @@ import java.util.TimeZone
 import java.security.MessageDigest
 import java.security.Signature
 import android.util.Base64
+import java.util.concurrent.TimeUnit
 
 class WalletBridge(
     private val context: Context,
@@ -63,7 +64,12 @@ class WalletBridge(
     private var currentSeed: Seed? = null
     private var webViewRef: WeakReference<WebView>? = null
     private val vpSigner = VpSigner()
-    private val httpClient = OkHttpClient()
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(20, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .writeTimeout(30, TimeUnit.SECONDS)
+        .callTimeout(75, TimeUnit.SECONDS)
+        .build()
 
     fun attachWebView(webView: WebView) {
         webViewRef = WeakReference(webView)
@@ -122,7 +128,9 @@ class WalletBridge(
     fun saveVC(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                val json = Json.parseToJsonElement(jsonPayload).jsonObject
+                val envelope = parseCredentialEnvelope(jsonPayload)
+                val json = envelope.payload
+                validateCredentialJwt(envelope, issuerDidDocument = null)
                 validateCredentialAgainstWallet(json, walletStateStore.getWalletStateOrNull())
                 val issuerProof = verifyIssuerProof(json)
                 require(!issuerProof.supported || issuerProof.verified) {
@@ -134,7 +142,7 @@ class WalletBridge(
                 val holderDid = json.text("holderDid") ?: subject?.text("id").orEmpty()
                 val entity = CredentialEntity(
                     credentialId = json.text("credentialId") ?: json.text("id").orEmpty(),
-                    vcJson = json.text("vcJson") ?: jsonPayload,
+                    vcJson = envelope.rawCredential,
                     issuerDid = issuerDid,
                     issuerAccount = json.text("issuerAccount")
                         ?: status?.text("issuer")
@@ -154,6 +162,7 @@ class WalletBridge(
                     Toast.makeText(context, "VC Saved Successfully", Toast.LENGTH_SHORT).show()
                     emitCallback("SAVE_VC", true) {
                         put("credentialId", entity.credentialId)
+                        envelope.vcJwt?.let { put("vcJwt", it) }
                     }
                 }
             } catch (e: Exception) {
@@ -673,11 +682,27 @@ class WalletBridge(
                 val endpoint = resolveBackendEndpoint(baseUrl, request.text("endpoint"), "/issuer/credentials/kyc")
                 val responseBody = postJson(endpoint, payload, "Issuer request")
                 val response = Json.parseToJsonElement(responseBody).jsonObject
-                val credential = response.obj("credential")
+                val credentialJwt = response.text("credential")
+                    ?: response.text("vc_jwt")
+                    ?: response.text("vcJwt")
+                val credential = credentialJwt?.let { decodeJwtPayload(it) }
+                    ?: response.obj("credential")
                     ?: response.obj("credential_json")
                     ?: response.obj("vc")
                     ?: response.obj("data")
                     ?: response
+                credentialJwt?.let {
+                    val issuerDid = credential.text("issuer")
+                    val issuerAccount = accountFromDid(issuerDid.orEmpty())
+                        ?: credential.obj("credentialStatus")?.text("issuer")
+                    val issuerDidDocument = fetchJsonOrNull(
+                        resolveBackendEndpoint(baseUrl, null, "/dids/$issuerAccount/diddoc.json")
+                    )
+                    validateCredentialJwt(
+                        CredentialEnvelope(rawCredential = it, vcJwt = it, payload = credential),
+                        issuerDidDocument = issuerDidDocument
+                    )
+                }
                 val vcJson = credential.toString()
                 val credentialId = credential.text("id") ?: request.text("credentialId").orEmpty()
                 val issuerAccount = credential.obj("credentialStatus")?.text("issuer")
@@ -703,6 +728,7 @@ class WalletBridge(
                         put("credentialType", credentialType)
                         put("vcCoreHash", vcCoreHash)
                         put("vcJson", vcJson)
+                        credentialJwt?.let { put("vcJwt", it) }
                         response.text("status_mode")?.let { put("statusMode", it) }
                         response.text("txHash")?.let { put("txHash", it) }
                         response.text("credential_create_hash")?.let { put("credentialCreateHash", it) }
@@ -711,9 +737,13 @@ class WalletBridge(
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "requestIssuerCredential failed", e)
+                val issuerFailure = classifyIssuerRequestFailure(e.message)
                 withContext(Dispatchers.Main) {
                     emitCallback("ISSUER_CREDENTIAL_RECEIVED", false) {
                         put("error", e.message ?: "Unknown error")
+                        put("errorCode", issuerFailure.code)
+                        put("errorTitle", issuerFailure.title)
+                        put("errorHint", issuerFailure.hint)
                     }
                 }
             }
@@ -775,6 +805,7 @@ class WalletBridge(
                     ?: "https://dev-core-kyvc.khuoo.synology.me"
                 val walletState = walletStateStore.requireWalletState()
                 val vcJson = resolveVcJson(request)
+                val vcJwt = resolveVcJwt(request)
                 val credential = Json.parseToJsonElement(vcJson).jsonObject
                 val requireStatus = request["require_status"]?.jsonPrimitive?.booleanOrNull ?: true
                 val statusMode = request.text("status_mode") ?: "xrpl"
@@ -798,7 +829,11 @@ class WalletBridge(
                     }
                 }
                 val requestBody = buildJsonObject {
-                    put("credential", credential)
+                    if (vcJwt != null) {
+                        put("credential", vcJwt)
+                    } else {
+                        put("credential", credential)
+                    }
                     put("did_documents", didDocuments)
                     request.obj("policy")?.let { put("policy", it) }
                     put("require_status", requireStatus)
@@ -808,6 +843,10 @@ class WalletBridge(
                 val responseBody = postJson(endpoint, requestBody.toString(), "Verifier credential request")
                 val response = Json.parseToJsonElement(responseBody).jsonObject
                 val ok = response["ok"]?.jsonPrimitive?.booleanOrNull == true
+                val failureInfo = if (ok) null else classifyVerifierFailure(
+                    runCatching { JSONObject(responseBody) }.getOrNull(),
+                    null
+                )
 
                 withContext(Dispatchers.Main) {
                     emitCallback("VERIFY_CREDENTIAL_WITH_SERVER", ok) {
@@ -815,13 +854,23 @@ class WalletBridge(
                         put("require_status", requireStatus)
                         put("status_mode", statusMode)
                         put("response", response)
+                        failureInfo?.let { info ->
+                            put("errorCode", info.code)
+                            put("errorTitle", info.title)
+                            put("errorHint", info.hint)
+                            put("error", info.title)
+                        }
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "verifyCredentialWithServer failed", e)
+                val failureInfo = classifyVerifierFailure(null, e.message)
                 withContext(Dispatchers.Main) {
                     emitCallback("VERIFY_CREDENTIAL_WITH_SERVER", false) {
                         put("error", e.message ?: "Unknown error")
+                        put("errorCode", failureInfo.code)
+                        put("errorTitle", failureInfo.title)
+                        put("errorHint", failureInfo.hint)
                     }
                 }
             }
@@ -839,9 +888,11 @@ class WalletBridge(
 
                 val walletState = walletStateStore.requireWalletState()
                 val seed = walletStateStore.requireSeed()
+                val authPrivateKey = walletStateStore.requireAuthPrivateKeyBytes()
                 currentSeed = seed
                 val vcJson = resolveVcJson(request)
                 val vcObject = Json.parseToJsonElement(vcJson).jsonObject
+                val vcJwt = resolveVcJwt(request)
                 validateCredentialAgainstWallet(vcObject, walletState)
                 ensureVerifierChallengeUsable(challenge, domain)
 
@@ -861,10 +912,36 @@ class WalletBridge(
                     put("domain", domain)
                 }
                 val proofValue = vpSigner.signVp(
-                    privateKey = seed.deriveKeyPair().privateKey(),
+                    privateKeyScalar = authPrivateKey,
                     vpWithoutProof = vpWithoutProof,
                     proofWithoutValue = proofWithoutValue
                 )
+                val vpJwt = vcJwt?.let {
+                    val envelopedVc = buildJsonObject {
+                        put("@context", "https://www.w3.org/ns/credentials/v2")
+                        put("id", "data:application/vc+jwt,$it")
+                        put("type", "EnvelopedVerifiableCredential")
+                    }
+                    val vpPayload = buildJsonObject {
+                        put("@context", JsonArray(listOf(JsonPrimitive("https://www.w3.org/ns/credentials/v2"))))
+                        put("type", JsonArray(listOf(JsonPrimitive("VerifiablePresentation"))))
+                        put("holder", walletState.did)
+                        put("verifiableCredential", JsonArray(listOf(envelopedVc)))
+                    }
+                    val protectedHeader = buildJsonObject {
+                        put("alg", "ES256K")
+                        put("typ", "vp+jwt")
+                        put("cty", "vp")
+                        put("kid", "${walletState.did}#holder-key-1")
+                        put("challenge", challenge)
+                        put("domain", domain)
+                    }
+                    vpSigner.signCompactJws(
+                        privateKeyScalar = authPrivateKey,
+                        protectedHeaderJson = protectedHeader.toString(),
+                        payloadJson = vpPayload.toString()
+                    )
+                }
                 val proof = buildJsonObject {
                     proofWithoutValue.forEach { (key, value) -> put(key, value) }
                     put("proofValue", proofValue)
@@ -883,6 +960,8 @@ class WalletBridge(
                         put("domain", domain)
                         put("proofValue", proofValue)
                         put("presentation", presentation)
+                        vpJwt?.let { put("presentationJwt", it) }
+                        vcJwt?.let { put("vcJwt", it) }
                         put("didDocument", Json.parseToJsonElement(didDocument))
                     }
                 }
@@ -913,6 +992,7 @@ class WalletBridge(
 
                 val presentation = request.obj("presentation")
                     ?: throw IllegalArgumentException("presentation is required")
+                val presentationJwt = request.text("presentationJwt")
                 val didDocument = request.obj("didDocument")
                     ?: request.obj("did_documents")?.get(walletState.did)?.jsonObject
                     ?: throw IllegalArgumentException("didDocument is required")
@@ -948,7 +1028,11 @@ class WalletBridge(
                 }
 
                 val requestBody = buildJsonObject {
-                    put("presentation", presentation)
+                    if (!presentationJwt.isNullOrBlank()) {
+                        put("presentation", presentationJwt)
+                    } else {
+                        put("presentation", presentation)
+                    }
                     put(
                         "did_documents",
                         buildJsonObject {
@@ -965,6 +1049,7 @@ class WalletBridge(
                 val ok = responseJson?.optBoolean("ok") == true
                 val errors = responseJson?.optJSONArray("errors")
                 val details = responseJson?.optJSONObject("details")
+                val failureInfo = if (ok) null else classifyVerifierFailure(responseJson, null)
                 if (ok) {
                     markVerifierChallengeUsed(challenge)
                 }
@@ -986,14 +1071,24 @@ class WalletBridge(
                         if (details != null) {
                             put("details", Json.parseToJsonElement(details.toString()))
                         }
+                        failureInfo?.let { info ->
+                            put("errorCode", info.code)
+                            put("errorTitle", info.title)
+                            put("errorHint", info.hint)
+                            put("error", info.title)
+                        }
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "submitPresentationToVerifier failed", e)
+                val failureInfo = classifyVerifierFailure(null, e.message)
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Verifier submission failed: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback("SUBMIT_TO_VERIFIER", false) {
                         put("error", e.message ?: "Unknown error")
+                        put("errorCode", failureInfo.code)
+                        put("errorTitle", failureInfo.title)
+                        put("errorHint", failureInfo.hint)
                     }
                 }
             }
@@ -1006,19 +1101,16 @@ class WalletBridge(
             try {
                 val request = parseJsonObjectOrEmpty(jsonPayload)
                 val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
-                val purpose = request.text("purpose") ?: "unknown"
-                val endpoint = request.text("endpoint") ?: request.text("callbackUrl")
-                val expiresInSec = request.text("expiresInSec") ?: request.text("ttl")
                 val qrData = request.text("qrData") ?: request.text("data") ?: request.text("text")
+                val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
+                val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
+                registerQrChallengeIfPresent(qrInfo)
 
                 withContext(Dispatchers.Main) {
                     emitCallback("SCAN_QR_CODE", true) {
                         put("mode", "request_received")
                         put("requestId", requestId)
-                        put("purpose", purpose)
-                        endpoint?.let { put("endpoint", it) }
-                        expiresInSec?.let { put("expiresInSec", it) }
-                        qrData?.let { put("qrData", it) }
+                        putQrRequestInfo(qrInfo)
                     }
                     launchQrScanner(jsonPayload)
                 }
@@ -1047,17 +1139,14 @@ class WalletBridge(
 
                 val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
                 val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
-                val purpose = request.text("purpose") ?: "unknown"
-                val endpoint = request.text("endpoint") ?: request.text("callbackUrl")
-                val expiresInSec = request.text("expiresInSec") ?: request.text("ttl")
+                val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
+                val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
+                registerQrChallengeIfPresent(qrInfo)
 
                 emitCallback("SCAN_QR_CODE", true) {
                     put("mode", "scanned")
                     put("requestId", requestId)
-                    put("purpose", purpose)
-                    qrData?.let { put("qrData", it) }
-                    endpoint?.let { put("endpoint", it) }
-                    expiresInSec?.let { put("expiresInSec", it) }
+                    putQrRequestInfo(qrInfo)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "onQrScanResult failed", e)
@@ -1072,6 +1161,188 @@ class WalletBridge(
         return (this[name] as? JsonPrimitive)
             ?.contentOrNull
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun kotlinx.serialization.json.JsonObjectBuilder.putQrRequestInfo(info: QrRequestInfo) {
+        put("actionType", info.actionType)
+        put("purpose", info.actionType)
+        info.endpoint?.let { put("endpoint", it) }
+        info.coreBaseUrl?.let { put("coreBaseUrl", it) }
+        info.challenge?.let { put("challenge", it) }
+        info.domain?.let { put("domain", it) }
+        info.expiresAt?.let { put("expiresAt", it) }
+        info.expiresInSec?.let { put("expiresInSec", it) }
+        info.qrData?.let { put("qrData", it) }
+        info.rawPayload?.let { put("rawPayload", it) }
+    }
+
+    private fun buildQrRequestInfo(
+        request: JsonObject,
+        qrPayload: JsonObject,
+        qrData: String?
+    ): QrRequestInfo {
+        val actionType = normalizeQrAction(
+            firstQrText(request, qrPayload, "actionType", "purpose", "type", "requestType", "kind")
+        )
+        val expiresInSec = firstQrText(request, qrPayload, "expiresInSec", "ttl", "ttlSec", "expires_in")
+        val expiresAt = firstQrText(request, qrPayload, "expiresAt", "expires_at", "expiration")
+            ?: expiresInSec
+                ?.toLongOrNull()
+                ?.let { Instant.now().plusSeconds(it).toString() }
+
+        return QrRequestInfo(
+            actionType = actionType,
+            endpoint = firstQrText(request, qrPayload, "endpoint", "callbackUrl", "callback_url", "verifierEndpoint", "verificationEndpoint"),
+            coreBaseUrl = firstQrText(request, qrPayload, "coreBaseUrl", "baseUrl", "core_base_url", "issuerBaseUrl"),
+            challenge = firstQrText(request, qrPayload, "challenge", "nonce"),
+            domain = firstQrText(request, qrPayload, "domain", "audience") ?: "kyvc.local",
+            expiresAt = expiresAt,
+            expiresInSec = expiresInSec,
+            qrData = qrData,
+            rawPayload = if (qrPayload.isNotEmpty()) qrPayload.toString() else null
+        )
+    }
+
+    private fun firstQrText(request: JsonObject, qrPayload: JsonObject, vararg names: String): String? {
+        return names.firstNotNullOfOrNull { name ->
+            request.text(name) ?: qrPayload.text(name)
+        }
+    }
+
+    private fun normalizeQrAction(rawAction: String?): String {
+        val normalized = rawAction
+            ?.uppercase(Locale.US)
+            ?.replace("-", "_")
+            ?.replace(" ", "_")
+            .orEmpty()
+        return when {
+            normalized in setOf("VC_ISSUE", "ISSUE_VC", "CREDENTIAL_OFFER", "CREDENTIAL_ISSUE") -> "VC_ISSUE"
+            normalized.contains("VC") && normalized.contains("ISSUE") -> "VC_ISSUE"
+            normalized.contains("CREDENTIAL") && normalized.contains("OFFER") -> "VC_ISSUE"
+            normalized in setOf("VP_REQUEST", "PRESENTATION_REQUEST", "VERIFY_REQUEST") -> "VP_REQUEST"
+            normalized.contains("PRESENTATION") && normalized.contains("REQUEST") -> "VP_REQUEST"
+            normalized.contains("VP") && normalized.contains("REQUEST") -> "VP_REQUEST"
+            normalized in setOf("LOGIN", "LOGIN_REQUEST", "AUTH_REQUEST") -> "LOGIN_REQUEST"
+            else -> "UNKNOWN"
+        }
+    }
+
+    private fun registerQrChallengeIfPresent(info: QrRequestInfo) {
+        val challenge = info.challenge ?: return
+        val expiresAt = info.expiresAt ?: Instant.now().plusSeconds(300).toString()
+        storeVerifierChallenge(
+            challenge = challenge,
+            domain = info.domain ?: "kyvc.local",
+            issuedAt = nowUtcIso(),
+            expiresAt = expiresAt,
+            used = false
+        )
+    }
+
+    private fun classifyVerifierFailure(responseJson: JSONObject?, fallbackMessage: String?): VerifierFailureInfo {
+        val messages = mutableListOf<String>()
+        fallbackMessage?.takeIf { it.isNotBlank() }?.let(messages::add)
+        responseJson?.optJSONArray("errors")?.let { errors ->
+            for (index in 0 until errors.length()) {
+                errors.optString(index).takeIf { it.isNotBlank() }?.let(messages::add)
+            }
+        }
+        val details = responseJson?.optJSONObject("details")
+        details?.optJSONArray("policyErrors")?.let { errors ->
+            for (index in 0 until errors.length()) {
+                errors.optString(index).takeIf { it.isNotBlank() }?.let(messages::add)
+            }
+        }
+        if (details?.has("credentialAccepted") == true && !details.optBoolean("credentialAccepted")) {
+            messages.add("XRPL Credential status is not active")
+        }
+
+        val joined = messages.joinToString(" ").lowercase(Locale.US)
+        return when {
+            "not issued" in joined && "challenge" in joined -> VerifierFailureInfo(
+                "VP_CHALLENGE_NOT_ISSUED",
+                "Verifier Challenge가 등록되지 않았습니다",
+                "실제 Challenge 요청을 먼저 실행한 뒤, 그 challenge로 VP를 다시 생성하세요."
+            )
+            "already used" in joined && "challenge" in joined -> VerifierFailureInfo(
+                "VP_CHALLENGE_ALREADY_USED",
+                "이미 사용된 Challenge입니다",
+                "Challenge는 1회용입니다. 새 Challenge를 받은 뒤 VP를 다시 생성하세요."
+            )
+            "expired" in joined && "challenge" in joined -> VerifierFailureInfo(
+                "VP_CHALLENGE_EXPIRED",
+                "Challenge가 만료됐습니다",
+                "새 Challenge를 발급받아 VP를 다시 생성하세요."
+            )
+            "domain mismatch" in joined -> VerifierFailureInfo(
+                "VP_DOMAIN_MISMATCH",
+                "VP domain이 일치하지 않습니다",
+                "Challenge 발급 시 받은 domain과 VP 생성 domain을 같은 값으로 맞추세요."
+            )
+            "vp signature" in joined || ("presentation" in joined && "signature" in joined) -> VerifierFailureInfo(
+                "VP_SIGNATURE_INVALID",
+                "VP 서명 검증에 실패했습니다",
+                "holder 인증 키와 DID Document의 holder-key-1 공개키가 같은 키쌍인지 확인하세요."
+            )
+            "vc signature" in joined -> VerifierFailureInfo(
+                "VC_SIGNATURE_INVALID",
+                "VC 서명 검증에 실패했습니다",
+                "issuer가 발급한 VC JWT 원문을 변형하지 말고 그대로 저장/제출해야 합니다."
+            )
+            "xrpl credential status is not active" in joined || "credentialaccepted" in joined -> VerifierFailureInfo(
+                "XRPL_STATUS_INACTIVE",
+                "XRPL Credential이 아직 활성 상태가 아닙니다",
+                "CredentialAccept 제출 후 상태 조회에서 active: true, accepted: true가 되는지 확인하세요."
+            )
+            "policy" in joined -> VerifierFailureInfo(
+                "POLICY_REJECTED",
+                "Verifier 정책 조건을 통과하지 못했습니다",
+                "trustedIssuers, kycLevel, jurisdiction 값이 VC 내용과 맞는지 확인하세요."
+            )
+            "did resolution failed" in joined || "did document not found" in joined -> VerifierFailureInfo(
+                "DID_DOCUMENT_NOT_FOUND",
+                "DID Document를 찾지 못했습니다",
+                "issuer DID Document가 core에 등록되어 있는지, holder DID Document가 제출 요청에 포함됐는지 확인하세요."
+            )
+            "timeout" in joined || "timed out" in joined -> VerifierFailureInfo(
+                "VERIFIER_REQUEST_TIMEOUT",
+                "Verifier 서버 응답 시간이 초과됐습니다",
+                "dev-core 서버 또는 XRPL status 조회가 지연된 상태입니다. 네트워크/VPN 연결을 확인하고 잠시 뒤 다시 시도하세요."
+            )
+            else -> VerifierFailureInfo(
+                "VERIFIER_REJECTED",
+                "Verifier가 제출을 거부했습니다",
+                messages.firstOrNull() ?: "응답의 errors/details를 확인하세요."
+            )
+        }
+    }
+
+    private fun classifyIssuerRequestFailure(message: String?): VerifierFailureInfo {
+        val text = message.orEmpty().lowercase(Locale.US)
+        return when {
+            "timeout" in text || "timed out" in text -> VerifierFailureInfo(
+                "ISSUER_REQUEST_TIMEOUT",
+                "Issuer 서버 응답 시간이 초과됐습니다",
+                "dev-core 서버 또는 XRPL devnet 처리가 지연된 상태입니다. 네트워크/VPN 연결을 확인하고 잠시 뒤 다시 시도하세요. 같은 오류가 반복되면 서버 로그에서 /issuer/credentials/kyc 처리 시간을 확인해야 합니다."
+            )
+            "issuer private key pem file could not be read" in text ||
+                "issuer_private_key_pem" in text ||
+                ".local-secrets/issuer-key.pem" in text -> VerifierFailureInfo(
+                    "ISSUER_KEY_NOT_CONFIGURED",
+                    "Issuer 서버 키 설정이 없습니다",
+                    "Android holder 앱은 issuer private key/PEM을 보내면 안 됩니다. dev-core 서버에 issuer key 파일 또는 issuer 운영 설정이 등록되어야 실제 VC 발급이 가능합니다."
+                )
+            "400" in text -> VerifierFailureInfo(
+                "ISSUER_BAD_REQUEST",
+                "Issuer 요청이 서버에서 거부됐습니다",
+                "holder_account, holder_did, claims, valid_from, valid_until 값과 dev-core 서버 설정을 확인하세요."
+            )
+            else -> VerifierFailureInfo(
+                "ISSUER_REQUEST_FAILED",
+                "Issuer 요청에 실패했습니다",
+                message ?: "응답 로그를 확인하세요."
+            )
+        }
     }
 
     private fun JsonObject.obj(name: String): JsonObject? {
@@ -1513,15 +1784,142 @@ class WalletBridge(
     }
 
     private suspend fun resolveVcJson(request: JsonObject): String {
-        request.text("vcJson")?.let { return it }
+        request.text("vcJson")?.let { return parseCredentialEnvelope(it).payload.toString() }
+        request.text("vcJwt")?.let { return decodeJwtPayload(it).toString() }
+        request.text("credential")?.takeIf { isCompactJwt(it) }?.let { return decodeJwtPayload(it).toString() }
         request.obj("credential")?.let { return it.toString() }
         request.text("credentialId")
             ?.takeIf { it.isNotBlank() }
             ?.let { credentialId ->
-                credentialRepository.getCredentialById(credentialId)?.vcJson?.let { return it }
+                credentialRepository.getCredentialById(credentialId)?.vcJson?.let {
+                    return parseCredentialEnvelope(it).payload.toString()
+                }
             }
         throw IllegalArgumentException("vcJson, credential, or credentialId is required")
     }
+
+    private suspend fun resolveVcJwt(request: JsonObject): String? {
+        request.text("vcJwt")?.takeIf { isCompactJwt(it) }?.let { return it }
+        request.text("vcJson")?.takeIf { isCompactJwt(it) }?.let { return it }
+        request.text("credential")?.takeIf { isCompactJwt(it) }?.let { return it }
+        request.text("credentialId")
+            ?.takeIf { it.isNotBlank() }
+            ?.let { credentialId ->
+                credentialRepository.getCredentialById(credentialId)?.vcJson?.takeIf { isCompactJwt(it) }?.let {
+                    return it
+                }
+            }
+        return null
+    }
+
+    private fun parseCredentialEnvelope(raw: String): CredentialEnvelope {
+        val trimmed = raw.trim()
+        if (isCompactJwt(trimmed)) {
+            return CredentialEnvelope(rawCredential = trimmed, vcJwt = trimmed, payload = decodeJwtPayload(trimmed))
+        }
+        val json = Json.parseToJsonElement(trimmed).jsonObject
+        val jwt = json.text("vcJwt")
+            ?: json.text("credential")?.takeIf { isCompactJwt(it) }
+            ?: json.text("vc_jwt")
+        if (!jwt.isNullOrBlank()) {
+            return CredentialEnvelope(rawCredential = jwt, vcJwt = jwt, payload = decodeJwtPayload(jwt))
+        }
+        return CredentialEnvelope(rawCredential = trimmed, vcJwt = null, payload = json)
+    }
+
+    private fun validateCredentialJwt(
+        envelope: CredentialEnvelope,
+        issuerDidDocument: JsonObject?
+    ) {
+        val jwt = envelope.vcJwt ?: return
+        val header = decodeJwtHeader(jwt)
+        require(header.text("alg") == "ES256K") { "VC JWT alg must be ES256K" }
+        require(header.text("typ") == "vc+jwt") { "VC JWT typ must be vc+jwt" }
+        require(header.text("cty") == "vc") { "VC JWT cty must be vc" }
+        val issuer = envelope.payload.text("issuer")
+            ?: throw IllegalArgumentException("VC JWT payload.issuer is required")
+        header.text("iss")?.let { iss ->
+            require(iss == issuer) { "VC JWT header.iss mismatch: header=$iss, payload=$issuer" }
+        }
+        val kid = header.text("kid")
+            ?: throw IllegalArgumentException("VC JWT kid is required")
+        require(kid.startsWith("$issuer#")) {
+            "VC JWT kid must belong to issuer DID: kid=$kid, issuer=$issuer"
+        }
+        if (issuerDidDocument != null) {
+            verifyCredentialJwtSignature(jwt, kid, issuerDidDocument)
+        }
+    }
+
+    private fun verifyCredentialJwtSignature(
+        jwt: String,
+        kid: String,
+        issuerDidDocument: JsonObject
+    ) {
+        val method = findVerificationMethod(issuerDidDocument, kid)
+            ?: throw IllegalArgumentException("VC JWT verification method not found: $kid")
+        val publicKeyJwk = method.obj("publicKeyJwk")
+            ?: throw IllegalArgumentException("VC JWT publicKeyJwk is missing")
+        val publicKey = publicKeyFromJwk(publicKeyJwk)
+            ?: throw IllegalArgumentException("VC JWT public key is invalid")
+        val parts = jwt.split(".")
+        require(parts.size == 3) { "compact JWT must have three segments" }
+        val rawSignature = Base64.decode(parts[2], Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        require(rawSignature.size == 64) { "VC JWT signature must be JOSE raw 64 bytes" }
+        val derSignature = joseRaw64ToDer(rawSignature)
+        val verified = runCatching {
+            val verifier = Signature.getInstance("SHA256withECDSA", "BC")
+            verifier.initVerify(publicKey)
+            verifier.update("${parts[0]}.${parts[1]}".toByteArray(Charsets.US_ASCII))
+            verifier.verify(derSignature)
+        }.getOrDefault(false)
+        require(verified) { "VC JWT signature verification failed" }
+    }
+
+    private fun decodeJwtHeader(jwt: String): JsonObject {
+        val parts = jwt.split(".")
+        require(parts.size == 3) { "compact JWT must have three segments" }
+        return Json.parseToJsonElement(decodeBase64UrlToString(parts[0])).jsonObject
+    }
+
+    private fun decodeJwtPayload(jwt: String): JsonObject {
+        val parts = jwt.split(".")
+        require(parts.size == 3) { "compact JWT must have three segments" }
+        return Json.parseToJsonElement(decodeBase64UrlToString(parts[1])).jsonObject
+    }
+
+    private fun isCompactJwt(value: String): Boolean {
+        val parts = value.trim().split(".")
+        return parts.size == 3 && parts.all { it.isNotBlank() }
+    }
+
+    private fun decodeBase64UrlToString(value: String): String {
+        val bytes = Base64.decode(value, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+        return bytes.toString(Charsets.UTF_8)
+    }
+
+    private fun joseRaw64ToDer(rawSignature: ByteArray): ByteArray {
+        require(rawSignature.size == 64) { "JOSE ECDSA signature must be 64 bytes" }
+        val r = rawSignature.copyOfRange(0, 32).stripLeadingZeroesForDer()
+        val s = rawSignature.copyOfRange(32, 64).stripLeadingZeroesForDer()
+        val sequenceLength = 2 + r.size + 2 + s.size
+        return byteArrayOf(0x30, sequenceLength.toByte(), 0x02, r.size.toByte()) +
+            r +
+            byteArrayOf(0x02, s.size.toByte()) +
+            s
+    }
+
+    private fun ByteArray.stripLeadingZeroesForDer(): ByteArray {
+        val strippedValue = dropWhile { it == 0.toByte() }.toByteArray()
+        val stripped = if (strippedValue.isEmpty()) byteArrayOf(0) else strippedValue
+        return if ((stripped[0].toInt() and 0x80) != 0) byteArrayOf(0) + stripped else stripped
+    }
+
+    private data class CredentialEnvelope(
+        val rawCredential: String,
+        val vcJwt: String?,
+        val payload: JsonObject
+    )
 
     private fun nowUtcIso(): String {
         return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
@@ -1554,13 +1952,14 @@ class WalletBridge(
         emitCallback(action, ok) {
             put("account", walletState.account)
             put("publicKey", walletState.publicKey)
+            put("authPublicKey", walletState.authPublicKey)
             put("did", walletState.did)
             put("didDocument", buildHolderDidDocument(walletState))
         }
     }
 
     private fun buildHolderDidDocument(walletState: WalletStateStore.WalletState): String {
-        val publicKeyJwk = publicKeyJwk(walletState.publicKey)
+        val publicKeyJwk = publicKeyJwk(walletState.authPublicKey)
         val keyId = "${walletState.did}#holder-key-1"
         return buildJsonObject {
             put(
@@ -1605,6 +2004,24 @@ class WalletBridge(
     private fun base64UrlNoPadding(bytes: ByteArray): String {
         return Base64.encodeToString(bytes, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
     }
+
+    private data class VerifierFailureInfo(
+        val code: String,
+        val title: String,
+        val hint: String
+    )
+
+    private data class QrRequestInfo(
+        val actionType: String,
+        val endpoint: String?,
+        val coreBaseUrl: String?,
+        val challenge: String?,
+        val domain: String?,
+        val expiresAt: String?,
+        val expiresInSec: String?,
+        val qrData: String?,
+        val rawPayload: String?
+    )
 
     private companion object {
         private const val TAG = "WalletBridge"

@@ -254,10 +254,9 @@
       <div class="result-panel show" style="margin-bottom:0">
         1) <b>지갑 생성/조회</b><br/>
         2) 실서버에서 받은 VC를 붙여넣고 <b>VC 저장</b><br/>
-        3) <b>XRPL 상태 조회</b>와 <b>VC 인증</b><br/>
-        4) 필요하면 <b>canonicalHash 반영 후 저장</b><br/>
-        5) <b>실제 VC 인증 요청</b><br/>
-        6) <b>실제 Challenge 요청</b> → <b>VP 생성</b> → <b>Verifier 제출</b>
+        3) <b>CredentialAccept 제출</b> → <b>XRPL 상태 조회</b><br/>
+        4) <b>실제 VC 인증 요청</b><br/>
+        5) <b>실제 Challenge 요청</b> → <b>VP 생성</b> → <b>Verifier 제출</b>
       </div>
     </section>
 
@@ -343,10 +342,10 @@
 
     <section class="card">
       <div class="card-head">
-        <h2>3. VC 저장 / 검증</h2>
+        <h2>3. VC 저장 / 상태 확인</h2>
         <span class="mini-status" id="vcStatus">미저장</span>
       </div>
-      <p class="desc">발급된 법인 KYC VC를 저장하고, canonical hash와 XRPL 상태를 확인합니다.</p>
+      <p class="desc">발급된 VC JWT를 저장하고 XRPL accepted 상태를 확인합니다. 실제 VC 검증은 위 실서버 verifier 버튼을 사용합니다.</p>
       <div class="vc-card">
         <div class="small">Corporate KYC Credential</div>
         <div class="big" id="vcCorpName">테스트 법인 주식회사</div>
@@ -357,14 +356,9 @@
       <div class="action-row mt8">
         <button class="ok" onclick="saveVC()">VC 저장 호출</button>
         <button class="ghost" onclick="checkCredentialStatus()">XRPL 상태 조회</button>
-        <button class="warn" onclick="verifyVC()">VC 인증</button>
-      </div>
-      <div class="mt8">
-        <button class="secondary" onclick="applyCanonicalHashFromVerification()">canonicalHash 반영 후 저장</button>
       </div>
       <div class="result-panel" id="vcResult"></div>
       <div class="result-panel" id="credentialStatusResult"></div>
-      <div class="result-panel" id="vcVerifyResult"></div>
       <div class="result-panel" id="credentialListResult"></div>
     </section>
 
@@ -376,10 +370,7 @@
       <p class="desc">issuer가 만든 ledger entry를 holder가 수락합니다. 이 카드만 눌러도 되도록 필요한 입력을 모았습니다.</p>
       <label>Credential ID</label>
       <input id="credentialId" placeholder="저장한 VC id" />
-      <label>Credential Hash</label>
-      <input id="xrplHash" />
-      <div class="grid mt8">
-        <button class="secondary" onclick="makeHash()">해시 생성</button>
+      <div class="mt8">
         <button onclick="submitToXRPL()">CredentialAccept 제출</button>
       </div>
       <div class="desc" style="margin-top:10px;">holder account가 devnet에서 활성화되어 있지 않으면 `tecNO_TARGET`가 뜹니다.</div>
@@ -451,7 +442,7 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    const state = { vc: 0, sign: 0, xrpl: 0, credentials: [], lastPresentation: null, lastDidDocument: null, lastChallenge: null, lastDomain: null, lastVcCanonicalHash: null, lastIssuerAccount: null, signedCredentialKey: null };
+    const state = { vc: 0, sign: 0, xrpl: 0, credentials: [], lastPresentation: null, lastPresentationJwt: null, lastDidDocument: null, lastChallenge: null, lastDomain: null, lastVcCanonicalHash: null, lastIssuerAccount: null, currentVcJwt: null, signedCredentialKey: null };
 
     const sampleVC = {
       id: "vc-kyc-001",
@@ -494,6 +485,11 @@
 
     function isPlaceholderIssuer(value) {
       return !value || value.includes("IssuerAccountForTestnet") || value.includes("rIssuer");
+    }
+
+    function accountFromDid(value) {
+      const text = (value || "").trim();
+      return text.startsWith("did:xrpl:1:") ? text.substring("did:xrpl:1:".length) : "";
     }
 
     function setIssuerField(value) {
@@ -557,6 +553,7 @@
         log("기존 VP 폐기", { reason });
       }
       state.lastPresentation = null;
+      state.lastPresentationJwt = null;
       state.lastDidDocument = null;
       state.signedCredentialKey = null;
     }
@@ -596,6 +593,36 @@
       const el = $(id);
       el.innerHTML = html;
       el.classList.add("show");
+    }
+
+    function failureText(result, fallback) {
+      const errors = Array.isArray(result.errors) ? result.errors : result.response?.errors;
+      const details = result.details || result.response?.details;
+      const lines = [];
+      lines.push(`<b>${result.errorTitle || fallback}:</b>`);
+      if (result.errorCode) lines.push(`code: ${result.errorCode}`);
+      if (result.errorHint) lines.push(result.errorHint);
+      if (result.error) lines.push(result.error);
+      if (errors && errors.length) lines.push(errors.join("<br/>"));
+      if (details) lines.push(`<pre>${JSON.stringify(details, null, 2)}</pre>`);
+      return lines.join("<br/>");
+    }
+
+    function applyQrResult(result) {
+      if (result.coreBaseUrl) $("coreBaseUrl").value = result.coreBaseUrl;
+      if (result.endpoint) {
+        if (result.actionType === "VP_REQUEST" || result.endpoint.includes("/verifier/")) {
+          $("verifierEndpoint").value = result.endpoint.replace("/challenges", "/verify");
+        }
+      }
+      if (result.challenge) {
+        $("signMessage").value = result.challenge;
+        state.lastChallenge = result.challenge;
+      }
+      if (result.domain) {
+        $("signDomain").value = result.domain;
+        state.lastDomain = result.domain;
+      }
     }
 
     function log(message, data) {
@@ -666,10 +693,9 @@
       vc.credentialSubject.id = did;
       vc.credentialStatus.subject = account;
       applyIssuerToVc(vc);
-      const issuerAccount = $("issuerAccount").value.trim();
-      if (isValidXrplClassicAddress(issuerAccount)) {
-        vc.issuer = `did:xrpl:1:${issuerAccount}`;
-        vc.credentialStatus.issuer = issuerAccount;
+      const vcIssuerAccount = vc.credentialStatus?.issuer || accountFromDid(vc.issuer || "");
+      if (isValidXrplClassicAddress(vcIssuerAccount)) {
+        setIssuerField(vcIssuerAccount);
       }
       $("vcInput").value = JSON.stringify(vc, null, 2);
       $("holderAccount").value = account;
@@ -731,6 +757,7 @@
       callAndroid("verifyCredentialWithServer", {
         coreBaseUrl,
         vcJson: JSON.stringify(vc),
+        vcJwt: state.currentVcJwt,
         require_status: true,
         status_mode: "xrpl"
       });
@@ -743,6 +770,7 @@
     function applyIssuedCredential(result) {
       if (!result?.vcJson) return false;
       $("vcInput").value = result.vcJson;
+      state.currentVcJwt = result.vcJwt || null;
       clearSignedPresentation("새 issuer VC 수신");
       if (result.credentialId) $("credentialId").value = result.credentialId;
       if (result.issuerAccount) setIssuerField(result.issuerAccount);
@@ -782,7 +810,9 @@
         ensureVcReadyForLedgerAction(vc, "vcResult");
         resetSignedPresentationIfVcChanged(vc, "VC 저장 전 현재 VC 변경 감지");
         renderVCCard(vc);
-        callAndroid("saveVC", vc);
+        const payload = structuredClone(vc);
+        if (state.currentVcJwt) payload.vcJwt = state.currentVcJwt;
+        callAndroid("saveVC", payload);
         $("credentialId").value = vc.id || "";
         setIssuerField(vc.credentialStatus?.issuer || "");
         $("holderAccount").value = vc.credentialStatus?.subject || "";
@@ -797,24 +827,6 @@
       }
     }
 
-    function applyCanonicalHashFromVerification() {
-      try {
-        const canonicalHash = state.lastVcCanonicalHash;
-        if (!canonicalHash) return showToast("먼저 VC 인증 결과를 확인하세요");
-        const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
-        vc.credentialStatus = vc.credentialStatus || {};
-        vc.credentialStatus.vcCoreHash = canonicalHash;
-        $("vcInput").value = JSON.stringify(vc, null, 2);
-        clearSignedPresentation("VC canonicalHash 변경");
-        renderVCCard(vc);
-        panel("vcResult", `<b>canonicalHash 반영 완료:</b><br/>${canonicalHash}`);
-        saveVC();
-      } catch (e) {
-        panel("vcResult", `<b>canonicalHash 반영 오류:</b><br/>${e.message}`);
-        log("canonicalHash 반영 실패", { message: e.message });
-      }
-    }
-
     function checkCredentialStatus() {
       try {
         const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
@@ -824,7 +836,8 @@
           issuerAccount: $("issuerAccount").value.trim(),
           holderAccount: $("holderAccount").value.trim(),
           credentialType: $("credentialType").value.trim(),
-          vcJson: JSON.stringify(vc)
+          vcJson: JSON.stringify(vc),
+          vcJwt: state.currentVcJwt
         });
         $("vcStatus").textContent = "상태 조회 중";
         $("vcStatus").className = "mini-status";
@@ -833,27 +846,6 @@
       } catch (e) {
         panel("credentialStatusResult", `<b>상태 조회 오류:</b> ${e.message}`);
         log("Credential status 요청 실패", { message: e.message });
-      }
-    }
-
-    function verifyVC() {
-      try {
-        const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
-        ensureVcReadyForLedgerAction(vc, "vcVerifyResult");
-        callAndroid("verifyVC", {
-          credentialId: $("credentialId").value.trim() || vc.id,
-          issuerAccount: $("issuerAccount").value.trim(),
-          holderAccount: $("holderAccount").value.trim(),
-          credentialType: $("credentialType").value.trim(),
-          vcJson: JSON.stringify(vc)
-        });
-        $("vcStatus").textContent = "인증 중";
-        $("vcStatus").className = "mini-status";
-        panel("vcVerifyResult", `<b>VC 인증 요청:</b> ${vc.id}`);
-        showToast("VC 인증 요청됨");
-      } catch (e) {
-        panel("vcVerifyResult", `<b>VC 인증 오류:</b> ${e.message}`);
-        log("VC 인증 요청 실패", { message: e.message });
       }
     }
 
@@ -873,14 +865,7 @@
       showToast("VC 상태 전체 갱신 요청됨");
     }
 
-    function makeHash() {
-      $("xrplHash").value = randomHex(64);
-      log("XRPL 해시 생성", { hash: $("xrplHash").value });
-    }
-
     function submitToXRPL() {
-      const hash = $("xrplHash").value.trim();
-      if (!hash) return showToast("해시를 입력하세요");
       let vc;
       try {
         vc = syncVcWithWallet();
@@ -890,7 +875,6 @@
         return;
       }
       callAndroid("submitToXRPL", {
-        hash,
         credentialId: $("credentialId").value.trim(),
         issuerAccount: $("issuerAccount").value.trim(),
         holderAccount: $("holderAccount").value.trim(),
@@ -901,7 +885,7 @@
       });
       $("acceptStatus").textContent = "제출 중";
       $("acceptStatus").className = "mini-status";
-      panel("xrplResult", `<b>CredentialAccept 요청:</b><br/>${hash}`);
+      panel("xrplResult", `<b>CredentialAccept 요청:</b><br/>${vc?.id || $("credentialId").value.trim()}`);
       showToast("XRPL 기록 요청됨");
     }
 
@@ -954,7 +938,8 @@
         challenge: message,
         domain: $("signDomain").value.trim(),
         credentialId: $("credentialId").value.trim(),
-        vcJson: JSON.stringify(vc)
+        vcJson: JSON.stringify(vc),
+        vcJwt: state.currentVcJwt
       });
       $("signStatus").textContent = "VP 생성 중";
       $("signStatus").className = "mini-status";
@@ -986,6 +971,7 @@
         callAndroid("submitPresentationToVerifier", {
           endpoint: $("verifierEndpoint").value.trim(),
           presentation,
+          presentationJwt: state.lastPresentationJwt,
           didDocument,
           policy,
           require_status: true,
@@ -996,7 +982,8 @@
           issuerAccount: $("issuerAccount").value.trim(),
           holderAccount: $("holderAccount").value.trim(),
           credentialType: $("credentialType").value.trim(),
-          vcJson: JSON.stringify(vc)
+          vcJson: JSON.stringify(vc),
+          vcJwt: state.currentVcJwt
         });
         panel("verifierResult", `<b>Verifier 제출 요청:</b><br/>${$("verifierEndpoint").value.trim()}`);
         showToast("Verifier 제출 요청됨");
@@ -1086,7 +1073,7 @@
           } else {
             panel("realCoreResult", result.ok
               ? `<b>issuer 응답 수신:</b><br/>${JSON.stringify(result, null, 2)}`
-              : `<b>issuer 요청 실패:</b><br/>${result.error}`);
+              : failureText(result, "issuer 요청 실패"));
           }
         }
         if (result.action === "REQUEST_VERIFIER_CHALLENGE") {
@@ -1110,7 +1097,7 @@
           $("coreStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
           panel("realCoreResult", result.ok
             ? `<b>실제 VC 인증 완료:</b><br/>${JSON.stringify(result.response || result, null, 2)}`
-            : `<b>실제 VC 인증 실패:</b><br/>${result.error}`);
+            : failureText(result, "실제 VC 인증 실패"));
         }
         if (result.action === "CREATE_WALLET" || result.action === "GET_WALLET_INFO") {
           $("walletStatus").textContent = result.ok ? "준비됨" : "오류";
@@ -1135,19 +1122,12 @@
           $("vcStatus").className = result.ok
             ? (result.active ? "mini-status ok" : "mini-status warn")
             : "mini-status warn";
+          const statusHint = result.ok && result.found && !result.accepted
+            ? "<br/><b>다음 작업:</b> CredentialAccept 제출을 먼저 실행하세요."
+            : "";
           panel("credentialStatusResult", result.ok
-            ? `<b>상태 조회 완료:</b><br/>found: ${result.found}<br/>active: ${result.active}<br/>accepted: ${result.accepted}<br/>index: ${result.credentialIndex}<br/>checkedAt: ${result.checkedAtUtc}`
+            ? `<b>상태 조회 완료:</b><br/>found: ${result.found}<br/>active: ${result.active}<br/>accepted: ${result.accepted}<br/>issuer: ${result.issuerAccount}<br/>index: ${result.credentialIndex}<br/>checkedAt: ${result.checkedAtUtc}${statusHint}`
             : `<b>상태 조회 실패:</b><br/>${result.error}`);
-        }
-        if (result.action === "VERIFY_VC") {
-          $("vcStatus").textContent = result.ok ? "인증 완료" : "인증 실패";
-          $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
-          if (result.canonicalHash) {
-            state.lastVcCanonicalHash = result.canonicalHash;
-          }
-          panel("vcVerifyResult", result.ok
-            ? `<b>VC 인증 완료:</b><br/>canonicalHash: ${result.canonicalHash}<br/>statusActive: ${result.statusActive}<br/>proofPresent: ${result.proofPresent}`
-            : `<b>VC 인증 실패:</b><br/>${(result.issues || [result.error || "unknown"]).join("<br/>")}`);
         }
         if (result.action === "LIST_CREDENTIALS") {
           $("vcStatus").textContent = result.ok ? "목록 확인" : "조회 실패";
@@ -1194,6 +1174,7 @@
             : `<b>VP 생성 실패:</b><br/>${result.error}`);
         if (result.ok) {
             state.lastPresentation = result.presentation || null;
+            state.lastPresentationJwt = result.presentationJwt || null;
             state.lastDidDocument = result.didDocument || null;
             state.signedCredentialKey = credentialKey(presentationCredential(result.presentation));
             state.lastChallenge = result.challenge || null;
@@ -1207,13 +1188,14 @@
           $("signStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
           panel("verifierResult", result.ok
             ? `<b>Verifier 응답:</b><br/>${JSON.stringify(result.response || result.details || {}, null, 2)}`
-            : `<b>Verifier 제출 실패:</b><br/>${result.error}`);
+            : failureText(result, "Verifier 제출 실패"));
         }
         if (result.action === "SCAN_QR_CODE") {
           $("qrStatus").textContent = result.ok ? (result.mode === "scanned" ? "스캔 완료" : "요청 수신") : "스캔 실패";
           $("qrStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          if (result.ok) applyQrResult(result);
           panel("qrResult", result.ok
-            ? `<b>QR ${result.mode === "scanned" ? "스캔 완료" : "요청 수신"}:</b><br/>${result.qrData || result.requestId}<br/>${result.endpoint ? `callback: ${result.endpoint}` : ""}`
+            ? `<b>QR ${result.mode === "scanned" ? "스캔 완료" : "요청 수신"}:</b><br/>type: ${result.actionType || "-"}<br/>${result.challenge ? `challenge: ${result.challenge}<br/>` : ""}${result.domain ? `domain: ${result.domain}<br/>` : ""}${result.endpoint ? `endpoint: ${result.endpoint}<br/>` : ""}${result.coreBaseUrl ? `core: ${result.coreBaseUrl}<br/>` : ""}${result.qrData || result.requestId}`
             : `<b>QR 스캔 실패:</b><br/>${result.error}`);
           if (result.ok && result.qrData && typeof window.onQRCodeScanned === "function") {
             window.onQRCodeScanned(result.qrData);
@@ -1243,7 +1225,6 @@
     };
 
     $("vcInput").value = JSON.stringify(sampleVC, null, 2);
-    $("xrplHash").value = randomHex(64);
     $("credentialId").value = sampleVC.id;
     setIssuerField(sampleVC.credentialStatus.issuer);
     $("holderAccount").value = sampleVC.credentialStatus.subject;

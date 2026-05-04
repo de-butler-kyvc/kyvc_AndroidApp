@@ -1,61 +1,68 @@
-# Android Holder Wallet 구현 가이드
+# Android Holder Wallet 연동 가이드
 
-이 문서는 `core`의 issuer/verifier 흐름을 기준으로 Android holder wallet을 구현할 때 필요한 계약과 순서를 정리한다. 현재 `core`는 holder API를 제공하지 않는다. Holder wallet은 모바일 앱에서 XRPL 계정과 holder 인증 키를 보관하고, issuer가 만든 VC를 저장한 뒤 XRPL `CredentialAccept` 트랜잭션을 직접 제출한다.
+이 문서는 KYvC Android holder wallet이 `core` issuer/verifier와 연동하기 위한 현재 기준 계약을 정리한다.
 
-참고 코드:
+신규 기준은 **JWT 기반 secured representation**이다.
 
-- `holder-test/test_holder_flow.py`: holder 역할을 수행하는 end-to-end 예제
-- `app/issuer/api_models.py`: VC 발급 요청/응답 모델
-- `app/verifier/api_models.py`: VC/VP 검증 요청/응답 모델
-- `app/credentials/vc.py`, `app/credentials/vp.py`: VC/VP 서명 입력과 proof 규칙
-- `app/xrpl/ledger.py`: XRPL `CredentialCreate`, `CredentialAccept`, `CredentialDelete`, status 조회 규칙
+- VC: compact `application/vc+jwt`
+- VP: compact `application/vp+jwt`
+- VP 내부 VC: `EnvelopedVerifiableCredential`
+- 서명 알고리즘: JOSE `ES256K`, secp256k1 + SHA-256
+- DID: `did:xrpl:1:{xrplAccount}`
+- expanded JSON + `proof.proofValue` 형식은 compatibility mode로만 유지한다.
 
-## 1. Holder Wallet의 책임
+## 1. Wallet 책임
 
-Android 앱은 다음 데이터를 생성하거나 보관해야 한다.
+Android 앱은 다음 값을 생성하거나 보관한다.
 
-| 데이터 | 용도 | 보관 위치 권장 |
+| 데이터 | 용도 | 보관 방식 |
 | --- | --- | --- |
-| XRPL holder seed/account | `CredentialAccept` 서명 및 holder 계정 식별 | Keystore/StrongBox 래핑 키로 암호화한 저장소 |
-| holder DID | `did:xrpl:1:{holderAccount}` 형식 | 앱 DB |
-| holder 인증 키 | VP `authentication` proof 서명 | secp256k1 지원 여부에 따라 직접 하드웨어 키 또는 암호화 저장 |
-| holder DID Document | verifier가 VP proof를 검증할 때 사용 | 앱 DB, verifier 제출용 JSON |
-| VC 원문 JSON | issuer가 발급한 KYC VC | 앱 DB |
-| credentialType | XRPL Credential ledger entry 식별 | VC의 `credentialStatus.credentialType` |
-| issuer/holder account | status 조회, accept, revoke 확인 | VC에서 파싱 후 앱 DB |
+| XRPL holder seed/account | `CredentialAccept` 서명 | Keystore/StrongBox 래핑 키로 암호화 |
+| holder DID | holder 식별 | 앱 DB |
+| holder 인증 키 | `vp+jwt` 서명 | hardware-backed 우선, 불가 시 암호화 저장 |
+| holder DID Document | verifier가 VP 서명 검증 | 앱 DB 및 verifier 제출 |
+| VC JWT | issuer가 발급한 `vc+jwt` 원문 | 앱 DB |
+| credentialType | XRPL Credential 식별 | VC JWT payload에서 파싱 |
+| issuer/holder account | status 조회, accept | VC JWT payload에서 파싱 |
 | tx hash | accept 제출 추적 | 앱 DB |
 
-`core`의 DID 형식은 고정이다.
+현재 Android 구현은 XRPL holder seed와 VP 서명용 holder authentication key를 분리한다.
 
-```text
-did:xrpl:1:{xrplAccount}
-```
+- XRPL holder seed: `CredentialAccept` 트랜잭션 서명 전용
+- holder authentication key: `vp+jwt` 및 compatibility VP proof 서명 전용
 
-예를 들어 holder account가 `rHolder...`이면 holder DID는 `did:xrpl:1:rHolder...`이다.
+두 민감 값은 모두 Android Keystore AES-GCM 래핑 키로 암호화해 저장한다. 기존 설치에 authentication key가 없으면 앱이 wallet state 조회 시 별도 secp256k1 authentication key를 자동 생성해 저장한다.
 
 ## 2. 전체 플로우
 
 ```text
-1. 앱이 XRPL holder account와 holder 인증 키를 생성한다.
-2. 앱이 holder DID Document를 만든다.
-3. 앱이 issuer에게 holder_account, holder_did를 전달한다.
-4. issuer가 POST /issuer/credentials/kyc로 VC를 발급하고 XRPL CredentialCreate를 제출한다.
-5. 앱이 VC를 수신하고 로컬 검증 후 저장한다.
-6. 앱이 XRPL CredentialAccept를 holder 계정으로 서명/제출한다.
-7. 앱 또는 verifier가 credential status를 조회해 active 상태를 확인한다.
-8. verifier 로그인/제출 시 앱이 challenge를 받아 VP를 만들고 제출한다.
+1. 앱이 XRPL holder account를 생성하거나 복구한다.
+2. 앱이 holder DID와 DID Document를 만든다.
+3. issuer backend가 holder_account, holder_did로 core에 VC 발급을 요청한다.
+4. core가 VC를 vc+jwt로 발급하고 XRPL CredentialCreate를 제출한다.
+5. 앱이 vc+jwt를 수신하고 payload를 검증한 뒤 저장한다.
+6. 앱이 holder account로 CredentialAccept를 제출한다.
+7. 앱이 XRPL status active/accepted를 확인한다.
+8. verifier challenge를 발급받는다.
+9. 앱이 vc+jwt를 EnvelopedVerifiableCredential로 감싼 vp+jwt를 생성한다.
+10. 앱이 vp+jwt와 holder DID Document를 verifier에 제출한다.
 ```
 
-중요한 상태 규칙:
+XRPL status 규칙:
 
-- issuer가 `CredentialCreate`를 제출한 직후 VC는 아직 active가 아니다.
+- `CredentialCreate` 직후에는 active가 아니다.
 - holder가 `CredentialAccept`를 제출해야 active가 된다.
-- issuer가 `CredentialDelete`를 제출하면 inactive가 된다.
-- verifier는 기본적으로 XRPL ledger entry를 authoritative status source로 사용한다.
+- `CredentialDelete`, expiration, accepted bit 미설정 상태는 inactive다.
 
-## 3. Holder DID Document
+## 3. DID Document
 
-VP 검증에는 holder DID Document가 필요하다. `core`의 `holder_diddoc()`과 같은 구조를 Android에서 생성한다.
+holder DID는 다음 형식이다.
+
+```text
+did:xrpl:1:{holderAccount}
+```
+
+DID Document:
 
 ```json
 {
@@ -72,8 +79,8 @@ VP 검증에는 holder DID Document가 필요하다. `core`의 `holder_diddoc()`
       "publicKeyJwk": {
         "kty": "EC",
         "crv": "secp256k1",
-        "x": "...base64url...",
-        "y": "...base64url..."
+        "x": "...base64url-no-padding...",
+        "y": "...base64url-no-padding..."
       }
     }
   ],
@@ -83,20 +90,22 @@ VP 검증에는 holder DID Document가 필요하다. `core`의 `holder_diddoc()`
 }
 ```
 
-주의:
+규칙:
 
-- `crv`는 `secp256k1`이어야 한다.
-- `x`, `y`는 32-byte big-endian 좌표를 base64url no-padding으로 인코딩한다.
-- VP proof의 `verificationMethod`는 `authentication` 배열에 들어 있어야 한다.
+- `crv`는 `secp256k1`
+- `x`, `y`는 32-byte big-endian 좌표의 base64url no-padding
+- VP JWT header의 `kid`는 `authentication`에 포함된 method여야 한다.
 
-## 4. VC 발급 연동
+## 4. VC 발급 수신
 
-발급 요청은 issuer 또는 issuer backend가 `core`로 보낸다. Android 앱이 직접 issuer seed나 issuer private key를 다루면 안 된다.
+Android 앱은 issuer seed/private key/PEM을 다루지 않는다. 발급 요청은 issuer backend 또는 운영 API가 core로 보낸다.
 
 ```http
 POST /issuer/credentials/kyc
 Content-Type: application/json
 ```
+
+요청 예시:
 
 ```json
 {
@@ -111,13 +120,11 @@ Content-Type: application/json
 }
 ```
 
-실제 issuer 요청에는 `issuer_seed` 또는 서버 환경변수 `XRPL_ISSUER_SEED`, 그리고 `issuer_private_key_pem`이 필요하다. 이 값들은 Android 앱으로 전달하지 않는다.
-
-발급 응답에서 앱이 저장해야 하는 핵심 필드는 다음과 같다.
+응답 예시:
 
 ```json
 {
-  "credential": {},
+  "credential": "eyJhbGciOiJFUzI1Nksi...",
   "credential_type": "56435F5354415455535F56313A...",
   "vc_core_hash": "...",
   "credential_create_transaction": {},
@@ -126,32 +133,62 @@ Content-Type: application/json
 }
 ```
 
-VC 내부에도 같은 값이 들어 있다.
+앱은 `credential` JWT 원문을 저장하고, payload를 decode해서 다음 값을 추출한다.
 
-```json
-{
-  "credentialStatus": {
-    "type": "XRPLCredentialStatus",
-    "issuer": "rIssuer...",
-    "subject": "rHolder...",
-    "credentialType": "56435F5354415455535F56313A...",
-    "vcCoreHash": "..."
-  }
-}
+- VC `id`
+- issuer DID/account
+- holder DID/account
+- `credentialStatus.credentialType`
+- `credentialStatus.vcCoreHash`
+- `validFrom`, `validUntil`
+
+## 5. VC JWT 검증
+
+VC JWT는 compact JWS다.
+
+```text
+BASE64URL(header).BASE64URL(payload).BASE64URL(signature)
 ```
 
-앱은 VC 수신 직후 최소한 다음을 확인한다.
+수신 직후 확인할 항목:
 
-- `credentialSubject.id == holderDid`
-- `credentialStatus.subject == holderAccount`
-- `credentialStatus.issuer == account_from_did(credential.issuer)`
-- `credentialStatus.credentialType == credential_type`
+- header `alg == "ES256K"`
+- header `typ == "vc+jwt"`
+- header `cty == "vc"`
+- header `iss == payload.issuer`
+- `payload.credentialSubject.id == holderDid`
+- `payload.credentialStatus.subject == holderAccount`
+- `payload.credentialStatus.issuer == account_from_did(payload.issuer)`
+- `payload.credentialStatus.credentialType == issueResponse.credential_type`
 - `validFrom <= now <= validUntil`
-- 가능한 경우 issuer DID Document로 VC signature를 검증
+- issuer DID Document를 구할 수 있으면 `kid` 공개키로 JWS signature 검증
 
-## 5. CredentialAccept 제출
+주의:
 
-Holder가 VC를 수락하려면 Android 앱이 holder XRPL wallet으로 `CredentialAccept`를 서명하고 제출해야 한다. `core`의 Python 구현은 다음 필드만 사용한다.
+- `credentialType`은 직접 재계산하지 말고 issuer 응답/VC payload 값을 그대로 쓴다.
+- 실서버 VC JWT payload를 앱에서 임의 수정하면 issuer signature가 깨진다.
+
+## 6. ES256K JWS 주의사항
+
+JOSE `ES256K` signature는 64-byte raw signature다.
+
+```text
+R(32 bytes) || S(32 bytes)
+```
+
+Android/Java ECDSA API는 보통 DER signature를 반환한다. JWT signature segment에 넣기 전 DER를 raw 64-byte로 변환해야 한다.
+
+signing input:
+
+```text
+ascii(BASE64URL(header) + "." + BASE64URL(payload))
+```
+
+base64url은 padding `=`을 제거한다.
+
+## 7. CredentialAccept 제출
+
+Holder가 VC를 수락하려면 Android 앱이 holder XRPL wallet으로 `CredentialAccept`를 제출한다.
 
 ```json
 {
@@ -162,76 +199,28 @@ Holder가 VC를 수락하려면 Android 앱이 holder XRPL wallet으로 `Credent
 }
 ```
 
-입력값 매핑:
+입력 매핑:
 
 | XRPL 필드 | 값 |
 | --- | --- |
 | `Account` | holder XRPL account |
-| `Issuer` | VC의 `issuer` DID에서 account 추출 |
-| `CredentialType` | VC의 `credentialStatus.credentialType` |
+| `Issuer` | VC JWT payload `issuer` DID에서 account 추출 |
+| `CredentialType` | VC JWT payload `credentialStatus.credentialType` |
 
-제출 전 검증:
+제출 후 `/credential-status/credentials/{issuerAccount}/{holderAccount}/{credentialType}` 기준으로 active를 확인한다.
 
-- holder seed에서 복원한 account가 VC의 `credentialStatus.subject`와 같아야 한다.
-- `CredentialType`은 VC에서 받은 hex 문자열을 그대로 사용한다.
-- issuer account는 `did:xrpl:1:{account}`에서 `{account}` 부분만 사용한다.
+## 8. VP JWT 생성
 
-제출 후에는 tx hash를 저장하고 status를 다시 조회한다.
-
-```http
-GET /credential-status/credentials/{issuerAccount}/{holderAccount}/{credentialType}
-```
-
-응답은 다음 형태다.
-
-```json
-{
-  "issuer_account": "rIssuer...",
-  "holder_account": "rHolder...",
-  "credential_type": "56435F5354415455535F56313A...",
-  "found": true,
-  "active": true,
-  "entry": {},
-  "checked_at": "2026-05-02T00:00:00Z"
-}
-```
-
-active 판정은 `core` 기준으로 다음 조건을 모두 만족해야 한다.
-
-- ledger entry가 존재한다.
-- `Flags`에 accepted bit `0x00010000`이 설정되어 있다.
-- `Expiration`이 있으면 현재 시간보다 미래다.
-
-## 6. VP 생성과 제출
-
-Verifier에게 holder가 VC를 제시할 때는 challenge 기반 VP를 만든다.
-
-### 6.1 Challenge 발급
+Verifier 제출 전 challenge를 발급받는다.
 
 ```http
 POST /verifier/presentations/challenges
 Content-Type: application/json
 ```
 
-```json
-{
-  "domain": "example.com"
-}
-```
+응답의 `challenge`, `domain`, `expires_at`를 사용한다.
 
-응답:
-
-```json
-{
-  "challenge": "...",
-  "domain": "example.com",
-  "expires_at": "2026-05-02T00:05:00Z"
-}
-```
-
-### 6.2 VP JSON
-
-Android 앱은 다음 구조의 VP를 만든다.
+VP payload의 `verifiableCredential`에는 raw VC payload가 아니라 Enveloped VC를 넣는다.
 
 ```json
 {
@@ -239,210 +228,102 @@ Android 앱은 다음 구조의 VP를 만든다.
   "type": ["VerifiablePresentation"],
   "holder": "did:xrpl:1:rHolder...",
   "verifiableCredential": [
-    {}
-  ],
-  "proof": {
-    "type": "DataIntegrityProof",
-    "cryptosuite": "ecdsa-secp256k1-jcs-poc-2026",
-    "created": "2026-05-02T00:00:00Z",
-    "verificationMethod": "did:xrpl:1:rHolder...#holder-key-1",
-    "proofPurpose": "authentication",
-    "challenge": "...",
-    "domain": "example.com",
-    "proofValue": "..."
-  }
+    {
+      "@context": "https://www.w3.org/ns/credentials/v2",
+      "id": "data:application/vc+jwt,eyJhbGciOiJFUzI1Nksi...",
+      "type": "EnvelopedVerifiableCredential"
+    }
+  ]
 }
 ```
 
-`proofValue` 생성 규칙은 `app/credentials/vp.py`와 같다.
+VP JWT header:
 
-```text
-signing_input =
-  "POC-DATA-INTEGRITY-v1" bytes
-  + canonical_json(vp_without_proof)
-  + "." bytes
-  + canonical_json(proof_without_proofValue)
+```json
+{
+  "alg": "ES256K",
+  "typ": "vp+jwt",
+  "cty": "vp",
+  "kid": "did:xrpl:1:rHolder...#holder-key-1",
+  "challenge": "...",
+  "domain": "kyvc.local"
+}
 ```
 
-서명 규칙:
+`challenge`와 `domain`은 protected header에 들어가야 한다.
 
-- 알고리즘: ECDSA over secp256k1 with SHA-256
-- signature encoding: DER bytes
-- 문자열 encoding: base64url no-padding
-- canonical JSON: key 정렬, 공백 없음, UTF-8, `ensure_ascii=false`와 동등한 출력
-
-Kotlin 의사 코드:
-
-```kotlin
-val vpWithoutProof = mapOf(
-    "@context" to listOf("https://www.w3.org/ns/credentials/v2"),
-    "type" to listOf("VerifiablePresentation"),
-    "holder" to holderDid,
-    "verifiableCredential" to listOf(vcJsonObject)
-)
-
-val proofWithoutValue = mapOf(
-    "type" to "DataIntegrityProof",
-    "cryptosuite" to "ecdsa-secp256k1-jcs-poc-2026",
-    "created" to nowIsoUtc(),
-    "verificationMethod" to "$holderDid#holder-key-1",
-    "proofPurpose" to "authentication",
-    "challenge" to challenge,
-    "domain" to domain
-)
-
-val input = concat(
-    "POC-DATA-INTEGRITY-v1".toByteArray(),
-    canonicalJson(vpWithoutProof),
-    ".".toByteArray(),
-    canonicalJson(proofWithoutValue)
-)
-
-val signatureDer = secp256k1SignSha256Der(holderAuthPrivateKey, input)
-val proofValue = base64UrlNoPadding(signatureDer)
-```
-
-### 6.3 VP 검증 요청
-
-Verifier API에는 VP와 holder DID Document를 함께 전달한다. Issuer DID Document는 issuer API에서 저장되어 있으면 별도로 넘기지 않아도 된다.
+## 9. VP 제출
 
 ```http
 POST /verifier/presentations/verify
 Content-Type: application/json
 ```
 
+요청:
+
 ```json
 {
-  "presentation": {
-    "holder": "did:xrpl:1:rHolder..."
-  },
+  "presentation": "eyJhbGciOiJFUzI1Nksi...",
   "did_documents": {
-    "did:xrpl:1:rHolder...": {
-      "@context": [
-        "https://www.w3.org/ns/did/v1",
-        "https://w3id.org/security/jwk/v1"
-      ],
-      "id": "did:xrpl:1:rHolder...",
-      "verificationMethod": [],
-      "authentication": []
-    }
+    "did:xrpl:1:rHolder...": {}
   },
   "policy": {
     "trustedIssuers": ["did:xrpl:1:rIssuer..."],
-    "acceptedKycLevels": ["BASIC", "ADVANCED"],
+    "acceptedKycLevels": ["BASIC"],
     "acceptedJurisdictions": ["KR"]
   },
-  "require_status": true,
-  "status_mode": "xrpl"
+  "status_mode": "xrpl",
+  "require_status": true
 }
 ```
 
-성공 응답:
+성공 기준:
 
-```json
-{
-  "ok": true,
-  "errors": [],
-  "details": {
-    "challengeFound": true,
-    "challengeUsed": false,
-    "vc_0": {
-      "ok": true
-    }
-  }
-}
-```
+- `ok: true`
+- `errors: []`
+- embedded VC 검증 성공
+- XRPL credential accepted
+- challenge가 발급/미사용/미만료 상태
 
-자주 나는 실패:
+## 10. 현재 Android 구현 상태
 
-| 오류 | 원인 |
-| --- | --- |
-| `VP challenge was not issued by verifier` | verifier에서 받은 challenge가 아니거나 만료/저장 실패 |
-| `VP domain mismatch` | proof의 domain과 challenge 발급 domain 불일치 |
-| `VP verificationMethod is not authorized for authentication` | DID Document의 `authentication`에 key id가 없음 |
-| `embedded VC 0 failed verification` | VC signature, status, policy 중 하나가 실패 |
-| `XRPL Credential status is not active` | holder가 아직 `CredentialAccept`를 제출하지 않았거나 revoke/expire됨 |
+완료:
 
-## 7. Android 저장소 모델 예시
+- holder wallet 생성/조회
+- seed Keystore 암호화 저장
+- DID Document 생성
+- expanded JSON compatibility flow
+- devnet `CredentialCreate` / `CredentialAccept`
+- 실서버 VC 인증 및 VP 제출 성공
+- `vc+jwt` issuer 응답 수신/파싱/저장 1차 반영
+- `vp+jwt` 생성 1차 반영
+- XRPL account key와 VP holder authentication key 분리
+- VC JWT header 검증
+- issuer DID Document 조회 가능 시 VC JWT ES256K signature 검증
+- verifier 제출 시 `vp+jwt` 우선 제출
 
-최소 Room entity는 다음 정도면 충분하다.
+남은 작업:
 
-```kotlin
-data class HolderCredentialEntity(
-    val credentialId: String,
-    val vcJson: String,
-    val issuerDid: String,
-    val issuerAccount: String,
-    val holderDid: String,
-    val holderAccount: String,
-    val credentialType: String,
-    val vcCoreHash: String,
-    val validFrom: String,
-    val validUntil: String,
-    val acceptedAt: String?,
-    val credentialAcceptHash: String?,
-    val revokedOrInactiveAt: String?
-)
-```
+- Room schema의 `vcJson` 명칭을 `credential`/`vcJwt` 중심으로 정리
+- JWT test vector 추가
 
-계정/키 저장은 VC DB와 분리한다.
+## 11. 개발 검증 순서
 
-```kotlin
-data class HolderWalletState(
-    val xrplAccount: String,
-    val encryptedSeedRef: String,
-    val holderDid: String,
-    val authKeyAlias: String,
-    val holderDidDocumentJson: String,
-    val xrplJsonRpcUrl: String
-)
-```
+1. holder wallet 생성/조회
+2. holder DID Document 확인
+3. issuer에서 `vc+jwt` 발급
+4. Android에서 VC JWT decode 및 저장
+5. `CredentialAccept` 제출
+6. XRPL status `active: true`, `accepted: true`
+7. verifier challenge 수신
+8. `vp+jwt` 생성
+9. `/verifier/presentations/verify` 성공 확인
+10. 같은 VP 재제출 시 challenge reuse 실패 확인
 
-## 8. 개발 검증 순서
+## 12. 운영 주의사항
 
-Core 서버를 로컬에서 실행한다.
-
-```bash
-cd core
-docker compose -f docker-compose.local.yml up -d mysql
-uvicorn app.main:app --reload --port 8090
-```
-
-먼저 Python holder runner로 네트워크와 core 설정이 맞는지 확인한다.
-
-```bash
-cd core
-PYTHONPATH=. .venv/bin/python holder-test/test_holder_flow.py
-```
-
-정상이라면 출력에서 다음 값들이 기대된다.
-
-- `verify_before_accept_ok: false`
-- `active_before_accept: false`
-- `verify_after_accept_ok: true`
-- `active_after_accept: true`
-- `verify_after_delete_ok: false`
-- `active_after_delete: false`
-
-Android 앱 구현 후에는 같은 순서로 검증한다.
-
-1. holder account 생성
-2. issuer로 VC 발급
-3. 앱 DB에 VC 저장
-4. 앱에서 `CredentialAccept` 제출
-5. `/credential-status/credentials/...` active 확인
-6. challenge 발급
-7. 앱에서 VP 생성
-8. `/verifier/presentations/verify` 성공 확인
-
-## 9. 운영 체크리스트
-
-- issuer seed/private key는 Android 앱에 넣지 않는다.
-- holder XRPL seed와 holder 인증 키는 백업/복구 정책을 먼저 정한 뒤 배포한다.
-- Android Keystore가 secp256k1 서명을 직접 지원하지 않는 기기에서는 하드웨어 보호 키로 seed/private key를 암호화하고, 실제 secp256k1 연산은 검증된 crypto provider에서 수행한다.
-- mainnet RPC 사용은 `ALLOW_MAINNET=1`과 명시적 사용자 확인 없이는 막는다.
-- VP challenge는 재사용하지 않는다. `core` verifier는 성공한 challenge를 used 처리한다.
-- VC 원문 JSON은 서명 대상이므로 저장 후 임의 정규화/필드 재정렬 결과를 원본 대신 쓰지 않는다.
-- Android에서 canonical JSON을 직접 구현할 경우 Python `canonical_json()` 결과와 test vector를 만들어 byte-for-byte 비교한다.
-- 만료된 VC는 UI에서 제출 불가 상태로 보여준다.
-- `CredentialAccept` tx가 pending/failure일 수 있으므로 tx hash와 ledger status를 분리해서 관리한다.
+- seed, private key, PEM은 WebView/로그/문서에 저장하지 않는다.
+- Android Keystore가 secp256k1 signing을 직접 지원하지 않는 기기가 많을 수 있다.
+- `CredentialAccept` tx 제출 성공과 ledger active 상태는 별도로 관리한다.
+- challenge는 1회용이다.
+- 신규 구현은 `proof.jws` expanded JSON을 기본 경로로 사용하지 않는다.

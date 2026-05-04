@@ -11,6 +11,9 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import org.bouncycastle.jce.ECNamedCurveTable
+import java.math.BigInteger
+import java.security.SecureRandom
 
 class WalletStateStore(
     context: Context,
@@ -31,18 +34,24 @@ class WalletStateStore(
         val seedValue = walletManager.seedToBase58(seed)
         val account = walletManager.getXrplAccount(seed)
         val encryptedSeed = encrypt(seedValue)
+        val authKey = createHolderAuthKey()
+        val encryptedAuthPrivateKey = encrypt(authKey.privateKeyHex)
 
         prefs.edit()
             .putString(KEY_ENCRYPTED_SEED, encryptedSeed.cipherText)
             .putString(KEY_IV, encryptedSeed.iv)
             .putString(KEY_ACCOUNT, account.address)
             .putString(KEY_PUBLIC_KEY, account.publicKey)
+            .putString(KEY_AUTH_ENCRYPTED_PRIVATE_KEY, encryptedAuthPrivateKey.cipherText)
+            .putString(KEY_AUTH_IV, encryptedAuthPrivateKey.iv)
+            .putString(KEY_AUTH_PUBLIC_KEY, authKey.publicKeyHex)
             .putString(KEY_DID, account.did)
             .apply()
 
         return WalletState(
             account = account.address,
             publicKey = account.publicKey,
+            authPublicKey = authKey.publicKeyHex,
             did = account.did
         )
     }
@@ -51,10 +60,18 @@ class WalletStateStore(
         val account = prefs.getString(KEY_ACCOUNT, null) ?: return null
         val publicKey = prefs.getString(KEY_PUBLIC_KEY, null) ?: return null
         val did = prefs.getString(KEY_DID, null) ?: "did:xrpl:1:$account"
-        return WalletState(account = account, publicKey = publicKey, did = did)
+        val authPublicKey = ensureHolderAuthKey().publicKeyHex
+        return WalletState(account = account, publicKey = publicKey, authPublicKey = authPublicKey, did = did)
     }
 
     fun requireSeed() = walletManager.fromSeed(requireSeedValue())
+
+    fun requireAuthPrivateKeyBytes(): ByteArray {
+        val cipherText = prefs.getString(KEY_AUTH_ENCRYPTED_PRIVATE_KEY, null)
+        val iv = prefs.getString(KEY_AUTH_IV, null)
+        require(!cipherText.isNullOrBlank() && !iv.isNullOrBlank()) { "Holder auth key has not been created" }
+        return decrypt(EncryptedValue(cipherText = cipherText, iv = iv)).hexToBytes()
+    }
 
     fun requireWalletState(): WalletState {
         return getWalletStateOrNull() ?: throw IllegalStateException("Wallet has not been created")
@@ -65,6 +82,38 @@ class WalletStateStore(
         val iv = prefs.getString(KEY_IV, null)
         require(!cipherText.isNullOrBlank() && !iv.isNullOrBlank()) { "Wallet has not been created" }
         return decrypt(EncryptedValue(cipherText = cipherText, iv = iv))
+    }
+
+    private fun ensureHolderAuthKey(): HolderAuthKey {
+        val publicKey = prefs.getString(KEY_AUTH_PUBLIC_KEY, null)
+        val encryptedPrivateKey = prefs.getString(KEY_AUTH_ENCRYPTED_PRIVATE_KEY, null)
+        val iv = prefs.getString(KEY_AUTH_IV, null)
+        if (!publicKey.isNullOrBlank() && !encryptedPrivateKey.isNullOrBlank() && !iv.isNullOrBlank()) {
+            return HolderAuthKey(publicKeyHex = publicKey, privateKeyHex = "")
+        }
+
+        val authKey = createHolderAuthKey()
+        val encryptedAuthPrivateKey = encrypt(authKey.privateKeyHex)
+        prefs.edit()
+            .putString(KEY_AUTH_ENCRYPTED_PRIVATE_KEY, encryptedAuthPrivateKey.cipherText)
+            .putString(KEY_AUTH_IV, encryptedAuthPrivateKey.iv)
+            .putString(KEY_AUTH_PUBLIC_KEY, authKey.publicKeyHex)
+            .apply()
+        return authKey
+    }
+
+    private fun createHolderAuthKey(): HolderAuthKey {
+        val params = ECNamedCurveTable.getParameterSpec("secp256k1")
+        val random = SecureRandom()
+        var d: BigInteger
+        do {
+            d = BigInteger(params.n.bitLength(), random)
+        } while (d == BigInteger.ZERO || d >= params.n)
+        val publicPoint = params.g.multiply(d).normalize()
+        return HolderAuthKey(
+            privateKeyHex = d.toByteArray().stripLeadingZeroes().toFixedHex(32),
+            publicKeyHex = publicPoint.getEncoded(true).toHex()
+        )
     }
 
     private fun encrypt(plainText: String): EncryptedValue {
@@ -105,6 +154,7 @@ class WalletStateStore(
     data class WalletState(
         val account: String,
         val publicKey: String,
+        val authPublicKey: String,
         val did: String
     ) {
         fun toXrplAccount(): XrplAccount {
@@ -112,10 +162,36 @@ class WalletStateStore(
         }
     }
 
+    private data class HolderAuthKey(
+        val publicKeyHex: String,
+        val privateKeyHex: String
+    )
+
     private data class EncryptedValue(
         val cipherText: String,
         val iv: String
     )
+
+    private fun ByteArray.stripLeadingZeroes(): ByteArray {
+        val stripped = dropWhile { it == 0.toByte() }.toByteArray()
+        return if (stripped.isEmpty()) byteArrayOf(0) else stripped
+    }
+
+    private fun ByteArray.toFixedHex(size: Int): String {
+        require(size > 0)
+        require(this.size <= size) { "Value is larger than $size bytes" }
+        return (ByteArray(size - this.size) + this).toHex()
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString("") { "%02X".format(it) }
+    }
+
+    private fun String.hexToBytes(): ByteArray {
+        val normalized = trim()
+        require(normalized.length % 2 == 0) { "Invalid hex length" }
+        return normalized.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    }
 
     private companion object {
         private const val PREFS_NAME = "kyvc_holder_wallet"
@@ -124,6 +200,9 @@ class WalletStateStore(
         private const val KEY_IV = "seed_iv"
         private const val KEY_ACCOUNT = "account"
         private const val KEY_PUBLIC_KEY = "public_key"
+        private const val KEY_AUTH_ENCRYPTED_PRIVATE_KEY = "auth_encrypted_private_key"
+        private const val KEY_AUTH_IV = "auth_private_key_iv"
+        private const val KEY_AUTH_PUBLIC_KEY = "auth_public_key"
         private const val KEY_DID = "did"
         private const val ANDROID_KEY_STORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"

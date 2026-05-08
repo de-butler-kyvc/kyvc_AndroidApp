@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.room.Room
 import com.example.kyvc_androidapp.data.local.AppDatabase
 import com.example.kyvc_androidapp.data.repository.CredentialRepository
+import com.example.kyvc_androidapp.security.AppLockStore
 import com.example.kyvc_androidapp.wallet.core.WalletManager
 import com.example.kyvc_androidapp.wallet.core.WalletStateStore
 import com.example.kyvc_androidapp.wallet.core.XrplClientHelper
@@ -18,6 +19,7 @@ class AppContainer(application: Application) {
     ).build()
     val credentialRepository: CredentialRepository = CredentialRepository(database.credentialDao())
     val walletStateStore: WalletStateStore = WalletStateStore(application, walletManager)
+    val appLockStore: AppLockStore = AppLockStore(application)
 
     private companion object {
         private const val DATABASE_NAME = "kyvc-wallet-db"

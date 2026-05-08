@@ -2,6 +2,11 @@
 
 kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 
+## 문서 우선순위
+
+- 웹에서 Android 브리지를 호출하는 최신 규격은 [WEBVIEW_BRIDGE_SPEC.md](./WEBVIEW_BRIDGE_SPEC.md)를 기준으로 본다.
+- 브리지 함수 시그니처나 응답 형식이 바뀌면 위 문서를 먼저 같이 갱신한다.
+
 ## 🛠 기술 스택
 - **Language**: Kotlin
 - **UI Framework**: Jetpack Compose
@@ -23,6 +28,23 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Holder DID Document**: verifier가 VP proof 검증에 쓰는 holder 공개키 문서입니다.
 - **Proof**: VC 또는 VP가 서명되었음을 증명하는 메타데이터입니다.
 - **Canonical JSON**: 키 순서를 고정하고 공백을 제거한 표준화 JSON입니다. 해시와 서명 입력에 사용합니다.
+- **SD-JWT**: 선택 공개가 가능한 JWT credential입니다. 현재 신규 legal entity KYC wallet의 기본 credential 포맷은 `dc+sd-jwt`입니다.
+- **Disclosure**: SD-JWT 안에서 선택적으로 공개할 수 있는 claim 조각입니다. verifier에는 필요한 disclosure만 제출합니다.
+- **KB-JWT**: Key Binding JWT입니다. holder authentication key로 `nonce`, `aud`, `sd_hash`를 서명해 SD-JWT presentation을 holder에게 묶습니다.
+- **Nonce / Aud**: SD-JWT+KB에서 기존 challenge/domain을 대체하는 verifier 일회성 값과 audience입니다.
+
+## 최신 Holder Wallet 계약
+
+- 신규 기본 포맷은 `dc+sd-jwt` credential과 SD-JWT+KB presentation이다.
+- 기존 `vc+jwt`/`vp+jwt`와 expanded JSON proof는 compatibility mode로 남겨둔다.
+- Android holder 앱은 issuer seed/private key/PEM을 다루지 않는다.
+- 앱은 XRPL holder seed와 holder authentication key를 분리한다. XRPL seed는 `CredentialAccept` 전용이고, holder auth key는 KB-JWT 서명 전용이다.
+- SD-JWT credential 원문은 전체 disclosure를 포함하므로 전체 KYC 원문과 같은 민감도로 암호화 저장한다.
+- verifier 제출은 `vp+jwt`가 아니라 `<issuer-jwt>~<selected-disclosures>~<kb-jwt>` 형식의 `sdJwtKb`를 사용한다.
+- verifier challenge 요청은 `aud`를 보내고, 응답의 `nonce`를 KB-JWT payload에 넣는다.
+- holder DID binding 검증을 통과하려면 holder DID Document 원문을 verifier 요청 `did_documents`에 포함하고, 같은 DID Document의 canonical hash를 XRPL DIDSet `Data`에 등록해야 한다.
+- 앱 잠금은 PIN/패턴/지문 공용 실패 횟수 5회를 공유하며, 5회 초과 시 이메일 인증 완료 전까지 모든 인증 수단을 막는다.
+- 인증 성공 시 30분 세션을 시작하고, 세션 만료 후 앱 복귀 또는 재진입 시 다시 인증한다.
 
 ## 📌 주요 작업 내용
 ### Wallet 및 Bridge 기능 구현 (2025-05-22)
@@ -48,6 +70,8 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Credential List**: 저장된 VC 목록을 불러오고, XRPL 상태를 일괄 재조회해 저장 상태를 동기화
 - **Challenge Guard**: verifier challenge를 로컬에 등록하고 만료/중복 사용을 차단
 - **JWT Transition**: 신규 wallet 가이드에 맞춰 issuer 응답의 compact `vc+jwt` 수신/파싱/저장과 Enveloped VC 기반 `vp+jwt` 생성 1차 지원 추가
+- **SD-JWT Transition**: `dc+sd-jwt` credential 파싱/저장, disclosure 1차 검증, nonce/aud challenge, KB-JWT 생성, SD-JWT+KB verifier 제출 분기 추가
+- **Holder DIDSet**: holder DID Document 원문은 verifier 요청에 포함하고, JCS canonical DID Document hash(`1220` + SHA-256)를 XRPL DIDSet `Data`로 등록하는 브릿지 추가
 - **Verifier Error Handling**: verifier 실패 응답을 challenge, signature, XRPL status, policy, DID Document 오류로 분류해 WebView에 `errorCode/errorTitle/errorHint`로 반환
 - **JWT Regression Test**: `VpSignerTest`에서 ES256K compact JWS 생성, base64url no-padding segment, 64-byte raw `R||S` signature, secp256k1 검증을 확인
 
@@ -66,8 +90,10 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [x] **Challenge Guard**: verifier challenge 등록, 만료 확인, 중복 제출 차단
 - [x] **Issuer proof 검증 지원**: issuer DID Document가 있는 VC의 proof 서명 검증
 - [x] **기본 아키텍처 분리**: AppContainer, CredentialRepository, MainViewModel로 데이터/진입점 구조화
-- [x] **JWT 기본 포맷 전환**: `vc+jwt` 저장, `vp+jwt` 제출, ES256K 검증을 기본 경로로 전환
-- [ ] **JWT 실서버 전체 재검증**: 실서버에서 새 UI 흐름으로 `vc+jwt` 발급부터 verifier 제출까지 재확인
+- [x] **JWT 호환 포맷 전환**: `vc+jwt` 저장, `vp+jwt` 제출, ES256K 검증 경로 유지
+- [x] **SD-JWT 기본 포맷 전환 1차 구현**: `dc+sd-jwt` 저장, KB-JWT 생성, SD-JWT+KB 제출 payload 분기
+- [x] **Holder DIDSet 등록**: holder 계정으로 DIDSet URI/Data hash 등록 브릿지 추가
+- [ ] **SD-JWT 실서버 전체 재검증**: 실서버에서 `dc+sd-jwt` 발급부터 verifier 제출까지 재확인
 
 ## 여기서 더 구현할 수 있는 것
 - **Issuer proof 검증**
@@ -91,6 +117,15 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
   - VC hash, VP proof, XRPL status 계산 결과를 고정 테스트로 만들어 회귀 방지
 
 ## 현재 구현 상태 요약
+### 앱 잠금 / 인증
+- PIN 로그인
+- 패턴 로그인(탭형 3x3)
+- 지문 로그인 활성화 및 로그인
+- PIN/패턴/지문 공용 실패 횟수 집계
+- 5회 실패 시 이메일 인증 필요 상태 전환
+- 이메일 인증 완료 후 실패 횟수 초기화 브리지 (`completeEmailVerification`)
+- 인증 성공 후 30분 세션 유지, 만료 후 재인증
+
 ### 앱 내부에서 성공한 것
 - holder 지갑 생성/조회
 - holder account / DID / DID Document 조회
@@ -118,13 +153,12 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - verifier challenge 기반 holder VP 생성 및 제출 성공
 
 ### 신규 Android wallet 가이드 반영 중
-- 신규 기본 포맷은 expanded JSON이 아니라 compact `application/vc+jwt`, `application/vp+jwt`다.
-- 앱은 issuer 응답의 `credential` 문자열 JWT를 decode해 기존 status/accept flow에 연결하는 1차 지원을 추가했다.
-- `SIGN_MESSAGE` 결과에는 compatibility용 expanded VP와 함께 `presentationJwt`를 반환할 수 있다.
-- XRPL account key와 VP holder authentication key는 분리했다. DID Document의 `holder-key-1`은 VP auth key 공개키를 사용한다.
-- VC JWT header 검증과 issuer DID Document 기반 signature 검증을 추가했다.
-- verifier 제출은 `presentationJwt`가 있으면 `vp+jwt`를 우선 제출한다.
-- 남은 작업은 JWT 기준 실서버 전체 플로우 재검증과 core와 공유할 고정 JWT 테스트 벡터 확정이다.
+- 신규 기본 포맷은 expanded JSON이나 `vc+jwt/vp+jwt`가 아니라 `dc+sd-jwt`와 SD-JWT+KB다.
+- 앱은 issuer 응답의 `credential` 문자열을 SD-JWT로 파싱하고, issuer JWT payload를 기존 status/accept flow에 연결하는 정규화 payload로 변환한다.
+- `SIGN_MESSAGE`는 SD-JWT가 있으면 holder-signed `vp+jwt` 대신 KB-JWT를 생성하고 `sdJwtKb`를 반환한다.
+- XRPL account key와 holder authentication key는 분리했다. DID Document의 `holder-key-1`은 KB-JWT 서명용 auth key 공개키를 사용한다.
+- verifier challenge는 `nonce/aud`를 우선 사용하고, 기존 `challenge/domain`은 compatibility alias로 처리한다.
+- 남은 작업은 required disclosure 선택 UI, disclosure reference 전체 검증, multipart attachment, SD-JWT 고정 테스트 벡터다.
 
 ### 샘플 데이터 사용 시 주의할 것
 - VC 인증의 canonical hash 일치
@@ -191,9 +225,9 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `checkCredentialStatus`는 VC의 issuer/holder/credentialType으로 XRPL `Credential` ledger entry의 index를 계산해 현재 validated ledger에서 조회한다. 응답의 `Flags`에 accepted bit가 켜져 있고 expiration이 유효하면 active로 판정한다.
 
-예전 expanded JSON용 `verifyVC`와 `canonicalHash 반영` 흐름은 JWT 기본 플로우에서 사용하지 않는다. `vc+jwt`는 JWS signature가 proof 역할을 하므로 expanded JSON의 `proof`가 없어도 정상이다. 실제 VC 검증은 `실제 VC 인증 요청`으로 core verifier에 맡긴다.
+예전 expanded JSON용 `verifyVC`와 `canonicalHash 반영` 흐름은 신규 기본 플로우에서 사용하지 않는다. `dc+sd-jwt`는 issuer JWT signature와 disclosure digest가 proof 역할을 하므로 expanded JSON의 `proof`가 없어도 정상이다. 실제 credential 검증은 `실제 Credential 인증 요청`으로 core verifier에 맡긴다.
 
-`submitPresentationToVerifier`는 `signMessage`로 생성한 VP와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `presentation`, `did_documents`, `policy`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.
+`submitPresentationToVerifier`는 SD-JWT 흐름에서는 `signMessage`로 생성한 `sdJwtKb`와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `format: kyvc-sd-jwt-presentation-v1`, `presentation.sdJwtKb`, `did_documents`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.
 
 `listCredentials`는 앱에 저장된 VC를 목록으로 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
 
@@ -208,23 +242,24 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 - VC 인증 단계에서 issuer address나 issuer secret을 verifier로 보내지 않는다. verifier는 VC 안의 `issuer` DID와 서버에 등록된 DID Document로 issuer proof를 검증한다.
 
 ### 동작
-- `실제 VC 요청`은 `POST /issuer/credentials/kyc` 를 호출한다.
-- `실제 Challenge 요청`은 `POST /verifier/presentations/challenges` 를 호출한다.
-- `실제 VC 인증 요청`은 현재 VC JSON을 `POST /verifier/credentials/verify` 로 보낸다.
+- `실제 SD-JWT 요청`은 `POST /issuer/credentials/kyc` 를 `format: dc+sd-jwt`, `holder_key_id: holder-key-1`와 함께 호출한다.
+- `실제 Nonce 요청`은 `POST /verifier/presentations/challenges` 를 `aud`와 함께 호출한다.
+- `실제 Credential 인증 요청`은 현재 SD-JWT credential 원문을 `POST /verifier/credentials/verify` 로 보낸다.
 - issuer 응답이 오면 앱이 `VC 저장 / 상태 확인` 카드의 VC JSON을 자동으로 채우고 `VC 저장`을 다시 실행한다.
 - verifier challenge가 오면 앱이 `Challenge` 입력칸을 채우고 로컬 challenge 저장도 같이 한다.
 
 ### 추천 순서
 1. `Bridge 확인`
 2. `지갑 생성/조회`
-3. `실서버 issuer / verifier` 카드에서 `실제 VC 요청`
-4. `VC 저장 / 상태 확인` 카드에서 `VC 저장 호출`
-5. `CredentialAccept 제출`
-6. `VC 저장 / 상태 확인` 카드에서 `XRPL 상태 조회` 결과 `active: true`, `accepted: true` 확인
-7. `실서버 issuer / verifier` 카드에서 `실제 VC 인증 요청`
-8. `실서버 issuer / verifier` 카드에서 `실제 Challenge 요청`
-9. `Key 서명 / VP` 카드에서 `VP 생성 호출`
-10. `Verifier 제출 호출`
+3. `Holder DIDSet 등록`
+4. `실서버 issuer / verifier` 카드에서 `실제 SD-JWT 요청`
+5. `VC 저장 / 상태 확인` 카드에서 `VC 저장 호출`
+6. `CredentialAccept 제출`
+7. `VC 저장 / 상태 확인` 카드에서 `XRPL 상태 조회` 결과 `active: true`, `accepted: true` 확인
+8. `실서버 issuer / verifier` 카드에서 `실제 Credential 인증 요청`
+9. `실서버 issuer / verifier` 카드에서 `실제 Nonce 요청`
+10. `Key 서명 / VP` 카드에서 `KB-JWT 생성 호출`
+11. `Verifier 제출 호출`
 
 ### 참고
 - 서버가 HTTPS를 안 열고 있으면 `Core Base URL`에 `http://...` 전체 주소를 직접 넣는다.
@@ -235,9 +270,12 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 - 실서버 verifier가 `DID Document not found`를 반환하면 issuer DID가 core 서버에 등록되어 있지 않은 상태다. 앱은 VC의 `issuer` DID와 `proof.verificationMethod` DID 양쪽을 기준으로 `/dids/{account}/diddoc.json`를 조회해 verifier 요청에 포함하려고 시도한다.
 - VC의 `issuer`가 가리키는 계정과 `proof.verificationMethod`가 가리키는 계정이 다르면 verifier가 어느 DID를 기준으로 proof를 검증하는지 서버 계약과 맞춰야 한다. 서버에도 두 DID Document가 모두 등록되어 있거나, VC 발급 서버가 같은 issuer DID로 VC와 proof를 만들어야 한다.
 - `XRPL Credential status is not active`는 해당 VC의 XRPL Credential entry가 아직 holder에게 accepted 상태가 아니라는 뜻이다. issuer 발급 후 같은 VC의 `credentialStatus.issuer`, `credentialStatus.subject`, `credentialStatus.credentialType`으로 `CredentialAccept 제출`을 먼저 실행하고, `XRPL 상태 조회`에서 `active: true`, `accepted: true`가 나온 뒤 verifier 제출을 진행한다.
+- `DID ledger entry not found for did:xrpl:1:{holder}`는 holder DIDSet이 아직 XRPL에 없다는 뜻이다. `Holder DIDSet 등록`을 먼저 실행한 뒤 새 nonce로 KB-JWT를 다시 생성해야 한다.
+- `DID Document hash mismatch`는 verifier 요청의 `did_documents` 원문과 XRPL DIDSet `Data` hash가 다르다는 뜻이다. 지갑을 새로 만들거나 holder auth key가 바뀐 뒤에는 DIDSet을 다시 등록해야 한다.
 - `found: true`, `flags: 0`, `accepted: false`는 조회 실패가 아니라 issuer가 `CredentialCreate`만 완료한 상태다. 이때는 `CredentialAccept 제출`을 누른 뒤 다시 `XRPL 상태 조회`를 실행한다.
 - VP 제출 로그에서 `presentation.verifiableCredential[0]`와 요청의 `vcJson`이 서로 다른 VC라면 이전 VP가 남아 있는 상태다. 현재 UI는 VC가 바뀌면 기존 VP를 폐기하고, 제출 전에도 현재 VC와 VP 내부 VC가 다르면 제출을 차단한다. 이 경우 `실제 Challenge 요청` 후 현재 VC로 `VP 생성 호출`을 다시 실행한다.
 - issuer secret은 `VC 인증` 요청에 필요한 값이 아니다. 필요하다면 서버의 issuer DID 등록 또는 VC 발급 API 쪽에서만 사용된다.
+- 앱 잠금은 인증 성공 후 30분 동안 유지된다. 세션이 만료되면 앱 복귀/재진입 시 다시 인증해야 한다.
 - `rIssuerAccountForTestnet`가 들어간 샘플 VC는 저장, 상태 조회, VP 생성, 서버 인증 모두 차단된다. 실제 테스트에는 issuer가 `did:xrpl:1:r...` 형태이고 `credentialStatus.issuer`도 같은 `r...` classic address인 VC를 써야 한다.
 - 디버그 카드에서 `Issuer Seed`에는 `s...` seed를, `Issuer Account`에는 `r...` classic address를 넣는다. 앱은 둘을 반대로 넣은 경우 화면에서 자동 교정한다.
 - XRPL 응답의 `tecDUPLICATE`는 새 트랜잭션 성공이 아니라 같은 ledger object가 이미 있다는 뜻이다. 앱은 이 경우를 “이미 존재”로 표시하고, 상태 확인은 `XRPL 상태 조회`에서 active 여부로 판단한다.

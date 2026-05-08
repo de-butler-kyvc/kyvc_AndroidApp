@@ -253,10 +253,10 @@
       </div>
       <div class="result-panel show" style="margin-bottom:0">
         1) <b>지갑 생성/조회</b><br/>
-        2) 실서버에서 받은 VC를 붙여넣고 <b>VC 저장</b><br/>
+        2) 실서버에서 받은 SD-JWT Credential을 저장<br/>
         3) <b>CredentialAccept 제출</b> → <b>XRPL 상태 조회</b><br/>
-        4) <b>실제 VC 인증 요청</b><br/>
-        5) <b>실제 Challenge 요청</b> → <b>VP 생성</b> → <b>Verifier 제출</b>
+        4) <b>실제 Credential 인증 요청</b><br/>
+        5) <b>실제 Nonce 요청</b> → <b>KB-JWT 생성</b> → <b>Verifier 제출</b>
       </div>
     </section>
 
@@ -286,6 +286,7 @@
       <input id="walletDid" readonly />
       <div class="mt8">
         <button onclick="createWallet()">지갑 생성/조회</button>
+        <button class="secondary" onclick="submitHolderDidSet()">Holder DIDSet 등록</button>
       </div>
       <div class="result-panel" id="walletResult"></div>
     </section>
@@ -295,13 +296,13 @@
         <h2>2. 실서버 issuer / verifier</h2>
         <span class="mini-status" id="coreStatus">대기</span>
       </div>
-      <p class="desc">실서버 verifier를 호출합니다. VC 인증에는 issuer secret이 필요하지 않습니다. secret은 발급자 DID 등록/발급 단계에서 서버가 관리해야 하는 값입니다.</p>
+      <p class="desc">신규 기본 흐름은 dc+sd-jwt credential과 SD-JWT+KB presentation입니다. Android holder 앱은 issuer secret/PEM을 다루지 않습니다.</p>
       <label>Core Base URL</label>
       <input id="coreBaseUrl" value="https://dev-core-kyvc.khuoo.synology.me" />
       <div class="grid">
         <div>
-          <label>KYC Level</label>
-          <input id="kycLevel" value="BASIC" />
+          <label>Assurance Level</label>
+          <input id="kycLevel" value="STANDARD" />
         </div>
         <div>
           <label>Jurisdiction</label>
@@ -309,11 +310,11 @@
         </div>
       </div>
       <div class="action-row mt8">
-        <button class="secondary" onclick="verifyCredentialWithServer()">실제 VC 인증 요청</button>
-        <button class="warn" onclick="requestVerifierChallengeFromServer()">실제 Challenge 요청</button>
-        <button class="ok" onclick="requestIssuerCredential()">실제 VC 요청</button>
+        <button class="secondary" onclick="verifyCredentialWithServer()">실제 Credential 인증 요청</button>
+        <button class="warn" onclick="requestVerifierChallengeFromServer()">실제 Nonce 요청</button>
+        <button class="ok" onclick="requestIssuerCredential()">실제 SD-JWT 요청</button>
       </div>
-      <div class="desc" style="margin-top:10px;">현재 서버 OpenAPI상 VC 발급은 PEM을 요구할 수 있습니다. 실제 인증은 이미 받은 VC를 기준으로 먼저 확인하세요.</div>
+      <div class="desc" style="margin-top:10px;">발급 응답의 credential 원문은 전체 disclosure를 포함하므로 로그 공유 시 주의하세요.</div>
       <div class="result-panel" id="realCoreResult"></div>
     </section>
 
@@ -345,7 +346,7 @@
         <h2>3. VC 저장 / 상태 확인</h2>
         <span class="mini-status" id="vcStatus">미저장</span>
       </div>
-      <p class="desc">발급된 VC JWT를 저장하고 XRPL accepted 상태를 확인합니다. 실제 VC 검증은 위 실서버 verifier 버튼을 사용합니다.</p>
+      <p class="desc">발급된 SD-JWT 원문을 저장하고 XRPL accepted 상태를 확인합니다. 실제 검증은 위 실서버 verifier 버튼을 사용합니다.</p>
       <div class="vc-card">
         <div class="small">Corporate KYC Credential</div>
         <div class="big" id="vcCorpName">테스트 법인 주식회사</div>
@@ -382,14 +383,14 @@
         <h2>5. Key 서명 / VP</h2>
         <span class="mini-status" id="signStatus">대기</span>
       </div>
-      <p class="desc">Challenge를 등록한 뒤 VP를 생성하고, verifier 서버로 제출합니다.</p>
-      <label>Challenge</label>
+      <p class="desc">Verifier nonce/aud를 받은 뒤 selected SD-JWT에 KB-JWT를 붙여 제출합니다.</p>
+      <label>Nonce</label>
       <input id="signMessage" />
-      <label>Domain</label>
-      <input id="signDomain" value="kyvc.local" />
+      <label>Audience</label>
+      <input id="signDomain" value="https://dev-core-kyvc.khuoo.synology.me" />
       <div class="grid mt8">
-        <button class="secondary" onclick="makeChallenge()">Challenge 생성</button>
-        <button class="warn" onclick="signMessage()">VP 생성 호출</button>
+        <button class="secondary" onclick="makeChallenge()">로컬 Nonce 등록</button>
+        <button class="warn" onclick="signMessage()">KB-JWT 생성 호출</button>
       </div>
       <label>Verifier Endpoint</label>
       <input id="verifierEndpoint" value="https://dev-core-kyvc.khuoo.synology.me/verifier/presentations/verify" />
@@ -442,7 +443,7 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    const state = { vc: 0, sign: 0, xrpl: 0, credentials: [], lastPresentation: null, lastPresentationJwt: null, lastDidDocument: null, lastChallenge: null, lastDomain: null, lastVcCanonicalHash: null, lastIssuerAccount: null, currentVcJwt: null, signedCredentialKey: null };
+    const state = { vc: 0, sign: 0, xrpl: 0, credentials: [], lastPresentation: null, lastPresentationJwt: null, lastSdJwtKb: null, lastPresentationFormat: null, lastDidDocument: null, lastChallenge: null, lastDomain: null, lastVcCanonicalHash: null, lastIssuerAccount: null, currentVcJwt: null, currentSdJwt: null, signedCredentialKey: null };
 
     const sampleVC = {
       id: "vc-kyc-001",
@@ -554,6 +555,8 @@
       }
       state.lastPresentation = null;
       state.lastPresentationJwt = null;
+      state.lastSdJwtKb = null;
+      state.lastPresentationFormat = null;
       state.lastDidDocument = null;
       state.signedCredentialKey = null;
     }
@@ -677,6 +680,26 @@
       return out;
     }
 
+    function defaultPresentationDefinition() {
+      return {
+        id: "wallet-direct-kyc-test-v1",
+        acceptedFormat: "dc+sd-jwt",
+        acceptedVct: ["https://kyvc.example/vct/legal-entity-kyc-v1"],
+        acceptedJurisdictions: ["KR"],
+        minimumAssuranceLevel: "STANDARD",
+        requiredDisclosures: [
+          "legalEntity.type",
+          "representative.name",
+          "representative.birthDate",
+          "representative.nationality",
+          "beneficialOwners[].name",
+          "beneficialOwners[].birthDate",
+          "beneficialOwners[].nationality"
+        ],
+        documentRules: []
+      };
+    }
+
     function applyWallet(result) {
       if (!result?.account) return;
       $("walletAccount").value = result.account;
@@ -694,7 +717,7 @@
       vc.credentialStatus.subject = account;
       applyIssuerToVc(vc);
       const vcIssuerAccount = vc.credentialStatus?.issuer || accountFromDid(vc.issuer || "");
-      if (isValidXrplClassicAddress(vcIssuerAccount)) {
+      if (isValidXrplClassicAddress(vcIssuerAccount) && document.activeElement !== $("issuerAccount")) {
         setIssuerField(vcIssuerAccount);
       }
       $("vcInput").value = JSON.stringify(vc, null, 2);
@@ -715,32 +738,43 @@
       showToast("지갑 정보 조회 요청");
     }
 
+    function submitHolderDidSet() {
+      callAndroid("submitHolderDidSet", {});
+      $("walletStatus").textContent = "DIDSet 등록 중";
+      $("walletStatus").className = "mini-status";
+      panel("walletResult", "<b>Holder DIDSet 등록 요청:</b><br/>DID Document URI와 Data hash를 XRPL에 기록 중");
+      showToast("Holder DIDSet 등록 요청됨");
+    }
+
     function requestIssuerCredential() {
       const coreBaseUrl = $("coreBaseUrl").value.trim();
       if (!coreBaseUrl) return showToast("Core Base URL을 입력하세요");
       callAndroid("requestIssuerCredential", {
         coreBaseUrl,
+        format: "dc+sd-jwt",
         kycLevel: $("kycLevel").value.trim(),
         jurisdiction: $("jurisdiction").value.trim()
       });
       $("coreStatus").textContent = "issuer 요청 중";
       $("coreStatus").className = "mini-status";
-      panel("realCoreResult", "<b>실제 issuer VC 요청:</b> 처리 중");
-      showToast("실제 issuer VC 요청됨");
+      panel("realCoreResult", "<b>실제 issuer SD-JWT 요청:</b> 처리 중");
+      showToast("실제 issuer SD-JWT 요청됨");
     }
 
     function requestVerifierChallengeFromServer() {
       const coreBaseUrl = $("coreBaseUrl").value.trim();
       if (!coreBaseUrl) return showToast("Core Base URL을 입력하세요");
-      const domain = $("signDomain").value.trim() || "kyvc.local";
+      const domain = $("signDomain").value.trim() || "https://dev-core-kyvc.khuoo.synology.me";
       callAndroid("requestVerifierChallenge", {
         coreBaseUrl,
-        domain
+        aud: domain,
+        domain,
+        presentationDefinition: defaultPresentationDefinition()
       });
       $("coreStatus").textContent = "challenge 요청 중";
       $("coreStatus").className = "mini-status";
-      panel("realCoreResult", `<b>실제 challenge 요청:</b> ${domain}`);
-      showToast("실제 challenge 요청됨");
+      panel("realCoreResult", `<b>실제 nonce 요청:</b> ${domain}`);
+      showToast("실제 nonce 요청됨");
     }
 
     function verifyCredentialWithServer() {
@@ -758,6 +792,7 @@
         coreBaseUrl,
         vcJson: JSON.stringify(vc),
         vcJwt: state.currentVcJwt,
+        sdJwt: state.currentSdJwt,
         require_status: true,
         status_mode: "xrpl"
       });
@@ -771,6 +806,7 @@
       if (!result?.vcJson) return false;
       $("vcInput").value = result.vcJson;
       state.currentVcJwt = result.vcJwt || null;
+      state.currentSdJwt = result.sdJwt || null;
       clearSignedPresentation("새 issuer VC 수신");
       if (result.credentialId) $("credentialId").value = result.credentialId;
       if (result.issuerAccount) setIssuerField(result.issuerAccount);
@@ -799,9 +835,9 @@
     }
 
     function renderVCCard(vc) {
-      $("vcCorpName").textContent = vc.credentialSubject.corporateName;
-      $("vcBizNo").textContent = vc.credentialSubject.businessNumber;
-      $("vcState").textContent = vc.credentialSubject.kycStatus;
+      $("vcCorpName").textContent = vc.credentialSubject?.corporateName || vc.vct || vc.id || "SD-JWT Credential";
+      $("vcBizNo").textContent = vc.credentialSubject?.businessNumber || vc.credentialStatus?.credentialType || "-";
+      $("vcState").textContent = vc.credentialSubject?.kycStatus || vc.format || "issued";
     }
 
     function saveVC() {
@@ -812,6 +848,7 @@
         renderVCCard(vc);
         const payload = structuredClone(vc);
         if (state.currentVcJwt) payload.vcJwt = state.currentVcJwt;
+        if (state.currentSdJwt) payload.sdJwt = state.currentSdJwt;
         callAndroid("saveVC", payload);
         $("credentialId").value = vc.id || "";
         setIssuerField(vc.credentialStatus?.issuer || "");
@@ -819,7 +856,7 @@
         $("credentialType").value = vc.credentialStatus?.credentialType || "";
         $("vcStatus").textContent = "저장 중";
         $("vcStatus").className = "mini-status";
-        panel("vcResult", `<b>저장 요청:</b> ${vc.id}<br/>법인명: ${vc.credentialSubject.corporateName}`);
+        panel("vcResult", `<b>저장 요청:</b> ${vc.id}<br/>credential: ${vc.credentialSubject?.corporateName || vc.vct || vc.format || "-"}`);
         showToast("VC 저장 요청됨");
       } catch (e) {
         panel("vcResult", `<b>JSON 오류:</b> ${e.message}`);
@@ -837,7 +874,8 @@
           holderAccount: $("holderAccount").value.trim(),
           credentialType: $("credentialType").value.trim(),
           vcJson: JSON.stringify(vc),
-          vcJwt: state.currentVcJwt
+          vcJwt: state.currentVcJwt,
+          sdJwt: state.currentSdJwt
         });
         $("vcStatus").textContent = "상태 조회 중";
         $("vcStatus").className = "mini-status";
@@ -912,11 +950,13 @@
 
     function makeChallenge() {
       const challenge = "vp-challenge-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8);
-      const domain = $("signDomain").value.trim() || "kyvc.local";
+      const domain = $("signDomain").value.trim() || "https://dev-core-kyvc.khuoo.synology.me";
       $("signMessage").value = challenge;
       callAndroid("registerVerifierChallenge", {
         challenge,
+        nonce: challenge,
         domain,
+        aud: domain,
         issuedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString()
       });
@@ -939,12 +979,13 @@
         domain: $("signDomain").value.trim(),
         credentialId: $("credentialId").value.trim(),
         vcJson: JSON.stringify(vc),
-        vcJwt: state.currentVcJwt
+        vcJwt: state.currentVcJwt,
+        sdJwt: state.currentSdJwt
       });
-      $("signStatus").textContent = "VP 생성 중";
+      $("signStatus").textContent = state.currentSdJwt ? "KB-JWT 생성 중" : "VP 생성 중";
       $("signStatus").className = "mini-status";
-      panel("signResult", `<b>VP 생성 요청:</b><br/>${message}`);
-      showToast("VP 생성 요청됨");
+      panel("signResult", `<b>${state.currentSdJwt ? "KB-JWT" : "VP"} 생성 요청:</b><br/>${message}`);
+      showToast(state.currentSdJwt ? "KB-JWT 생성 요청됨" : "VP 생성 요청됨");
     }
 
     function submitPresentationToVerifier() {
@@ -956,8 +997,9 @@
         }
         const vc = syncVcWithWallet() || JSON.parse($("vcInput").value);
         ensureVcReadyForLedgerAction(vc, "verifierResult");
+        const isSdJwtPresentation = state.lastPresentationFormat === "kyvc-sd-jwt-presentation-v1" || !!state.lastSdJwtKb;
         const signedVc = presentationCredential(presentation);
-        if (!signedVc || credentialKey(signedVc) !== credentialKey(vc)) {
+        if (!isSdJwtPresentation && (!signedVc || credentialKey(signedVc) !== credentialKey(vc))) {
           clearSignedPresentation("Verifier 제출 전 VC/VP 불일치");
           panel("verifierResult", "<b>Verifier 제출 차단:</b><br/>현재 VC와 마지막으로 생성한 VP의 VC가 다릅니다. 현재 VC로 VP를 다시 생성하세요.");
           showToast("현재 VC로 VP를 다시 생성하세요");
@@ -972,8 +1014,9 @@
           endpoint: $("verifierEndpoint").value.trim(),
           presentation,
           presentationJwt: state.lastPresentationJwt,
+          sdJwtKb: state.lastSdJwtKb,
           didDocument,
-          policy,
+          policy: state.lastPresentationFormat === "kyvc-sd-jwt-presentation-v1" ? undefined : policy,
           require_status: true,
           status_mode: "xrpl",
           challenge: state.lastChallenge,
@@ -983,7 +1026,8 @@
           holderAccount: $("holderAccount").value.trim(),
           credentialType: $("credentialType").value.trim(),
           vcJson: JSON.stringify(vc),
-          vcJwt: state.currentVcJwt
+          vcJwt: state.currentVcJwt,
+          sdJwt: state.currentSdJwt
         });
         panel("verifierResult", `<b>Verifier 제출 요청:</b><br/>${$("verifierEndpoint").value.trim()}`);
         showToast("Verifier 제출 요청됨");
@@ -1077,20 +1121,20 @@
           }
         }
         if (result.action === "REQUEST_VERIFIER_CHALLENGE") {
-          $("coreStatus").textContent = result.ok ? "challenge 수신" : "challenge 실패";
+          $("coreStatus").textContent = result.ok ? "nonce 수신" : "nonce 실패";
           $("coreStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
           if (result.ok) {
-            if (result.challenge) $("signMessage").value = result.challenge;
-            if (result.domain) $("signDomain").value = result.domain;
+            if (result.nonce || result.challenge) $("signMessage").value = result.nonce || result.challenge;
+            if (result.aud || result.domain) $("signDomain").value = result.aud || result.domain;
             if (result.endpoint) {
               $("verifierEndpoint").value = result.endpoint.replace("/challenges", "/verify");
             }
-            state.lastChallenge = result.challenge || null;
-            state.lastDomain = result.domain || null;
+            state.lastChallenge = result.nonce || result.challenge || null;
+            state.lastDomain = result.aud || result.domain || null;
           }
           panel("realCoreResult", result.ok
-            ? `<b>challenge 수신 완료:</b><br/>${result.challenge}<br/>domain: ${result.domain}<br/>expiresAt: ${result.expiresAt || "-"}`
-            : `<b>challenge 요청 실패:</b><br/>${result.error}`);
+            ? `<b>nonce 수신 완료:</b><br/>${result.nonce || result.challenge}<br/>aud: ${result.aud || result.domain}<br/>expiresAt: ${result.expiresAt || "-"}`
+            : `<b>nonce 요청 실패:</b><br/>${result.error}`);
         }
         if (result.action === "VERIFY_CREDENTIAL_WITH_SERVER") {
           $("coreStatus").textContent = result.ok ? "VC 인증 완료" : "VC 인증 실패";
@@ -1109,9 +1153,20 @@
             panel("walletResult", `<b>지갑 오류:</b><br/>${result.error}`);
           }
         }
+        if (result.action === "SUBMIT_HOLDER_DID_SET") {
+          $("walletStatus").textContent = result.ok ? "DIDSet 등록 완료" : "DIDSet 등록 실패";
+          $("walletStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("walletResult", result.ok
+            ? `<b>Holder DIDSet 등록 완료:</b><br/>tx: ${result.txHash}<br/>data: ${result.dataHash}<br/>uri: ${result.didDocumentUri}`
+            : `<b>Holder DIDSet 등록 실패:</b><br/>${result.error}`);
+        }
         if (result.action === "SAVE_VC") {
           $("vcStatus").textContent = result.ok ? "저장 완료" : "저장 실패";
           $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          if (result.ok) {
+            if (result.vcJwt) state.currentVcJwt = result.vcJwt;
+            if (result.sdJwt) state.currentSdJwt = result.sdJwt;
+          }
           if (result.ok) {
             state.vc += 1;
             updateSummary();
@@ -1167,18 +1222,24 @@
             : `<b>Challenge 등록 실패:</b><br/>${result.error}`);
         }
         if (result.action === "SIGN_MESSAGE") {
-          $("signStatus").textContent = result.ok ? "VP 생성 완료" : "VP 생성 실패";
+          $("signStatus").textContent = result.ok ? (result.format === "kyvc-sd-jwt-presentation-v1" ? "KB-JWT 생성 완료" : "VP 생성 완료") : "생성 실패";
           $("signStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
           panel("signResult", result.ok
-            ? `<b>Proof:</b><br/>${result.proofValue}<br/><b>Holder:</b><br/>${result.holder}`
-            : `<b>VP 생성 실패:</b><br/>${result.error}`);
+            ? (result.format === "kyvc-sd-jwt-presentation-v1"
+                ? `<b>SD-JWT+KB 생성 완료:</b><br/>selected disclosures: ${result.selectedDisclosureCount}/${result.disclosureCount}<br/>sd_hash: ${result.sdHash}<br/><b>Holder:</b><br/>${result.holder}`
+                : `<b>Proof:</b><br/>${result.proofValue}<br/><b>Holder:</b><br/>${result.holder}`)
+            : `<b>Presentation 생성 실패:</b><br/>${result.error}`);
         if (result.ok) {
             state.lastPresentation = result.presentation || null;
             state.lastPresentationJwt = result.presentationJwt || null;
+            state.lastSdJwtKb = result.sdJwtKb || null;
+            state.lastPresentationFormat = result.format || null;
             state.lastDidDocument = result.didDocument || null;
-            state.signedCredentialKey = credentialKey(presentationCredential(result.presentation));
-            state.lastChallenge = result.challenge || null;
-            state.lastDomain = result.domain || null;
+            state.signedCredentialKey = result.format === "kyvc-sd-jwt-presentation-v1"
+              ? credentialKey(JSON.parse($("vcInput").value))
+              : credentialKey(presentationCredential(result.presentation));
+            state.lastChallenge = result.nonce || result.challenge || null;
+            state.lastDomain = result.aud || result.domain || null;
             state.sign += 1;
             updateSummary();
           }
@@ -1231,7 +1292,7 @@
     $("credentialType").value = sampleVC.credentialStatus.credentialType;
     $("issuerSeed").value = "";
     $("signMessage").value = "vp-submit-request-" + Date.now();
-    $("issuerAccount").addEventListener("input", () => {
+    $("issuerAccount").addEventListener("change", () => {
       syncVcWithWallet();
     });
     updateQRPreview();

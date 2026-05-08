@@ -29,6 +29,10 @@
             android:name=".scanner.QrScannerActivity"
             android:exported="false"
             android:theme="@style/Theme.Kyvc_AndroidApp" />
+        <activity
+            android:name=".auth.UnlockActivity"
+            android:exported="false"
+            android:theme="@style/Theme.Kyvc_AndroidApp" />
     </application>
 
 </manifest>

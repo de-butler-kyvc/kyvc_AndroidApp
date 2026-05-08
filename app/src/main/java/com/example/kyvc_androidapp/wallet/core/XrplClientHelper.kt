@@ -15,6 +15,9 @@ import org.xrpl.xrpl4j.model.transactions.Address
 import org.xrpl.xrpl4j.model.transactions.CredentialCreate
 import org.xrpl.xrpl4j.model.transactions.CredentialAccept
 import org.xrpl.xrpl4j.model.transactions.CredentialUri
+import org.xrpl.xrpl4j.model.transactions.DidData
+import org.xrpl.xrpl4j.model.transactions.DidSet
+import org.xrpl.xrpl4j.model.transactions.DidUri
 import org.xrpl.xrpl4j.model.transactions.XrpCurrencyAmount
 import org.xrpl.xrpl4j.crypto.signing.SingleSignedTransaction
 import org.xrpl.xrpl4j.crypto.keys.Seed
@@ -105,6 +108,32 @@ class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/"
 
         val credentialCreate = builder.build()
         val signedTx: SingleSignedTransaction<CredentialCreate> = signatureService.sign(keyPair.privateKey(), credentialCreate)
+        return xrplClient.submit(signedTx)
+    }
+
+    suspend fun submitDidSet(
+        seed: Seed,
+        didDocumentUri: String,
+        didDocumentDataHashHex: String
+    ): SubmitResult<DidSet> {
+        val keyPair = seed.deriveKeyPair()
+        val publicKey: PublicKey = keyPair.publicKey()
+        val holderAddress = publicKey.deriveAddress()
+        val accountInfo = xrplClient.accountInfo(
+            AccountInfoRequestParams.builder()
+                .account(holderAddress)
+                .ledgerSpecifier(LedgerSpecifier.VALIDATED)
+                .build()
+        )
+        val didSet = DidSet.builder()
+            .account(holderAddress)
+            .uri(DidUri.of(utf8ToHex(didDocumentUri)))
+            .data(DidData.of(didDocumentDataHashHex))
+            .sequence(accountInfo.accountData().sequence())
+            .fee(XrpCurrencyAmount.ofDrops(12))
+            .signingPublicKey(publicKey)
+            .build()
+        val signedTx: SingleSignedTransaction<DidSet> = signatureService.sign(keyPair.privateKey(), didSet)
         return xrplClient.submit(signedTx)
     }
 

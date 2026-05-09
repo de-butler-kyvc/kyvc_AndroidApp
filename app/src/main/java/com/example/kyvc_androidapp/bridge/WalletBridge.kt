@@ -2,6 +2,8 @@ package com.example.kyvc_androidapp.bridge
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -63,7 +65,8 @@ class WalletBridge(
     private val credentialRepository: CredentialRepository,
     private val appLockStore: AppLockStore,
     private val launchQrScanner: (String) -> Unit,
-    private val launchNativeAuth: (String, String) -> Unit
+    private val launchNativeAuth: (String, String) -> Unit,
+    private val onSessionStatusChanged: (Boolean) -> Unit = {}
 ) {
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
     private var currentSeed: Seed? = null
@@ -81,8 +84,216 @@ class WalletBridge(
     }
 
     @JavascriptInterface
-    fun checkBridge(): String {
-        return "Connected"
+    fun listWallets(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                requireTrustedBridgeOrigin("LIST_WALLETS")
+                withContext(Dispatchers.IO) {
+                    val wallets = walletStateStore.listWallets()
+                    val activeWallet = walletStateStore.getWalletStateOrNull()
+                    withContext(Dispatchers.Main) {
+                        emitCallback("LIST_WALLETS", true) {
+                            put("activeAccount", activeWallet?.account ?: "")
+                            put(
+                                "wallets",
+                                JsonArray(
+                                    wallets.map { wallet ->
+                                        buildJsonObject {
+                                            put("account", wallet.account)
+                                            put("did", wallet.did)
+                                            put("name", wallet.name)
+                                            put("derivationIndex", wallet.derivationIndex)
+                                            put("mnemonicHash", wallet.mnemonic?.let { 
+                                                MessageDigest.getInstance("SHA-256").digest(it.toByteArray())
+                                                    .joinToString("") { b -> "%02x".format(b) }.substring(0, 8) 
+                                            } ?: "standalone")
+                                            put("hasMnemonic", !wallet.mnemonic.isNullOrBlank())
+                                            put("isActive", wallet.account == activeWallet?.account)
+                                        }
+                                    }
+                                )
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "listWallets failed", e)
+                emitCallback("LIST_WALLETS", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun removeWallet(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("REMOVE_WALLET")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("REMOVE_WALLET"),
+                    ttlSeconds = 30
+                )
+                val account = request.text("account")
+                    ?: walletStateStore.getWalletStateOrNull()?.account
+                    ?: throw IllegalArgumentException("account is required")
+                
+                withContext(Dispatchers.IO) {
+                    val removed = walletStateStore.removeWallet(account)
+                    require(removed) { "Wallet not found: $account" }
+                    val nextWallet = walletStateStore.getWalletStateOrNull()
+                    currentSeed = nextWallet?.let { walletStateStore.requireSeed() }
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Wallet removed", Toast.LENGTH_SHORT).show()
+                        if (nextWallet != null) {
+                            emitCallback("REMOVE_WALLET", true) {
+                                put("account", nextWallet.account)
+                                put("publicKey", nextWallet.publicKey)
+                                put("authPublicKey", nextWallet.authPublicKey)
+                                put("did", nextWallet.did)
+                                nextWallet.mnemonic?.let { put("mnemonic", it) }
+                                put("didDocument", buildHolderDidDocument(nextWallet))
+                                put("removedAccount", account)
+                            }
+                        } else {
+                            emitCallback("REMOVE_WALLET", true) {
+                                put("noWalletsLeft", true)
+                                put("removedAccount", account)
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "removeWallet failed", e)
+                emitCallback("REMOVE_WALLET", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun setAccountName(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("SET_ACCOUNT_NAME")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("SET_ACCOUNT_NAME"),
+                    ttlSeconds = 30
+                )
+                val account = request.text("account") ?: walletStateStore.getWalletStateOrNull()?.account
+                val name = request.text("name") ?: throw IllegalArgumentException("name is required")
+                
+                if (account == null) throw IllegalStateException("No active account")
+                
+                withContext(Dispatchers.IO) {
+                    walletStateStore.setAccountName(account, name)
+                    val walletState = walletStateStore.requireWalletState()
+                    withContext(Dispatchers.Main) {
+                        emitWalletCallback("SET_ACCOUNT_NAME", true, walletState)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "setAccountName failed", e)
+                emitCallback("SET_ACCOUNT_NAME", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun upgradeToMnemonic(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("UPGRADE_TO_MNEMONIC")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("UPGRADE_TO_MNEMONIC"),
+                    ttlSeconds = 30
+                )
+                val account = request.text("account") ?: walletStateStore.getWalletStateOrNull()?.account
+                
+                if (account == null) throw IllegalStateException("No active account")
+                
+                withContext(Dispatchers.IO) {
+                    val mnemonic = walletStateStore.upgradeToMnemonic(account)
+                    val walletState = walletStateStore.requireWalletState()
+                    withContext(Dispatchers.Main) {
+                        emitWalletCallback("UPGRADE_TO_MNEMONIC", true, walletState)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "upgradeToMnemonic failed", e)
+                emitCallback("UPGRADE_TO_MNEMONIC", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun deriveNextAccount(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("DERIVE_NEXT_ACCOUNT")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("DERIVE_NEXT_ACCOUNT"),
+                    ttlSeconds = 30
+                )
+                val masterAccount = request.text("masterAccount") ?: walletStateStore.getWalletStateOrNull()?.account
+                val customName = request.text("name")
+                
+                if (masterAccount == null) throw IllegalStateException("No active account")
+                
+                withContext(Dispatchers.IO) {
+                    val walletState = walletStateStore.deriveNextAccount(masterAccount, customName)
+                    currentSeed = walletStateStore.requireSeed()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "New account added: ${walletState.name}", Toast.LENGTH_SHORT).show()
+                        emitWalletCallback("DERIVE_NEXT_ACCOUNT", true, walletState)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "deriveNextAccount failed", e)
+                emitCallback("DERIVE_NEXT_ACCOUNT", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun switchWallet(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                requireTrustedBridgeOrigin("SWITCH_WALLET")
+                val request = parseJsonObjectOrEmpty(jsonPayload)
+                val account = request.text("account") ?: throw IllegalArgumentException("account is required")
+                
+                withContext(Dispatchers.IO) {
+                    walletStateStore.switchWallet(account)
+                    val walletState = walletStateStore.requireWalletState()
+                    currentSeed = walletStateStore.requireSeed()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Switched to: ${walletState.account}", Toast.LENGTH_SHORT).show()
+                        emitWalletCallback("SWITCH_WALLET", true, walletState)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "switchWallet failed", e)
+                emitCallback("SWITCH_WALLET", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
     }
 
     @JavascriptInterface
@@ -179,23 +390,26 @@ class WalletBridge(
 
     @JavascriptInterface
     fun createWallet(jsonPayload: String) {
-        scope.launch(Dispatchers.IO) {
+        scope.launch(Dispatchers.Main) {
             try {
-                val request = parseJsonObjectOrEmpty(jsonPayload)
-                val overwrite = request.text("overwrite")?.toBooleanStrictOrNull() ?: false
-                val walletState = walletStateStore.createWallet(overwrite = overwrite)
-                currentSeed = walletStateStore.requireSeed()
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Wallet ready: ${walletState.account}", Toast.LENGTH_SHORT).show()
-                    emitWalletCallback("CREATE_WALLET", true, walletState)
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("CREATE_WALLET")
+
+                withContext(Dispatchers.IO) {
+                    val request = parseJsonObjectOrEmpty(jsonPayload)
+                    val overwrite = request.text("overwrite")?.toBooleanStrictOrNull() ?: false
+                    val walletState = walletStateStore.createWallet(overwrite = overwrite)
+                    currentSeed = walletStateStore.requireSeed()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Wallet ready: ${walletState.account}", Toast.LENGTH_SHORT).show()
+                        emitWalletCallback("CREATE_WALLET", true, walletState)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "createWallet failed", e)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Failed to create wallet: ${e.message}", Toast.LENGTH_LONG).show()
-                    emitCallback("CREATE_WALLET", false) {
-                        put("error", e.message ?: "Unknown error")
-                    }
+                Toast.makeText(context, "Failed to create wallet: ${e.message}", Toast.LENGTH_LONG).show()
+                emitCallback("CREATE_WALLET", false) {
+                    put("error", e.message ?: "Unknown error")
                 }
             }
         }
@@ -203,19 +417,467 @@ class WalletBridge(
 
     @JavascriptInterface
     fun getWalletInfo(jsonPayload: String) {
-        scope.launch(Dispatchers.IO) {
+        scope.launch(Dispatchers.Main) {
             try {
-                val walletState = walletStateStore.requireWalletState()
-                currentSeed = walletStateStore.requireSeed()
-                withContext(Dispatchers.Main) {
-                    emitWalletCallback("GET_WALLET_INFO", true, walletState)
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("GET_WALLET_INFO")
+
+                withContext(Dispatchers.IO) {
+                    require(appLockStore.isSessionUnlocked()) { "활성 인증 세션이 필요합니다." }
+                    val walletState = walletStateStore.requireWalletState()
+                    currentSeed = walletStateStore.requireSeed()
+                    withContext(Dispatchers.Main) {
+                        emitWalletCallback("GET_WALLET_INFO", true, walletState)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "getWalletInfo failed", e)
-                withContext(Dispatchers.Main) {
-                    emitCallback("GET_WALLET_INFO", false) {
-                        put("error", e.message ?: "Unknown error")
+                emitCallback("GET_WALLET_INFO", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun getWalletAssets(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("GET_WALLET_ASSETS")
+
+                withContext(Dispatchers.IO) {
+                    val walletState = walletStateStore.requireWalletState()
+                    val result = xrplHelper.getAccountAssets(walletState.account)
+                    withContext(Dispatchers.Main) {
+                        emitCallback("GET_WALLET_ASSETS", result.error == null) {
+                            put("account", result.account)
+                            result.xrpBalanceDrops?.let { put("xrpBalanceDrops", it) }
+                            result.xrpBalanceXrp?.let { put("xrpBalanceXrp", it) }
+                            result.ownerCount?.let { put("ownerCount", it) }
+                            result.sequence?.let { put("sequence", it) }
+                            put("trustLineCount", result.lines.size)
+                            put(
+                                "lines",
+                                JsonArray(
+                                    result.lines.map { line ->
+                                        buildJsonObject {
+                                            put("currency", line.currency)
+                                            put("issuer", line.issuer)
+                                            put("balance", line.balance)
+                                            put("limit", line.limit)
+                                            put("limitPeer", line.limitPeer)
+                                        }
+                                    }
+                                )
+                            )
+                            put("checkedAtUtc", result.checkedAtUtc)
+                            result.error?.let { put("error", it) }
+                        }
                     }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "getWalletAssets failed", e)
+                emitCallback("GET_WALLET_ASSETS", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun getWalletDepositInfo(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("GET_WALLET_DEPOSIT_INFO")
+
+                withContext(Dispatchers.IO) {
+                    val walletState = walletStateStore.requireWalletState()
+                    val receivePayload = walletState.account
+                    withContext(Dispatchers.Main) {
+                        emitCallback("GET_WALLET_DEPOSIT_INFO", true) {
+                            put("account", walletState.account)
+                            put("did", walletState.did)
+                            put("receiveAddress", walletState.account)
+                            put("qrPayload", receivePayload)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "getWalletDepositInfo failed", e)
+                emitCallback("GET_WALLET_DEPOSIT_INFO", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun getWalletTransactions(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("GET_WALLET_TRANSACTIONS")
+
+                withContext(Dispatchers.IO) {
+                    val request = parseJsonObjectOrEmpty(jsonPayload)
+                    val limit = request.text("limit")?.toIntOrNull() ?: 10
+                    val walletState = walletStateStore.requireWalletState()
+                    val result = xrplHelper.getAccountTransactions(walletState.account, limit)
+                    withContext(Dispatchers.Main) {
+                        emitCallback("GET_WALLET_TRANSACTIONS", result.error == null) {
+                            put("account", result.account)
+                            put("count", result.transactions.size)
+                            put(
+                                "transactions",
+                                JsonArray(
+                                    result.transactions.map { tx ->
+                                        buildJsonObject {
+                                            put("hash", tx.hash)
+                                            put("transactionType", tx.transactionType)
+                                            put("direction", tx.direction)
+                                            put("account", tx.account)
+                                            tx.destination?.let { put("destination", it) }
+                                            tx.amountDrops?.let { put("amountDrops", it) }
+                                            tx.amountXrp?.let { put("amountXrp", it) }
+                                            tx.feeDrops?.let { put("feeDrops", it) }
+                                            tx.feeXrp?.let { put("feeXrp", it) }
+                                            tx.sequence?.let { put("sequence", it) }
+                                            put("validated", tx.validated)
+                                            tx.ledgerIndex?.let { put("ledgerIndex", it) }
+                                            tx.result?.let { put("result", it) }
+                                            tx.dateUtc?.let { put("dateUtc", it) }
+                                        }
+                                    }
+                                )
+                            )
+                            put("checkedAtUtc", result.checkedAtUtc)
+                            result.error?.let { put("error", it) }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "getWalletTransactions failed", e)
+                emitCallback("GET_WALLET_TRANSACTIONS", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun copyWalletAddress(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("COPY_WALLET_ADDRESS")
+
+                val walletState = walletStateStore.requireWalletState()
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("KYvC Holder Address", walletState.account))
+                Toast.makeText(context, "Holder address copied", Toast.LENGTH_SHORT).show()
+                emitCallback("COPY_WALLET_ADDRESS", true) {
+                    put("account", walletState.account)
+                    put("copied", true)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "copyWalletAddress failed", e)
+                emitCallback("COPY_WALLET_ADDRESS", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun submitXrpPayment(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("SUBMIT_XRP_PAYMENT")
+
+                withContext(Dispatchers.IO) {
+                    require(!appLockStore.isEmailVerificationRequired()) {
+                        "이메일 인증이 필요한 상태에서는 송금을 진행할 수 없습니다."
+                    }
+                    require(appLockStore.isSessionUnlocked()) {
+                        "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                    }
+                    require(appLockStore.consumeSensitiveActionAuthorization(SENSITIVE_REASON_XRP_PAYMENT)) {
+                        "송금 전 재인증이 필요합니다."
+                    }
+                    val request = parseJsonObjectOrEmpty(jsonPayload)
+                    val destinationAddress = request.text("destinationAddress")
+                        ?: request.text("destination")
+                        ?: throw IllegalArgumentException("destinationAddress is required")
+                    val amountDrops = request.text("amountDrops")
+                    val amountXrp = request.text("amountXrp")
+                    require(!amountDrops.isNullOrBlank() || !amountXrp.isNullOrBlank()) {
+                        "amountDrops or amountXrp is required"
+                    }
+                    val resolvedAmountDrops = amountDrops?.trim()?.takeIf { it.isNotBlank() }
+                        ?: xrpAmountToDrops(amountXrp!!)
+                    val walletState = walletStateStore.requireWalletState()
+                    val seed = walletStateStore.requireSeed()
+                    currentSeed = seed
+                    val result = xrplHelper.submitXrpPayment(
+                        seed = seed,
+                        destinationAddress = destinationAddress,
+                        amountDrops = amountDrops,
+                        amountXrp = amountXrp
+                    )
+                    val engineResult = result.engineResult().toString()
+                    val txHash = result.transactionResult().hash().value()
+                    val success = engineResult == "tesSUCCESS"
+                    withContext(Dispatchers.Main) {
+                        emitCallback("SUBMIT_XRP_PAYMENT", success) {
+                            put("sourceAccount", walletState.account)
+                            put("destinationAddress", destinationAddress)
+                            amountDrops?.let { put("requestedAmountDrops", it) }
+                            amountXrp?.let { put("requestedAmountXrp", it) }
+                            put("amountDrops", resolvedAmountDrops)
+                            put("amountXrp", dropsToXrp(resolvedAmountDrops))
+                            put("txHash", txHash)
+                            put("engineResult", engineResult)
+                            put("engineResultMessage", result.engineResultMessage())
+                            if (!success) {
+                                put("error", result.engineResultMessage())
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "submitXrpPayment failed", e)
+                emitCallback("SUBMIT_XRP_PAYMENT", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun exportWalletSeed(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("EXPORT_WALLET_SEED")
+                
+                withContext(Dispatchers.IO) {
+                    validateBridgeRequest(
+                        request = request,
+                        allowedActions = setOf("EXPORT_WALLET_SEED"),
+                        ttlSeconds = 30
+                    )
+                    require(!appLockStore.isEmailVerificationRequired()) {
+                        "이메일 인증이 필요한 상태에서는 seed를 내보낼 수 없습니다."
+                    }
+                    require(appLockStore.isSessionUnlocked()) {
+                        "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                    }
+                    val walletState = walletStateStore.requireWalletState()
+                    val seedValue = walletStateStore.exportSeedValue()
+                    
+                    withContext(Dispatchers.Main) {
+                        emitCallback("EXPORT_WALLET_SEED", true) {
+                            request.text("requestId")?.let { put("requestId", it) }
+                            put("account", walletState.account)
+                            put("did", walletState.did)
+                            put("seed", seedValue)
+                            put("warning", "이 값은 민감정보입니다. 화면/로그/원격 전송에 남기지 마세요.")
+                            putAuthAttemptState()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "exportWalletSeed failed", e)
+                emitCallback("EXPORT_WALLET_SEED", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    putAuthAttemptState()
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun logout(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("LOGOUT")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("LOGOUT"),
+                    ttlSeconds = 30
+                )
+                appLockStore.clearSession()
+                walletStateStore.clearActiveWalletSelection()
+                currentSeed = null
+                onSessionStatusChanged(false)
+                emitCallback("LOGOUT", true) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("walletDisconnected", true)
+                    putAuthAttemptState()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "logout failed", e)
+                emitCallback("LOGOUT", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    putAuthAttemptState()
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun copyTextToClipboard(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("COPY_TEXT_TO_CLIPBOARD")
+
+                val text = request.text("text") ?: throw IllegalArgumentException("text is required")
+                val label = request.text("label") ?: "KYvC"
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+                emitCallback("COPY_TEXT_TO_CLIPBOARD", true) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("label", label)
+                    put("copied", true)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "copyTextToClipboard failed", e)
+                emitCallback("COPY_TEXT_TO_CLIPBOARD", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun restoreWallet(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("RESTORE_WALLET")
+
+                withContext(Dispatchers.IO) {
+                    val request = parseJsonObjectOrEmpty(jsonPayload)
+                    val seedValue = request.text("seed") ?: request.text("holderSeed")
+                    val mnemonicValue = request.text("mnemonic")
+                    val authPrivateKeyHex = request.text("authPrivateKeyHex")
+                    val overwrite = request.text("overwrite")?.toBooleanStrictOrNull() ?: false
+                    val restoredWithExistingAuthKey = !authPrivateKeyHex.isNullOrBlank()
+                    val accountsBefore = walletStateStore.listWallets().map { it.account }.toSet()
+                    
+                    val walletState = when {
+                        !mnemonicValue.isNullOrBlank() -> {
+                            walletStateStore.restoreWalletWithMnemonic(
+                                mnemonicString = mnemonicValue,
+                                overwrite = overwrite,
+                                authPrivateKeyHex = authPrivateKeyHex
+                            )
+                        }
+                        !seedValue.isNullOrBlank() -> {
+                            walletStateStore.restoreWallet(
+                                seedValue = seedValue,
+                                overwrite = overwrite,
+                                authPrivateKeyHex = authPrivateKeyHex
+                            )
+                        }
+                        else -> throw IllegalArgumentException("seed or mnemonic is required")
+                    }
+                    val reusedExistingAccount = !overwrite && walletState.account in accountsBefore
+                    val holderDidSetRegistrationRequired = !reusedExistingAccount && !restoredWithExistingAuthKey
+                    
+                    currentSeed = walletStateStore.requireSeed()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Wallet restored: ${walletState.account}", Toast.LENGTH_SHORT).show()
+                        emitCallback("RESTORE_WALLET", true) {
+                            put("restored", true)
+                            put("reusedExistingAccount", reusedExistingAccount)
+                            put("restoredWithExistingAuthKey", restoredWithExistingAuthKey)
+                            put("holderDidSetRegistrationRequired", holderDidSetRegistrationRequired)
+                            put(
+                                "warning",
+                                if (reusedExistingAccount) {
+                                    "Existing wallet entry reused. Holder DIDSet 재등록은 필요하지 않습니다."
+                                } else if (restoredWithExistingAuthKey) {
+                                    "Seed와 holder auth key를 함께 복구했습니다. 기존 DID Document를 그대로 유지할 수 있습니다."
+                                } else {
+                                    "Holder auth key was regenerated. Re-register the holder DIDSet before verifier submission."
+                                }
+                            )
+                            put("account", walletState.account)
+                            put("publicKey", walletState.publicKey)
+                            put("authPublicKey", walletState.authPublicKey)
+                            put("did", walletState.did)
+                            walletState.mnemonic?.let { put("mnemonic", it) }
+                            put("didDocument", buildHolderDidDocument(walletState))
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "restoreWallet failed", e)
+                Toast.makeText(context, "Failed to restore wallet: ${e.message}", Toast.LENGTH_LONG).show()
+                emitCallback("RESTORE_WALLET", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun exportWalletMnemonic(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("EXPORT_WALLET_MNEMONIC")
+
+                withContext(Dispatchers.IO) {
+                    validateBridgeRequest(
+                        request = request,
+                        allowedActions = setOf("EXPORT_WALLET_MNEMONIC"),
+                        ttlSeconds = 30
+                    )
+                    require(!appLockStore.isEmailVerificationRequired()) {
+                        "이메일 인증이 필요한 상태에서는 비밀문구를 내보낼 수 없습니다."
+                    }
+                    require(appLockStore.isSessionUnlocked()) {
+                        "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                    }
+                    val walletState = walletStateStore.requireWalletState()
+                    val mnemonicValue = walletStateStore.exportMnemonicValue()
+
+                    withContext(Dispatchers.Main) {
+                        if (mnemonicValue.isBlank()) {
+                            emitCallback("EXPORT_WALLET_MNEMONIC", false) {
+                                request.text("requestId")?.let { put("requestId", it) }
+                                putAuthAttemptState()
+                                put("error", "현재 지갑에 저장된 비밀문구가 없습니다. 시드(Seed)로 복구했거나 구형 지갑인 경우 비밀문구가 존재하지 않습니다.")
+                            }
+                        } else {
+                            emitCallback("EXPORT_WALLET_MNEMONIC", true) {
+                                request.text("requestId")?.let { put("requestId", it) }
+                                put("account", walletState.account)
+                                put("did", walletState.did)
+                                put("mnemonic", mnemonicValue)
+                                put("warning", "이 값은 민감정보입니다. 화면/로그/원격 전송에 남기지 마세요.")
+                                putAuthAttemptState()
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "exportWalletMnemonic failed", e)
+                emitCallback("EXPORT_WALLET_MNEMONIC", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    putAuthAttemptState()
+                    put("error", e.message ?: "Unknown error")
                 }
             }
         }
@@ -223,47 +885,54 @@ class WalletBridge(
 
     @JavascriptInterface
     fun submitHolderDidSet(jsonPayload: String) {
-        scope.launch(Dispatchers.IO) {
+        scope.launch(Dispatchers.Main) {
             try {
-                val request = parseJsonObjectOrEmpty(jsonPayload)
-                val walletState = walletStateStore.requireWalletState()
-                val seed = walletStateStore.requireSeed()
-                currentSeed = seed
-                val didDocument = buildHolderDidDocument(walletState)
-                val dataHash = didDocumentDataHash(didDocument)
-                val didDocumentUri = request.text("didDocumentUri")
-                    ?: request.text("uri")
-                    ?: "kyvc:holder:${walletState.account}:diddoc.json"
-                val result = xrplHelper.submitDidSet(
-                    seed = seed,
-                    didDocumentUri = didDocumentUri,
-                    didDocumentDataHashHex = dataHash
-                )
-                val txHash = result.transactionResult().hash().value()
-                val engineResult = result.engineResult()
-                val ledgerApplied = engineResult == "tesSUCCESS"
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Holder DIDSet submitted: $engineResult", Toast.LENGTH_LONG).show()
-                    emitCallback("SUBMIT_HOLDER_DID_SET", ledgerApplied) {
-                        put("holderAccount", walletState.account)
-                        put("holderDid", walletState.did)
-                        put("didDocumentUri", didDocumentUri)
-                        put("dataHash", dataHash)
-                        put("didDocument", Json.parseToJsonElement(didDocument))
-                        put("txHash", txHash)
-                        put("engineResult", engineResult)
-                        put("engineResultMessage", result.engineResultMessage())
-                        put("accepted", result.accepted())
-                        put("applied", result.applied())
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("SUBMIT_HOLDER_DID_SET")
+
+                withContext(Dispatchers.IO) {
+                    val request = parseJsonObjectOrEmpty(jsonPayload)
+                    val walletState = walletStateStore.requireWalletState()
+                    val accountPrecheck = xrplHelper.getAccountAssets(walletState.account)
+                    require(accountPrecheck.error == null) {
+                        "holder account is not active on XRPL testnet. Fund this account first: ${walletState.account}"
+                    }
+                    val seed = walletStateStore.requireSeed()
+                    currentSeed = seed
+                    val didDocument = buildHolderDidDocument(walletState)
+                    val dataHash = didDocumentDataHash(didDocument)
+                    val didDocumentUri = request.text("didDocumentUri")
+                        ?: request.text("uri")
+                        ?: "kyvc:holder:${walletState.account}:diddoc.json"
+                    val result = xrplHelper.submitDidSet(
+                        seed = seed,
+                        didDocumentUri = didDocumentUri,
+                        didDocumentDataHashHex = dataHash
+                    )
+                    val txHash = result.transactionResult().hash().value()
+                    val engineResult = result.engineResult()
+                    val ledgerApplied = engineResult == "tesSUCCESS"
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "Holder DIDSet submitted: $engineResult", Toast.LENGTH_LONG).show()
+                        emitCallback("SUBMIT_HOLDER_DID_SET", ledgerApplied) {
+                            put("holderAccount", walletState.account)
+                            put("holderDid", walletState.did)
+                            put("didDocumentUri", didDocumentUri)
+                            put("dataHash", dataHash)
+                            put("didDocument", Json.parseToJsonElement(didDocument))
+                            put("txHash", txHash)
+                            put("engineResult", engineResult)
+                            put("engineResultMessage", result.engineResultMessage())
+                            put("accepted", result.accepted())
+                            put("applied", result.applied())
+                        }
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "submitHolderDidSet failed", e)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "Holder DIDSet failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    emitCallback("SUBMIT_HOLDER_DID_SET", false) {
-                        put("error", e.message ?: "Unknown error")
-                    }
+                Toast.makeText(context, "Holder DIDSet failed: ${e.message}", Toast.LENGTH_LONG).show()
+                emitCallback("SUBMIT_HOLDER_DID_SET", false) {
+                    put("error", e.message ?: "Unknown error")
                 }
             }
         }
@@ -635,87 +1304,89 @@ class WalletBridge(
 
     @JavascriptInterface
     fun submitToXRPL(jsonPayload: String) {
-        scope.launch(Dispatchers.IO) {
+        scope.launch(Dispatchers.Main) {
+            val request = Json.parseToJsonElement(jsonPayload).jsonObject
             try {
-                val request = Json.parseToJsonElement(jsonPayload).jsonObject
-                val seed = walletStateStore.requireSeed()
-                currentSeed = seed
-                val walletState = walletStateStore.requireWalletState()
+                // Check WebView URL on Main thread
+                requireTrustedBridgeOrigin("SUBMIT_TO_XRPL")
 
-                val savedCredential = request.text("credentialId")
-                    ?.takeIf { it.isNotBlank() }
-                    ?.let { credentialRepository.getCredentialById(it) }
-                val vcJson = resolveVcJson(request)
-                val vcObject = Json.parseToJsonElement(vcJson).jsonObject
-                validateCredentialAgainstWallet(vcObject, walletStateStore.getWalletStateOrNull())
-                val vcStatus = request.obj("credentialStatus")
-                    ?: request.obj("credential")?.obj("credentialStatus")
-                    ?: vcObject.obj("credentialStatus")
+                withContext(Dispatchers.IO) {
+                    val seed = walletStateStore.requireSeed()
+                    currentSeed = seed
+                    val walletState = walletStateStore.requireWalletState()
 
-                val issuerAccount = request.text("issuerAccount")
-                    ?: vcStatus?.text("issuer")
-                    ?: savedCredential?.issuerAccount
-                    ?: accountFromDid(request.text("issuerDid").orEmpty())
-                val credentialType = request.text("credentialType")
-                    ?: vcStatus?.text("credentialType")
-                    ?: savedCredential?.credentialType
-                val expectedHolderAccount = request.text("holderAccount")
-                    ?: vcStatus?.text("subject")
-                    ?: savedCredential?.holderAccount
-                    ?: walletState.account
+                    val savedCredential = request.text("credentialId")
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { credentialRepository.getCredentialById(it) }
+                    val vcJson = resolveVcJson(request)
+                    val vcObject = Json.parseToJsonElement(vcJson).jsonObject
+                    validateCredentialAgainstWallet(vcObject, walletStateStore.getWalletStateOrNull())
+                    val vcStatus = request.obj("credentialStatus")
+                        ?: request.obj("credential")?.obj("credentialStatus")
+                        ?: vcObject.obj("credentialStatus")
 
-                require(!issuerAccount.isNullOrBlank()) { "issuerAccount is required" }
-                require(!credentialType.isNullOrBlank()) { "credentialType is required" }
+                    val issuerAccount = request.text("issuerAccount")
+                        ?: vcStatus?.text("issuer")
+                        ?: savedCredential?.issuerAccount
+                        ?: accountFromDid(request.text("issuerDid").orEmpty())
+                    val credentialType = request.text("credentialType")
+                        ?: vcStatus?.text("credentialType")
+                        ?: savedCredential?.credentialType
+                    val expectedHolderAccount = request.text("holderAccount")
+                        ?: vcStatus?.text("subject")
+                        ?: savedCredential?.holderAccount
+                        ?: walletState.account
 
-                val holderAccount = seed.deriveKeyPair().publicKey().deriveAddress().value()
-                if (!expectedHolderAccount.isNullOrBlank()) {
-                    require(holderAccount == expectedHolderAccount) {
-                        "holder account mismatch: seed=$holderAccount, vc=$expectedHolderAccount"
+                    require(!issuerAccount.isNullOrBlank()) { "issuerAccount is required" }
+                    require(!credentialType.isNullOrBlank()) { "credentialType is required" }
+
+                    val holderAccount = seed.deriveKeyPair().publicKey().deriveAddress().value()
+                    if (!expectedHolderAccount.isNullOrBlank()) {
+                        require(holderAccount == expectedHolderAccount) {
+                            "holder account mismatch: seed=$holderAccount, vc=$expectedHolderAccount"
+                        }
                     }
-                }
 
-                val result = xrplHelper.submitCredentialAccept(
-                    seed = seed,
-                    issuerAddress = issuerAccount,
-                    credentialTypeHex = credentialType
-                )
-                val txHash = result.transactionResult().hash().value()
-                val engineResult = result.engineResult()
-                val ledgerApplied = engineResult == "tesSUCCESS"
-                val alreadyExists = engineResult == "tecDUPLICATE"
-
-                if (ledgerApplied || alreadyExists) savedCredential?.let {
-                    credentialRepository.updateCredential(
-                        it.copy(
-                            acceptedAt = nowUtcIso(),
-                            credentialAcceptHash = txHash
-                        )
+                    val result = xrplHelper.submitCredentialAccept(
+                        seed = seed,
+                        issuerAddress = issuerAccount,
+                        credentialTypeHex = credentialType
                     )
-                }
+                    val txHash = result.transactionResult().hash().value()
+                    val engineResult = result.engineResult()
+                    val ledgerApplied = engineResult == "tesSUCCESS"
+                    val alreadyExists = engineResult == "tecDUPLICATE"
 
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "XRPL submitted: $engineResult", Toast.LENGTH_LONG).show()
-                    emitCallback("SUBMIT_TO_XRPL", ledgerApplied || alreadyExists) {
-                        put("credentialId", savedCredential?.credentialId.orEmpty())
-                        put("holderAccount", holderAccount)
-                        put("issuerAccount", issuerAccount)
-                        put("credentialType", credentialType)
-                        put("txHash", txHash)
-                        put("engineResult", engineResult)
-                        put("engineResultMessage", result.engineResultMessage())
-                        put("accepted", result.accepted())
-                        put("applied", result.applied())
-                        put("ledgerApplied", ledgerApplied)
-                        put("alreadyExists", alreadyExists)
+                    if (ledgerApplied || alreadyExists) savedCredential?.let {
+                        credentialRepository.updateCredential(
+                            it.copy(
+                                acceptedAt = nowUtcIso(),
+                                credentialAcceptHash = txHash
+                            )
+                        )
+                    }
+
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(context, "XRPL submitted: $engineResult", Toast.LENGTH_LONG).show()
+                        emitCallback("SUBMIT_TO_XRPL", ledgerApplied || alreadyExists) {
+                            put("credentialId", savedCredential?.credentialId.orEmpty())
+                            put("holderAccount", holderAccount)
+                            put("issuerAccount", issuerAccount)
+                            put("credentialType", credentialType)
+                            put("txHash", txHash)
+                            put("engineResult", engineResult)
+                            put("engineResultMessage", result.engineResultMessage())
+                            put("accepted", result.accepted())
+                            put("applied", result.applied())
+                            put("ledgerApplied", ledgerApplied)
+                            put("alreadyExists", alreadyExists)
+                        }
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "submitToXRPL failed", e)
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "XRPL submission failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    emitCallback("SUBMIT_TO_XRPL", false) {
-                        put("error", e.message ?: "Unknown error")
-                    }
+                emitCallback("SUBMIT_TO_XRPL", false) {
+                    put("error", e.message ?: "Unknown error")
                 }
             }
         }
@@ -802,7 +1473,7 @@ class WalletBridge(
                 val request = parseJsonObjectOrEmpty(jsonPayload)
                 val baseUrl = request.text("coreBaseUrl")
                     ?: request.text("issuerBaseUrl")
-                    ?: "https://dev-core-kyvc.khuoo.synology.me"
+                    ?: throw IllegalArgumentException("coreBaseUrl is required")
                 val holderState = walletStateStore.requireWalletState()
                 val holderAccount = request.text("holderAccount") ?: holderState.account
                 val holderDid = request.text("holderDid") ?: holderState.did
@@ -907,11 +1578,11 @@ class WalletBridge(
                 val request = parseJsonObjectOrEmpty(jsonPayload)
                 val baseUrl = request.text("coreBaseUrl")
                     ?: request.text("verifierBaseUrl")
-                    ?: "https://dev-core-kyvc.khuoo.synology.me"
+                    ?: throw IllegalArgumentException("coreBaseUrl is required")
                 val audience = request.text("aud")
                     ?: request.text("audience")
                     ?: request.text("domain")
-                    ?: "https://dev-core-kyvc.khuoo.synology.me"
+                    ?: baseUrl
                 val payload = buildJsonObject {
                     put("aud", audience)
                     put("presentationDefinition", request.obj("presentationDefinition") ?: defaultSdJwtPresentationDefinition())
@@ -964,7 +1635,7 @@ class WalletBridge(
                 val request = parseJsonObjectOrEmpty(jsonPayload)
                 val baseUrl = request.text("coreBaseUrl")
                     ?: request.text("verifierBaseUrl")
-                    ?: "https://dev-core-kyvc.khuoo.synology.me"
+                    ?: throw IllegalArgumentException("coreBaseUrl is required")
                 val walletState = walletStateStore.requireWalletState()
                 val vcJson = resolveVcJson(request)
                 val vcJwt = resolveVcJwt(request)
@@ -1448,6 +2119,7 @@ class WalletBridge(
             emitCallback("REQUEST_NATIVE_AUTH", false) {
                 requestId?.let { put("requestId", it) }
                 put("method", resolvedMethod)
+                request.text("reason")?.let { put("reason", it) }
                 put("authenticated", false)
                 putAuthAttemptState()
                 put("error", errorMessage ?: "Authentication failed")
@@ -1457,11 +2129,20 @@ class WalletBridge(
 
         scope.launch(Dispatchers.IO) {
             try {
+                request.text("reason")
+                    ?.takeIf { it in SENSITIVE_AUTH_REASONS }
+                    ?.let(appLockStore::markSensitiveActionAuthorized)
+                
+                // Refresh general session on any successful native auth
+                appLockStore.markSessionUnlocked()
+                
                 val backendResponse = performBackendRequestIfPresent(request)
                 withContext(Dispatchers.Main) {
+                    onSessionStatusChanged(true)
                     emitCallback("REQUEST_NATIVE_AUTH", true) {
                         requestId?.let { put("requestId", it) }
                         put("method", resolvedMethod)
+                        request.text("reason")?.let { put("reason", it) }
                         put("authenticated", true)
                         putAuthAttemptState()
                         backendResponse?.json?.let { put("backendResponse", it) }
@@ -1474,6 +2155,7 @@ class WalletBridge(
                     emitCallback("REQUEST_NATIVE_AUTH", false) {
                         requestId?.let { put("requestId", it) }
                         put("method", resolvedMethod)
+                        request.text("reason")?.let { put("reason", it) }
                         put("authenticated", true)
                         putAuthAttemptState()
                         put("error", e.message ?: "Backend request failed")
@@ -1487,6 +2169,26 @@ class WalletBridge(
         return (this[name] as? JsonPrimitive)
             ?.contentOrNull
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun xrpAmountToDrops(amountXrp: String): String {
+        val normalized = amountXrp.trim()
+        require(normalized.matches(Regex("^\\d+(\\.\\d{1,6})?$"))) {
+            "amountXrp must be a positive XRP string with up to 6 decimal places"
+        }
+        val parts = normalized.split(".")
+        val whole = parts[0]
+        val fractional = parts.getOrNull(1).orEmpty().padEnd(6, '0')
+        val drops = (whole + fractional).trimStart('0').ifEmpty { "0" }
+        require(drops != "0") { "amountXrp must be greater than 0" }
+        return drops
+    }
+
+    private fun dropsToXrp(drops: String): String {
+        val padded = drops.trim().padStart(7, '0')
+        val whole = padded.dropLast(6)
+        val fractional = padded.takeLast(6).trimEnd('0')
+        return if (fractional.isEmpty()) whole else "$whole.$fractional"
     }
 
     private fun availableAuthMethods(): JsonArray {
@@ -1510,6 +2212,8 @@ class WalletBridge(
         put("emailVerificationRequired", appLockStore.isEmailVerificationRequired())
         put("sessionUnlocked", appLockStore.isSessionUnlocked())
         put("sessionRemainingMs", appLockStore.getSessionRemainingMillis())
+        put("xrpPaymentAuthReady", appLockStore.isSensitiveActionAuthorized(SENSITIVE_REASON_XRP_PAYMENT))
+        put("xrpPaymentAuthRemainingMs", appLockStore.getSensitiveActionRemainingMillis(SENSITIVE_REASON_XRP_PAYMENT))
         appLockStore.getSessionExpiresAtMillis()?.let { put("sessionExpiresAtMs", it) }
     }
 
@@ -1747,7 +2451,7 @@ class WalletBridge(
             "timeout" in joined || "timed out" in joined -> VerifierFailureInfo(
                 "VERIFIER_REQUEST_TIMEOUT",
                 "Verifier 서버 응답 시간이 초과됐습니다",
-                "dev-core 서버 또는 XRPL status 조회가 지연된 상태입니다. 네트워크/VPN 연결을 확인하고 잠시 뒤 다시 시도하세요."
+                "core 서버 또는 XRPL status 조회가 지연된 상태입니다. 네트워크/VPN 연결을 확인하고 잠시 뒤 다시 시도하세요."
             )
             else -> VerifierFailureInfo(
                 "VERIFIER_REJECTED",
@@ -1763,19 +2467,19 @@ class WalletBridge(
             "timeout" in text || "timed out" in text -> VerifierFailureInfo(
                 "ISSUER_REQUEST_TIMEOUT",
                 "Issuer 서버 응답 시간이 초과됐습니다",
-                "dev-core 서버 또는 XRPL devnet 처리가 지연된 상태입니다. 네트워크/VPN 연결을 확인하고 잠시 뒤 다시 시도하세요. 같은 오류가 반복되면 서버 로그에서 /issuer/credentials/kyc 처리 시간을 확인해야 합니다."
+                "core 서버 또는 XRPL testnet 처리가 지연된 상태입니다. 네트워크/VPN 연결을 확인하고 잠시 뒤 다시 시도하세요. 같은 오류가 반복되면 서버 로그에서 /issuer/credentials/kyc 처리 시간을 확인해야 합니다."
             )
             "issuer private key pem file could not be read" in text ||
                 "issuer_private_key_pem" in text ||
                 ".local-secrets/issuer-key.pem" in text -> VerifierFailureInfo(
                     "ISSUER_KEY_NOT_CONFIGURED",
                     "Issuer 서버 키 설정이 없습니다",
-                    "Android holder 앱은 issuer private key/PEM을 보내면 안 됩니다. dev-core 서버에 issuer key 파일 또는 issuer 운영 설정이 등록되어야 실제 VC 발급이 가능합니다."
+                    "Android holder 앱은 issuer private key/PEM을 보내면 안 됩니다. core 서버에 issuer key 파일 또는 issuer 운영 설정이 등록되어야 실제 VC 발급이 가능합니다."
                 )
             "400" in text -> VerifierFailureInfo(
                 "ISSUER_BAD_REQUEST",
                 "Issuer 요청이 서버에서 거부됐습니다",
-                "holder_account, holder_did, claims, valid_from, valid_until 값과 dev-core 서버 설정을 확인하세요."
+                "holder_account, holder_did, claims, valid_from, valid_until 값과 core 서버 설정을 확인하세요."
             )
             else -> VerifierFailureInfo(
                 "ISSUER_REQUEST_FAILED",
@@ -2304,7 +3008,7 @@ class WalletBridge(
                 address.contains("placeholder", ignoreCase = true) ||
                 address.contains("accountfortestnet", ignoreCase = true)
             ) {
-                "This looks like sample data. Replace it with a real XRPL devnet classic address."
+                "This looks like sample data. Replace it with a real XRPL testnet classic address."
             } else {
                 "Use the XRPL classic address itself, not a DID."
             }
@@ -2692,6 +3396,7 @@ class WalletBridge(
             put("publicKey", walletState.publicKey)
             put("authPublicKey", walletState.authPublicKey)
             put("did", walletState.did)
+            walletState.mnemonic?.let { put("mnemonic", it) }
             put("didDocument", buildHolderDidDocument(walletState))
         }
     }
@@ -2776,6 +3481,8 @@ class WalletBridge(
         private const val TAG = "WalletBridge"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val AUTH_METHODS = setOf("pin", "pattern", "biometric")
+        private const val SENSITIVE_REASON_XRP_PAYMENT = "xrp-payment"
+        private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
             "dev-core-kyvc.khuoo.synology.me",
             "demo.kyvc.local",

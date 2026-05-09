@@ -5,7 +5,46 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 ## 문서 우선순위
 
 - 웹에서 Android 브리지를 호출하는 최신 규격은 [WEBVIEW_BRIDGE_SPEC.md](./WEBVIEW_BRIDGE_SPEC.md)를 기준으로 본다.
+- 웹 구현 흐름/예외처리 빠른 참고는 [WEB_DEVELOPER_INTEGRATION_GUIDE.md](./WEB_DEVELOPER_INTEGRATION_GUIDE.md)를 본다.
 - 브리지 함수 시그니처나 응답 형식이 바뀌면 위 문서를 먼저 같이 갱신한다.
+
+## 문서 갱신 규칙
+
+- 새로운 기능을 구현하면 `README.md`의 구현 상태와 사용 흐름을 같이 갱신한다.
+- 웹 또는 서버가 앱 기능을 브리지로 호출해야 하면 [WEBVIEW_BRIDGE_SPEC.md](./WEBVIEW_BRIDGE_SPEC.md)에 아래 항목을 같이 추가한다.
+  - 메서드명
+  - 요청 JSON 형식
+  - 응답 JSON 형식
+  - 호출 순서 / 선행 조건
+  - 실패 시 처리 방식
+- 브리지 요청/응답이 바뀌었는데 문서가 같이 안 바뀐 상태는 불완전 구현으로 본다.
+- 웹/서버 브랜치 연동이 필요한 기능은 구현 후 README에 “외부 연동 필요 사항”으로 남긴다.
+
+## 외부 연동 원칙
+
+- 웹은 Android 브리지만 호출한다.
+- 인증, 민감정보 처리, XRPL 서명, 백엔드 API 호출은 네이티브가 담당한다.
+- 웹/서버에서 앱 기능을 움직여야 하는 경우에는 브리지 메서드로 노출하고, 직접 앱 내부 저장소나 키에 접근하지 않는다.
+- 외부에서 호출 가능한 앱 기능은 반드시 호출 규격 문서와 함께 관리한다.
+
+## 네트워크 전환 공지 (Devnet -> Testnet)
+
+현재 프로젝트는 XRPL 네트워크 기준을 **Devnet에서 Testnet으로 전환**한다.
+
+- 문서/테스트/운영 체크 기준 네트워크: `testnet`
+- Core 서버도 testnet ledger 기준 응답을 반환해야 한다.
+- Devnet 전용 성공 로그/주소/가정은 더 이상 기준으로 사용하지 않는다.
+
+전환 시 필수 점검:
+1. issuer/holder 계정이 testnet에서 funded/active인지 확인
+2. `CredentialCreate`, `CredentialAccept`, `DIDSet`이 testnet ledger에 반영되는지 확인
+3. `checkCredentialStatus`의 `active/accepted`를 testnet 기준으로 검증
+4. verifier/credential verify API의 status 조회가 testnet을 바라보는지 확인
+
+UI/브리지 기본값 규칙:
+- `coreBaseUrl`은 필수 입력값이다. 미입력 시 issuer/verifier 계열 요청은 실패한다.
+- `aud/domain` 미입력 시 `coreBaseUrl`을 기본값으로 사용한다.
+- verifier endpoint 기본값은 `https://<core-testnet-base-url>/verifier/presentations/verify` 형태다.
 
 ## 🛠 기술 스택
 - **Language**: Kotlin
@@ -52,14 +91,17 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **Wallet Core**: XRPL 계정 생성 및 `CredentialAccept` 트랜잭션 제출 기능 기초 구현
 - **Storage**: `CredentialEntity`를 통한 VC 로컬 저장소 구축
 - **Bridge**: 웹에서 안드로이드 기능을 호출할 수 있는 `Android` 브릿지 객체 등록
-- **XRPL Submit**: `submitToXRPL` 브릿지에서 holder seed, issuer account, credential type을 검증한 뒤 XRPL devnet `CredentialAccept`를 제출하고 tx hash를 Room DB에 반영
-- **Issuer CredentialCreate**: `submitCredentialCreate` 브릿지에서 issuer seed로 XRPL devnet `CredentialCreate`를 제출해 ledger credential entry를 생성
+- **XRPL Submit**: `submitToXRPL` 브릿지에서 holder seed, issuer account, credential type을 검증한 뒤 XRPL testnet `CredentialAccept`를 제출하고 tx hash를 Room DB에 반영
+- **Issuer CredentialCreate**: `submitCredentialCreate` 브릿지에서 issuer seed로 XRPL testnet `CredentialCreate`를 제출해 ledger credential entry를 생성
 - **WebView Callback**: VC 저장 및 XRPL 제출 결과를 `window.onAndroidResult`로 반환하도록 테스트 페이지 연동
 - **UI**: 지민님이 제공한 고도화된 브릿지 테스트 페이지(`index.html`) 적용
 - **Build Fix**: AGP 9.2.0의 내장 Kotlin 지원과 KSP 간의 충돌 해결 (`android.disallowKotlinSourceSets=false`)
 - **Runtime Fix**: `xrpl4j-keypairs/crypto-bouncycastle` 3.x와 `xrpl4j-core` 6.x 혼용으로 발생한 `NoClassDefFoundError`를 제거하기 위해 XRPL 런타임 의존성을 6.0.0 core/client 중심으로 정리
-- **Wallet State**: holder seed를 Android Keystore AES-GCM 키로 암호화해 SharedPreferences에 저장하고, WebView는 seed 없이 `createWallet/getWalletInfo/submitToXRPL` 브릿지를 호출하도록 변경
-- **Auth Key Separation**: XRPL account key는 `CredentialAccept` 전용으로 유지하고, VP 서명용 holder authentication key를 별도 secp256k1 key로 생성/암호화 저장하도록 분리
+- **Wallet State**: 다중 지갑 관리 시스템 도입. 각 지갑은 별도의 시드와 인증 키를 가지며, Android Keystore AES-GCM으로 암호화 저장.
+- **HD Wallet (BIP-39)**: 12개 단어 비밀 복구 구문(Mnemonic Phrase) 생성 및 복구 지원. 단일 비밀문구에서 여러 계정 파생(BIP-44 스타일) 가능.
+- **Account Management**: 계정별 커스텀 이름 설정, 계정 삭제(목록 제거), Standalone 계정의 비밀문구 백업 생성 지원.
+- **Auth Key Separation**: XRPL account key는 `CredentialAccept` 전용으로 유지하고, VP 서명용 holder authentication key를 별도 secp256k1 key로 생성/암호화 저장하도록 분리.
+- **Session Sync**: 로그아웃 시 웹뷰 종료 및 잠금 화면 전환. 네이티브 인증 성공 시 30분 세션 자동 갱신.
 - **VP Signing**: `signMessage` 브릿지에서 challenge/domain/VC를 받아 JCS 기반 `DataIntegrityProof` VP를 생성하고 holder DID Document와 함께 WebView 콜백으로 반환
 - **QR Bridge**: `scanQRCode` 브릿지가 QR 요청/데이터를 `VC_ISSUE`, `VP_REQUEST`, `LOGIN_REQUEST`로 분류해 `SCAN_QR_CODE` 콜백으로 전달하도록 연결
 - **VC Validation**: VC 저장/서명/상태조회 전에 `credentialSubject.id`, `credentialStatus.subject`, `validFrom/validUntil`을 검증하고 holder wallet과 맞지 않으면 차단
@@ -80,9 +122,11 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - [x] 베이스 아키텍처 설정 (Clean Architecture + MVVM)
 - [x] **WebView Bridge 구현**: Web-to-Native 통신 인터페이스 추가 및 테스트 페이지 연동 완료
 - [x] **Blockchain Wallet 연동**: 경량 지갑 기반 구축 (계정 생성, XRPL 통신 기초)
-- [x] **CredentialAccept 제출 연동**: WebView 요청 기반 XRPL devnet 제출, holder account 검증, tx hash 저장
-- [x] **Holder 지갑 상태 저장**: seed 생성, 암호화 저장, account/publicKey/DID 조회 브릿지 추가
-- [x] **VP 생성 기초 구현**: 저장된 holder seed로 secp256k1 JCS proof 생성 및 WebView 콜백 연결
+- [x] **CredentialAccept 제출 연동**: WebView 요청 기반 XRPL testnet 제출, holder account 검증, tx hash 저장
+- [x] **Holder 지갑 상태 저장**: 다중 계정 지원, seed/mnemonic 암호화 저장, 계정별 이름 및 인덱스 관리
+- [x] **VP 생성 기초 구현**: 저장된 holder auth key로 secp256k1 JCS proof 생성 및 WebView 콜백 연결
+- [x] **HD Wallet 전환**: 12개 단어 생성, 복구 구문 기반 계정 파생, Standalone 계정 업그레이드
+- [x] **세션 및 보안 강화**: 로그아웃 UI 연동, 인증 성공 시 세션 자동 연장 로직 추가
 - [x] **QR 브릿지 연결**: QR 요청/결과를 WebView 콜백으로 전달하는 native bridge 추가
 - [x] **VC(Verifiable Credentials) 인증 시스템**: canonical hash, proof 구조, XRPL active 상태 검증
 - [x] **Verifier 제출 연동**: `/verifier/presentations/verify` 요청 구성 및 challenge 사용 상태 처리
@@ -104,7 +148,8 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - **QR 요청 파서 강화**
   - 1차 초안은 구현 완료했다. 실제 운영 QR 스키마가 확정되면 필드명을 고정하고 자동 실행 범위를 정리한다
 - **백업/복구**
-  - holder seed 또는 복구용 백업 키를 안전하게 내보내고 복원하는 흐름 추가
+  - holder seed/mnemonic export 및 import 1차 구현 완료
+  - seed/mnemonic 외 민감 키(auth key/private key) export UI는 제거
 - **VC 목록 화면**
   - 저장된 VC를 리스트로 보여주고, active/expired/revoked 상태를 한눈에 확인
 - **상태 자동 갱신**
@@ -128,7 +173,18 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 
 ### 앱 내부에서 성공한 것
 - holder 지갑 생성/조회
+- 다중 지갑 목록 조회 / 전환 / 계정 이름 변경
+- 기존 계정의 비밀문구 백업 생성(`upgradeToMnemonic`)
+- 비밀문구 기반 계정 파생 추가(`deriveNextAccount`)
+- holder seed 열람 / 복사 구현(활성 세션 필요)
+- 로그아웃 구현(세션 종료)
+- holder seed 기반 지갑 복구 1차 구현
+- XRP 잔액 / trust line 자산 조회 1차 구현
+- 입금 주소 / 주소 복사 / QR 미리보기 1차 구현
+- XRP 송금 1차 구현(활성 세션 + 송금 직전 네이티브 재인증 필요, XRP 소수 입력 / drops 입력 지원)
+- 거래내역 조회 1차 구현(account_tx 기반 최근 내역)
 - holder account / DID / DID Document 조회
+- 복구 성공 후 Holder DIDSet 재등록 테스트 UI 연결
 - VC 로컬 저장
 - issuer / holder / credentialType 기본 정합성 검증
 - issuer-side `CredentialCreate` 제출
@@ -140,6 +196,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - verifier 제출 요청 POST
 - QR 스캔 브릿지
 - WebView 버튼 흐름 정리
+- 계정 삭제 버튼 비활성화(운영 정책 확정 전)
 - dev-core 실서버 issuer VC 요청
 - dev-core 실서버 VC 인증
 - dev-core verifier challenge 수신
@@ -147,7 +204,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 
 ### 실제 dev-core 연동 검증 완료
 - 실제 issuer VC 요청 후 앱 저장 성공
-- 같은 VC의 `credentialStatus.issuer`, `credentialStatus.subject`, `credentialStatus.credentialType` 기준으로 XRPL devnet `CredentialAccept` 제출 성공
+- 같은 VC의 `credentialStatus.issuer`, `credentialStatus.subject`, `credentialStatus.credentialType` 기준으로 XRPL testnet `CredentialAccept` 제출 성공
 - XRPL 상태 조회에서 `credentialEntryFound: true`, `credentialAccepted: true` 확인
 - `/verifier/credentials/verify` 응답에서 `ok: true`, `errors: []`, `policyErrors: []` 확인
 - verifier challenge 기반 holder VP 생성 및 제출 성공
@@ -170,14 +227,14 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
   - `CredentialCreate`와 `CredentialAccept`가 실제 ledger에 반영된 뒤에만 active로 보인다
 
 ### 외부에서 준비되어야 하는 것
-- 실제 XRPL devnet classic address가 들어간 issuer 계좌
+- 실제 XRPL testnet classic address가 들어간 issuer 계좌
 - issuer seed
 - 실제 issuer가 발급한 VC 원문
 - 실제 `credentialStatus.vcCoreHash`
 - issuer DID Document 또는 issuer 공개키
 - verifier가 발급한 실제 challenge
 - verifier endpoint의 실제 응답 스키마
-- holder / issuer 둘 다 devnet에서 funded 상태인 계좌
+- holder / issuer 둘 다 testnet에서 funded 상태인 계좌
 
 ### 현재 테스트 판단 기준
 - `SUBMIT_CREDENTIAL_CREATE -> tesSUCCESS`
@@ -193,10 +250,66 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 
 ## WebView Bridge 요청 형식
 
+## 민감정보 노출 정책
+
+| 항목 | 웹 노출 | 비고 |
+| --- | --- | --- |
+| holder seed | 허용(제한적) | 활성 인증 세션에서만 1회 응답 |
+| holder mnemonic(12단어) | 허용(제한적) | 활성 인증 세션에서만 응답 |
+| holder auth key/private key | 비허용 | 브리지 export 금지 |
+| wallet backup blob | 비허용 | 브리지 export 금지 |
+
+## 웹팀 최소 호출 시퀀스
+
+### 1) 로그인/세션
+
+```text
+getAuthStatus
+-> requestNativeAuth(reason=wallet-login)
+-> (emailVerificationRequired=true면) 웹 이메일 인증
+-> completeEmailVerification
+-> requestNativeAuth 재시도
+```
+
+### 2) 지갑 복구
+
+```text
+restoreWallet(seed 또는 mnemonic)
+-> holderDidSetRegistrationRequired 확인
+-> true면 submitHolderDidSet 호출
+-> getWalletInfo로 반영 확인
+```
+
+### 3) SD-JWT 발급/수락/검증
+
+```text
+requestIssuerCredential
+-> saveVC
+-> submitToXRPL (CredentialAccept)
+-> checkCredentialStatus (active=true, accepted=true 확인)
+-> verifyCredentialWithServer
+```
+
+### 4) SD-JWT+KB 제출
+
+```text
+requestVerifierChallenge (nonce/aud 수신)
+-> signMessage (sdJwtKb 생성)
+-> submitPresentationToVerifier
+```
+
 ## 사용 순서
 실서버 issuer/verifier를 붙여 테스트할 때는 아래 `실서버 테스트` 섹션의 순서를 우선 사용한다. `XRPL 발급(디버그)` 카드는 issuer seed를 직접 넣는 개발용 보조 흐름이다.
 
 `createWallet`은 Android 내부에서 secp256k1 holder seed를 만들고 Keystore 보호 AES-GCM 키로 암호화 저장한다. `getWalletInfo`는 seed를 반환하지 않고 holder account, public key, DID만 반환한다.
+
+`exportWalletSeed`는 활성 인증 세션이 있을 때만 holder seed를 1회 응답으로 반환한다. 현재 웹 테스트 흐름에서는 이를 `Seed 보기`로 사용하고, 필요 시 네이티브 클립보드 복사만 지원한다. 이 값은 민감정보이므로 웹 로그, 분석 SDK, 원격 저장소에 남기면 안 된다.
+
+`restoreWallet`은 seed 또는 12단어 mnemonic 기반 복구를 웹에 노출한다. 복구 후에는 holder auth key가 새로 생성되므로 `holderDidSetRegistrationRequired: true`가 반환되고, 이 경우 `submitHolderDidSet`를 다시 실행해야 한다.
+
+`deriveNextAccount`는 현재 활성 계정이 mnemonic 백업 상태(`hasMnemonic=true`)일 때만 실행한다. standalone 계정이면 먼저 `upgradeToMnemonic`을 실행해야 한다.
+
+`removeWallet` 브리지는 존재하지만 현재 운영 정책상 비활성화다. WebView 테스트 UI에서도 삭제 버튼은 비활성화되어 있으며 계정 삭제 플로우는 사용하지 않는다.
 
 `submitToXRPL`은 아래 JSON을 받는다. seed는 WebView에서 전달하지 않는다. `credentialId`가 있으면 저장된 VC 메타데이터를 보강해서 사용하며, 요청의 `issuerAccount`, `holderAccount`, `credentialType`이 있으면 우선한다.
 
@@ -213,9 +326,9 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `submitCredentialCreate`는 issuer가 ledger에 `CredentialCreate`를 올릴 때 쓴다. 이 요청은 `issuerSeed`, `subjectAccount`, `credentialType`을 받으며, issuer seed는 앱에 저장하지 않는다. `vcJson`이 있으면 거기서 subject/type을 보강해서 사용한다. 성공/실패 결과는 `SUBMIT_CREDENTIAL_CREATE` action으로 반환된다.
 
-`CredentialCreate`가 `tecNO_TARGET`로 끝나면 subject account가 XRPL devnet에서 아직 활성화되지 않았다는 뜻이다. 이 경우 holder wallet을 faucet으로 충전해 ledger에 실제 계좌를 만든 뒤 다시 시도해야 한다.
+`CredentialCreate`가 `tecNO_TARGET`로 끝나면 subject account가 XRPL testnet에서 아직 활성화되지 않았다는 뜻이다. 이 경우 holder wallet을 faucet으로 충전해 ledger에 실제 계좌를 만든 뒤 다시 시도해야 한다.
 
-실제 devnet 값을 넣을 때는 `issuerAccount`에 XRPL devnet의 실제 classic address를 넣고, VC JSON의 `issuer` / `credentialStatus.issuer`도 같은 계정으로 맞춘다. DID는 `did:xrpl:1:{account}` 형태를 쓰되, `account` 부분은 반드시 실제 classic address여야 한다. `holderAccount`는 앱의 `getWalletInfo` 결과로 자동 채워지는 holder account를 쓰면 된다.
+실제 testnet 값을 넣을 때는 `issuerAccount`에 XRPL testnet의 실제 classic address를 넣고, VC JSON의 `issuer` / `credentialStatus.issuer`도 같은 계정으로 맞춘다. DID는 `did:xrpl:1:{account}` 형태를 쓰되, `account` 부분은 반드시 실제 classic address여야 한다. `holderAccount`는 앱의 `getWalletInfo` 결과로 자동 채워지는 holder account를 쓰면 된다.
 
 예를 들어 placeholder인 `rIssuerAccountForTestnet` 같은 문자열은 XRPL 주소가 아니므로 status 조회, verifier 제출, XRPL 제출 모두 실패한다. 샘플 VC를 쓸 때는 issuer 관련 필드를 실계정으로 교체하고, VC 저장 후 다시 status 조회를 해야 한다.
 
@@ -231,11 +344,13 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `listCredentials`는 앱에 저장된 VC를 목록으로 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
 
+브리지 최신 호출 형식은 [WEBVIEW_BRIDGE_SPEC.md](./WEBVIEW_BRIDGE_SPEC.md)를 기준으로 본다. 웹/서버에서 앱 기능을 움직여야 하면 README보다 위 문서의 메서드별 요청/응답/호출 흐름을 우선 사용한다.
+
 ## 실서버 테스트
 가이드의 실제 issuer/verifier 서버를 붙여 테스트할 때는 앱의 `실서버 issuer / verifier` 카드를 먼저 쓴다.
 
 ### 입력값
-- `Core Base URL`: `https://dev-core-kyvc.khuoo.synology.me`
+- `Core Base URL`: `https://<core-testnet-base-url>`
 - `KYC Level`: 서버 정책에 맞는 값
 - `Jurisdiction`: 서버 정책에 맞는 값
 - PEM, issuer seed, issuer account는 실서버 카드에서 입력하지 않는다. issuer 키와 DID 등록은 서버 내부에서 관리한다.
@@ -264,8 +379,8 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 ### 참고
 - 서버가 HTTPS를 안 열고 있으면 `Core Base URL`에 `http://...` 전체 주소를 직접 넣는다.
 - 서버가 `issuer_private_key_pem` 누락으로 422를 반환하면 dev-core 배포가 아직 PEM optional 계약으로 갱신되지 않은 상태다.
-- 서버가 `issuer private key PEM file could not be read: ./.local-secrets/issuer-key.pem` 또는 `ISSUER_KEY_NOT_CONFIGURED`를 반환하면 Android 입력값 문제가 아니다. `/issuer/credentials/kyc`가 스키마상 PEM optional이어도 현재 dev-core 서버가 내부 issuer key 파일을 읽도록 설정되어 있고, 서버에 해당 키가 없어서 발급이 거부된 상태다. Holder 앱은 issuer PEM/secret을 보내지 않는 방향이 맞으므로 core 서버에 issuer key 또는 issuer 운영 설정을 등록해야 한다.
-- `ISSUER_REQUEST_TIMEOUT` 또는 `VERIFIER_REQUEST_TIMEOUT`은 앱 검증 로직 실패가 아니라 HTTP 응답 대기 시간이 초과된 상태다. 실제 VC 발급/검증은 dev-core 내부에서 XRPL devnet 조회와 트랜잭션 처리를 기다릴 수 있으므로 네트워크/VPN, dev-core 서버 부하, XRPL devnet 응답 지연을 먼저 확인한다. 앱의 서버 호출 timeout은 기본 10초에서 connect 20초, read 60초, write 30초, call 75초로 늘려두었다.
+- 서버가 `issuer private key PEM file could not be read: ./.local-secrets/issuer-key.pem` 또는 `ISSUER_KEY_NOT_CONFIGURED`를 반환하면 Android 입력값 문제가 아니다. `/issuer/credentials/kyc`가 스키마상 PEM optional이어도 현재 core(testnet) 서버가 내부 issuer key 파일을 읽도록 설정되어 있고, 서버에 해당 키가 없어서 발급이 거부된 상태다. Holder 앱은 issuer PEM/secret을 보내지 않는 방향이 맞으므로 core 서버에 issuer key 또는 issuer 운영 설정을 등록해야 한다.
+- `ISSUER_REQUEST_TIMEOUT` 또는 `VERIFIER_REQUEST_TIMEOUT`은 앱 검증 로직 실패가 아니라 HTTP 응답 대기 시간이 초과된 상태다. 실제 VC 발급/검증은 core 서버 내부에서 XRPL testnet 조회와 트랜잭션 처리를 기다릴 수 있으므로 네트워크/VPN, core 서버 부하, XRPL testnet 응답 지연을 먼저 확인한다. 앱의 서버 호출 timeout은 기본 10초에서 connect 20초, read 60초, write 30초, call 75초로 늘려두었다.
 - PEM 없이 실제 인증만 확인하려면 이미 발급된 VC를 `VC 저장 / 검증` 카드에 넣고 `실제 VC 인증 요청`을 실행한다.
 - 실서버 verifier가 `DID Document not found`를 반환하면 issuer DID가 core 서버에 등록되어 있지 않은 상태다. 앱은 VC의 `issuer` DID와 `proof.verificationMethod` DID 양쪽을 기준으로 `/dids/{account}/diddoc.json`를 조회해 verifier 요청에 포함하려고 시도한다.
 - VC의 `issuer`가 가리키는 계정과 `proof.verificationMethod`가 가리키는 계정이 다르면 verifier가 어느 DID를 기준으로 proof를 검증하는지 서버 계약과 맞춰야 한다. 서버에도 두 DID Document가 모두 등록되어 있거나, VC 발급 서버가 같은 issuer DID로 VC와 proof를 만들어야 한다.

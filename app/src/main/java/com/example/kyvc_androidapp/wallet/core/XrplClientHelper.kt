@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import org.json.JSONArray
 import org.xrpl.xrpl4j.codec.addresses.AddressCodec
 import org.xrpl.xrpl4j.codec.addresses.UnsignedByteArray
 import org.xrpl.xrpl4j.client.XrplClient
@@ -18,6 +19,7 @@ import org.xrpl.xrpl4j.model.transactions.CredentialUri
 import org.xrpl.xrpl4j.model.transactions.DidData
 import org.xrpl.xrpl4j.model.transactions.DidSet
 import org.xrpl.xrpl4j.model.transactions.DidUri
+import org.xrpl.xrpl4j.model.transactions.Payment
 import org.xrpl.xrpl4j.model.transactions.XrpCurrencyAmount
 import org.xrpl.xrpl4j.crypto.signing.SingleSignedTransaction
 import org.xrpl.xrpl4j.crypto.keys.Seed
@@ -28,8 +30,10 @@ import org.xrpl.xrpl4j.crypto.keys.PublicKey
 import com.google.common.primitives.UnsignedLong
 import java.security.MessageDigest
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
-class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/") {
+class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/") {
     private val rpcUrl = rpcUrl
     private val xrplClient = XrplClient(rpcUrl.toHttpUrl())
     private val signatureService = BcSignatureService()
@@ -135,6 +139,134 @@ class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/"
             .build()
         val signedTx: SingleSignedTransaction<DidSet> = signatureService.sign(keyPair.privateKey(), didSet)
         return xrplClient.submit(signedTx)
+    }
+
+    suspend fun submitXrpPayment(
+        seed: Seed,
+        destinationAddress: String,
+        amountDrops: String? = null,
+        amountXrp: String? = null
+    ): SubmitResult<Payment> {
+        val validatedDestination = requireClassicAddress("destinationAddress", destinationAddress)
+        val normalizedDrops = when {
+            !amountDrops.isNullOrBlank() -> normalizeDrops(amountDrops)
+            !amountXrp.isNullOrBlank() -> xrpStringToDrops(amountXrp)
+            else -> throw IllegalArgumentException("amountDrops or amountXrp is required")
+        }
+
+        val keyPair = seed.deriveKeyPair()
+        val publicKey: PublicKey = keyPair.publicKey()
+        val sourceAddress = publicKey.deriveAddress()
+        val accountInfo = xrplClient.accountInfo(
+            AccountInfoRequestParams.builder()
+                .account(sourceAddress)
+                .ledgerSpecifier(LedgerSpecifier.VALIDATED)
+                .build()
+        )
+
+        val payment = Payment.builder()
+            .account(sourceAddress)
+            .destination(Address.of(validatedDestination))
+            .amount(XrpCurrencyAmount.ofDrops(normalizedDrops.toLong()))
+            .sequence(accountInfo.accountData().sequence())
+            .fee(XrpCurrencyAmount.ofDrops(12))
+            .signingPublicKey(publicKey)
+            .build()
+        val signedTx: SingleSignedTransaction<Payment> = signatureService.sign(keyPair.privateKey(), payment)
+        return xrplClient.submit(signedTx)
+    }
+
+    suspend fun getAccountTransactions(
+        accountAddress: String,
+        limit: Int = 10
+    ): AccountTransactionsResult {
+        val validatedAccount = requireClassicAddress("accountAddress", accountAddress)
+        val normalizedLimit = limit.coerceIn(1, 50)
+        val body = JSONObject()
+            .put("method", "account_tx")
+            .put(
+                "params",
+                JSONArray().put(
+                    JSONObject()
+                        .put("account", validatedAccount)
+                        .put("ledger_index_min", -1)
+                        .put("ledger_index_max", -1)
+                        .put("limit", normalizedLimit)
+                        .put("binary", false)
+                        .put("forward", false)
+                    )
+            )
+            .toString()
+
+        val request = Request.Builder()
+            .url(rpcUrl)
+            .post(body.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        return httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            val json = runCatching { JSONObject(responseBody) }.getOrElse {
+                throw IllegalStateException("Invalid account_tx response")
+            }
+            val result = json.optJSONObject("result") ?: throw IllegalStateException("account_tx result missing")
+            if (result.optString("status") == "error") {
+                return AccountTransactionsResult(
+                    account = validatedAccount,
+                    transactions = emptyList(),
+                    checkedAtUtc = Instant.now().toString(),
+                    error = result.optString("error_message").ifBlank { result.optString("error").ifBlank { "account_tx failed" } }
+                )
+            }
+
+            val transactions = buildList {
+                val items = result.optJSONArray("transactions") ?: JSONArray()
+                for (index in 0 until items.length()) {
+                    val wrapper = items.optJSONObject(index) ?: continue
+                    val tx = wrapper.optJSONObject("tx") ?: continue
+                    val meta = wrapper.optJSONObject("meta")
+                    val txType = tx.optString("TransactionType")
+                    val hash = tx.optString("hash")
+                    val feeDrops = tx.optString("Fee").ifBlank { null }
+                    val account = tx.optString("Account")
+                    val destination = tx.optString("Destination").ifBlank { null }
+                    val amountAny = tx.opt("Amount")
+                    val amountDrops = when (amountAny) {
+                        is String -> amountAny
+                        is JSONObject -> amountAny.optString("value").ifBlank { null }
+                        else -> null
+                    }
+                    add(
+                        AccountTransaction(
+                            hash = hash,
+                            transactionType = txType,
+                            direction = when {
+                                txType == "Payment" && destination == validatedAccount -> "incoming"
+                                txType == "Payment" && account == validatedAccount -> "outgoing"
+                                else -> "other"
+                            },
+                            account = account.ifBlank { validatedAccount },
+                            destination = destination,
+                            amountDrops = amountDrops,
+                            amountXrp = amountDrops?.let(::dropsToXrpString),
+                            feeDrops = feeDrops,
+                            feeXrp = feeDrops?.let(::dropsToXrpString),
+                            sequence = tx.optLong("Sequence").takeIf { it > 0L },
+                            validated = wrapper.optBoolean("validated"),
+                            ledgerIndex = wrapper.optLong("ledger_index").takeIf { it > 0L },
+                            result = meta?.optString("TransactionResult")?.ifBlank { null },
+                            dateUtc = tx.optLong("date").takeIf { it > 0L }?.let(::rippleEpochSecondsToUtc)
+                        )
+                    )
+                }
+            }
+
+            AccountTransactionsResult(
+                account = validatedAccount,
+                transactions = transactions,
+                checkedAtUtc = Instant.now().toString(),
+                error = null
+            )
+        }
     }
 
     suspend fun getCredentialStatus(
@@ -247,6 +379,137 @@ class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/"
         }
     }
 
+    suspend fun getAccountAssets(address: String): AccountAssetsResult {
+        val validatedAddress = runCatching { requireClassicAddress("account", address) }.getOrElse {
+            return AccountAssetsResult(
+                account = address,
+                xrpBalanceDrops = null,
+                xrpBalanceXrp = null,
+                ownerCount = null,
+                sequence = null,
+                lines = emptyList(),
+                checkedAtUtc = Instant.now().toString(),
+                error = it.message
+            )
+        }
+
+        val accountInfoBody = JSONObject()
+            .put("method", "account_info")
+            .put(
+                "params",
+                JSONArray().put(
+                    JSONObject()
+                        .put("account", validatedAddress)
+                        .put("ledger_index", "validated")
+                )
+            )
+            .toString()
+
+        val accountInfoRequest = Request.Builder()
+            .url(rpcUrl)
+            .post(accountInfoBody.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        val checkedAt = Instant.now().toString()
+        val accountInfoJson = httpClient.newCall(accountInfoRequest).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            runCatching { JSONObject(responseBody) }.getOrElse {
+                throw IllegalStateException("Invalid account_info response")
+            }
+        }
+        val accountInfoResult = accountInfoJson.optJSONObject("result")
+            ?: return AccountAssetsResult(
+                account = validatedAddress,
+                xrpBalanceDrops = null,
+                xrpBalanceXrp = null,
+                ownerCount = null,
+                sequence = null,
+                lines = emptyList(),
+                checkedAtUtc = checkedAt,
+                error = "account_info result missing"
+            )
+        if (accountInfoResult.optString("status") == "error" || accountInfoResult.has("error")) {
+            return AccountAssetsResult(
+                account = validatedAddress,
+                xrpBalanceDrops = null,
+                xrpBalanceXrp = null,
+                ownerCount = null,
+                sequence = null,
+                lines = emptyList(),
+                checkedAtUtc = checkedAt,
+                error = accountInfoResult.optString("error_message", accountInfoResult.optString("error", "account_info failed"))
+            )
+        }
+
+        val accountData = accountInfoResult.optJSONObject("account_data")
+            ?: return AccountAssetsResult(
+                account = validatedAddress,
+                xrpBalanceDrops = null,
+                xrpBalanceXrp = null,
+                ownerCount = null,
+                sequence = null,
+                lines = emptyList(),
+                checkedAtUtc = checkedAt,
+                error = "account_data missing"
+            )
+
+        val accountLinesBody = JSONObject()
+            .put("method", "account_lines")
+            .put(
+                "params",
+                JSONArray().put(
+                    JSONObject()
+                        .put("account", validatedAddress)
+                        .put("ledger_index", "validated")
+                )
+            )
+            .toString()
+
+        val accountLinesRequest = Request.Builder()
+            .url(rpcUrl)
+            .post(accountLinesBody.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        val lines = runCatching {
+            httpClient.newCall(accountLinesRequest).execute().use { response ->
+                val responseBody = response.body?.string().orEmpty()
+                val json = JSONObject(responseBody)
+                val result = json.optJSONObject("result")
+                if (result == null || result.optString("status") == "error" || result.has("error")) {
+                    emptyList()
+                } else {
+                    val linesArray = result.optJSONArray("lines") ?: JSONArray()
+                    buildList {
+                        for (index in 0 until linesArray.length()) {
+                            val line = linesArray.optJSONObject(index) ?: continue
+                            add(
+                                TrustLine(
+                                    currency = line.optString("currency"),
+                                    issuer = line.optString("account"),
+                                    balance = line.optString("balance"),
+                                    limit = line.optString("limit"),
+                                    limitPeer = line.optString("limit_peer")
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }.getOrDefault(emptyList())
+
+        val balanceDrops = accountData.optString("Balance").takeIf { it.isNotBlank() }
+        return AccountAssetsResult(
+            account = validatedAddress,
+            xrpBalanceDrops = balanceDrops,
+            xrpBalanceXrp = balanceDrops?.let(::dropsToXrpString),
+            ownerCount = accountData.optLong("OwnerCount"),
+            sequence = accountData.optLong("Sequence"),
+            lines = lines,
+            checkedAtUtc = checkedAt,
+            error = null
+        )
+    }
+
     fun credentialIndexHex(
         issuerAddress: String,
         holderAddress: String,
@@ -276,7 +539,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/"
                 address.contains("placeholder", ignoreCase = true) ||
                 address.contains("accountfortestnet", ignoreCase = true)
             ) {
-                "This looks like sample data. Replace it with a real XRPL devnet classic address."
+                "This looks like sample data. Replace it with a real XRPL testnet classic address."
             } else {
                 "Use the XRPL classic address itself, not a DID."
             }
@@ -289,6 +552,40 @@ class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/"
         return value.toByteArray(Charsets.UTF_8).joinToString(separator = "") { "%02X".format(it) }
     }
 
+    private fun normalizeDrops(amountDrops: String): String {
+        val normalizedDrops = amountDrops.trim()
+        require(normalizedDrops.matches(Regex("^\\d+$"))) { "amountDrops must be a positive integer string" }
+        require(normalizedDrops != "0") { "amountDrops must be greater than 0" }
+        return normalizedDrops
+    }
+
+    private fun dropsToXrpString(drops: String): String {
+        return runCatching {
+            val padded = drops.trim().padStart(7, '0')
+            val whole = padded.dropLast(6)
+            val fractional = padded.takeLast(6).trimEnd('0')
+            if (fractional.isEmpty()) whole else "$whole.$fractional"
+        }.getOrDefault(drops)
+    }
+
+    private fun xrpStringToDrops(amountXrp: String): String {
+        val normalized = amountXrp.trim()
+        require(normalized.matches(Regex("^\\d+(\\.\\d{1,6})?$"))) {
+            "amountXrp must be a positive XRP string with up to 6 decimal places"
+        }
+        val parts = normalized.split(".")
+        val whole = parts[0]
+        val fractional = parts.getOrNull(1).orEmpty().padEnd(6, '0')
+        val drops = (whole + fractional).trimStart('0').ifEmpty { "0" }
+        require(drops != "0") { "amountXrp must be greater than 0" }
+        return drops
+    }
+
+    private fun rippleEpochSecondsToUtc(secondsSinceRippleEpoch: Long): String {
+        val epochSeconds = secondsSinceRippleEpoch + RIPPLE_EPOCH_OFFSET
+        return DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochSecond(epochSeconds).atOffset(ZoneOffset.UTC))
+    }
+
     private suspend fun ensureAccountExists(address: String, label: String) {
         runCatching {
             xrplClient.accountInfo(
@@ -299,7 +596,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/"
             )
         }.getOrElse { error ->
             throw IllegalArgumentException(
-                "$label must exist on XRPL devnet and be funded before submitting this transaction: ${error.message}",
+                "$label must exist on XRPL testnet and be funded before submitting this transaction: ${error.message}",
                 error
             )
         }
@@ -317,6 +614,49 @@ class XrplClientHelper(rpcUrl: String = "https://s.devnet.rippletest.net:51234/"
         val expiration: Long?,
         val checkedAtUtc: String,
         val error: String?
+    )
+
+    data class AccountAssetsResult(
+        val account: String,
+        val xrpBalanceDrops: String?,
+        val xrpBalanceXrp: String?,
+        val ownerCount: Long?,
+        val sequence: Long?,
+        val lines: List<TrustLine>,
+        val checkedAtUtc: String,
+        val error: String?
+    )
+
+    data class TrustLine(
+        val currency: String,
+        val issuer: String,
+        val balance: String,
+        val limit: String,
+        val limitPeer: String
+    )
+
+    data class AccountTransactionsResult(
+        val account: String,
+        val transactions: List<AccountTransaction>,
+        val checkedAtUtc: String,
+        val error: String?
+    )
+
+    data class AccountTransaction(
+        val hash: String,
+        val transactionType: String,
+        val direction: String,
+        val account: String,
+        val destination: String?,
+        val amountDrops: String?,
+        val amountXrp: String?,
+        val feeDrops: String?,
+        val feeXrp: String?,
+        val sequence: Long?,
+        val validated: Boolean,
+        val ledgerIndex: Long?,
+        val result: String?,
+        val dateUtc: String?
     )
 
     private companion object {

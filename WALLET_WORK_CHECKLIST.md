@@ -3,10 +3,26 @@
 작성일: 2026-05-06  
 기준: 신규 legal entity KYC wallet은 `dc+sd-jwt` + SD-JWT+KB 흐름을 기본으로 한다. 기존 `vc+jwt`/`vp+jwt`는 호환용으로 유지한다.
 
+## Testnet 전환 체크
+
+- [ ] Core base URL을 testnet 연동 서버 주소로 교체
+- [ ] holder/issuer 계정 testnet funding 완료
+- [ ] `CredentialCreate`, `CredentialAccept`, `DIDSet` testnet 반영 확인
+- [ ] `CHECK_CREDENTIAL_STATUS`의 `active/accepted`를 testnet 기준으로 재검증
+- [ ] `VERIFY_CREDENTIAL_WITH_SERVER`, `SUBMIT_TO_VERIFIER`를 testnet 기준으로 재검증
+
 ## 완료
 
 - [x] XRPL holder seed와 holder authentication key 분리
 - [x] holder seed를 Android Keystore wrapping key로 암호화 저장
+- [x] holder seed import 기반 지갑 복구 1차 구현
+- [x] holder seed export 1차 구현
+- [ ] holder auth key 포함 백업 export / 완전 복구 (보안 정책상 웹 노출 보류)
+- [x] XRP 잔액 / trust line 자산 조회 1차 구현
+- [x] 입금 주소 / 주소 복사 / QR 미리보기 1차 구현
+- [x] XRP 송금 1차 구현
+- [x] XRP 송금 직전 네이티브 재인증 연결
+- [x] 거래내역 조회 1차 구현
 - [x] 앱 잠금: PIN / 패턴 / 지문 로그인
 - [x] 앱 잠금: 실패 횟수 5회 공용 집계 및 이메일 인증 요구
 - [x] 앱 잠금: 인증 성공 후 30분 세션 유지
@@ -41,7 +57,7 @@
 - disclosure digest가 issuer payload `_sd`에 실제로 reference되는지 전체 경로 검증
 - multipart attachment 제출: documentEvidence 요구 시 원본 PDF/image digest 검증
 - SD-JWT/KB-JWT 고정 테스트 벡터 추가
-- holder seed/auth key 백업 및 복구 정책 확정
+- 운영용 백업 UX, auth key 보관 정책, 원격 백업 금지 정책 확정
 
 ## 성공 판단 기준
 

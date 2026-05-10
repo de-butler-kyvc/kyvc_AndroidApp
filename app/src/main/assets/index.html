@@ -336,7 +336,8 @@
       <input id="walletMeta" readonly placeholder="이름 / 주소 / 파생 index / 그룹" />
 
       <div id="walletActions" class="grid mt8">
-        <button onclick="createWallet()">지갑 조회</button>
+        <button class="ok" onclick="createWallet()">지갑 생성</button>
+        <button class="secondary" onclick="getWalletInfo()">지갑 조회</button>
       </div>
 
       <div id="hdActions" class="grid mt8" style="display:none;">
@@ -535,6 +536,14 @@
       <input id="signMessage" />
       <label>Audience</label>
       <input id="signDomain" value="https://dev-core-kyvc.khuoo.synology.me" />
+      <div class="result-panel show" id="disclosureSelectionPanel" style="margin-top:10px;">
+        <b>Selective Disclosure 선택</b><br/>
+        <span id="disclosureCountText">선택 0 / 전체 0</span>
+        <div id="requiredDisclosureHint" style="margin-top:6px;color:#64748b;"></div>
+        <div id="disclosureChecklist" style="margin-top:10px;max-height:180px;overflow:auto;border:1px solid #e5e7eb;border-radius:10px;padding:8px;background:#fff;"></div>
+        <div id="disclosurePreview" style="margin-top:10px;max-height:180px;overflow:auto;border:1px solid #e5e7eb;border-radius:10px;padding:8px;background:#f8fafc;"></div>
+        <div id="attachmentHint" style="margin-top:10px;color:#334155;"></div>
+      </div>
       <div class="grid mt8">
         <button class="secondary" onclick="makeChallenge()">로컬 Nonce 등록</button>
         <button class="warn" onclick="signMessage()">KB-JWT 생성 호출</button>
@@ -542,7 +551,7 @@
       <label>Verifier Endpoint</label>
       <input id="verifierEndpoint" value="https://dev-core-kyvc.khuoo.synology.me/verifier/presentations/verify" />
       <div class="mt8">
-        <button class="ok" onclick="submitPresentationToVerifier()">Verifier 제출 호출</button>
+        <button class="ok" id="submitVerifierBtn" onclick="submitPresentationToVerifier()">Verifier 제출 호출</button>
       </div>
       <div class="result-panel" id="signResult"></div>
       <div class="result-panel" id="verifierResult"></div>
@@ -590,7 +599,12 @@
   <div class="toast" id="toast"></div>
 
   <script>
-    const state = { wallets: [], sign: 0, xrpl: 0, credentials: [], lastPresentation: null, lastPresentationJwt: null, lastSdJwtKb: null, lastPresentationFormat: null, lastDidDocument: null, lastChallenge: null, lastDomain: null, lastVcCanonicalHash: null, lastIssuerAccount: null, currentVcJwt: null, currentSdJwt: null, signedCredentialKey: null, pendingXrpTransfer: null, viewedSecret: null };
+    const state = { wallets: [], sign: 0, xrpl: 0, credentials: [], lastPresentation: null, lastPresentationJwt: null, lastSdJwtKb: null, lastPresentationFormat: null, lastDidDocument: null, lastChallenge: null, lastDomain: null, lastVcCanonicalHash: null, lastIssuerAccount: null, currentVcJwt: null, currentSdJwt: null, signedCredentialKey: null, pendingXrpTransfer: null, viewedSecret: null, sdJwtParts: null, disclosureItems: [], requiredDisclosures: [], selectedDisclosureIds: [], selectedSdJwt: null, attachmentManifest: [], attachmentBlockers: [] };
+
+    const SENSITIVE_KEYS = new Set([
+      "seed", "issuerSeed", "mnemonic", "secret",
+      "vcJwt", "sdJwt", "sdJwtKb", "presentationJwt", "vcJson", "proofValue", "selectedDisclosures"
+    ]);
 
     const sampleVC = {
       id: "vc-kyc-001",
@@ -781,6 +795,23 @@
       $("log").textContent = `[${time}] ${message}${body}\n\n` + $("log").textContent;
     }
 
+    function sanitizeForLog(value) {
+      if (value == null) return value;
+      if (Array.isArray(value)) return value.map(sanitizeForLog);
+      if (typeof value !== "object") return value;
+      const out = {};
+      Object.entries(value).forEach(([k, v]) => {
+        if (SENSITIVE_KEYS.has(k)) {
+          out[k] = "[REDACTED]";
+        } else if (typeof v === "string" && (v.length > 220) && (k.toLowerCase().includes("jwt") || k.toLowerCase().includes("proof") || k.toLowerCase().includes("credential"))) {
+          out[k] = "[REDACTED_LONG_TEXT]";
+        } else {
+          out[k] = sanitizeForLog(v);
+        }
+      });
+      return out;
+    }
+
     function hasAndroidBridge() { return !!window.Android; }
 
     function checkBridge() {
@@ -797,7 +828,7 @@
     }
 
     function callAndroid(functionName, payload) {
-      appendLog(`웹 → Android 호출: Android.${functionName}`, payload);
+      appendLog(`웹 → Android 호출: Android.${functionName}`, sanitizeForLog(payload));
 
       if (!hasAndroidBridge()) {
         const mockResult = { ok: true, mock: true, functionName, payload, time: new Date().toISOString() };
@@ -845,6 +876,174 @@
         ],
         documentRules: []
       };
+    }
+
+    function base64UrlToUtf8(input) {
+      const padded = input.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (input.length % 4)) % 4);
+      const decoded = atob(padded);
+      const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
+      return new TextDecoder().decode(bytes);
+    }
+
+    function parseSdJwtCredential(sdJwt) {
+      if (!sdJwt || typeof sdJwt !== "string" || !sdJwt.includes("~")) return null;
+      const parts = sdJwt.split("~").filter(Boolean);
+      if (parts.length < 2) return null;
+      const issuerJwt = parts[0];
+      const disclosures = parts.slice(1);
+      const disclosureItems = disclosures.map((encoded, index) => {
+        let decoded;
+        let pathHint = "";
+        let label = `disclosure #${index + 1}`;
+        let preview = "(decode 실패)";
+        try {
+          decoded = JSON.parse(base64UrlToUtf8(encoded));
+          if (Array.isArray(decoded)) {
+            if (typeof decoded[1] === "string") {
+              const claimName = decoded[1];
+              pathHint = claimName;
+              label = claimName;
+              preview = typeof decoded[2] === "object" ? JSON.stringify(decoded[2]) : String(decoded[2]);
+            } else if (typeof decoded[1] === "object") {
+              const keys = Object.keys(decoded[1] || {});
+              const first = keys[0] || "array-claim";
+              pathHint = first.includes(".") ? first : `${first}`;
+              label = `${first}[]`;
+              preview = JSON.stringify(decoded[1]);
+            }
+          }
+        } catch (_) {}
+        return {
+          id: `d-${index}`,
+          encoded,
+          index,
+          pathHint,
+          label,
+          preview
+        };
+      });
+      return { issuerJwt, disclosures, disclosureItems };
+    }
+
+    function pathMatchesRequired(pathHint, requiredPath) {
+      if (!pathHint || !requiredPath) return false;
+      if (pathHint === requiredPath) return true;
+      const requiredCore = requiredPath.replace("[]", "");
+      const pathCore = pathHint.replace("[]", "");
+      if (pathCore === requiredCore) return true;
+      if (requiredCore.endsWith(`.${pathCore}`)) return true;
+      if (pathCore.endsWith(`.${requiredCore}`)) return true;
+      return false;
+    }
+
+    function computeSelectedDisclosureIds(items, requiredDisclosures) {
+      if (!items.length) return [];
+      if (!requiredDisclosures || !requiredDisclosures.length) return items.map(i => i.id);
+      const selected = new Set();
+      items.forEach((item) => {
+        if (requiredDisclosures.some((required) => pathMatchesRequired(item.pathHint, required))) {
+          selected.add(item.id);
+        }
+      });
+      return selected.size ? [...selected] : items.map(i => i.id);
+    }
+
+    function rebuildSelectedSdJwt() {
+      if (!state.sdJwtParts) {
+        state.selectedSdJwt = null;
+        return;
+      }
+      const picked = state.disclosureItems
+        .filter(item => state.selectedDisclosureIds.includes(item.id))
+        .sort((a, b) => a.index - b.index)
+        .map(item => item.encoded);
+      state.selectedSdJwt = [state.sdJwtParts.issuerJwt, ...picked].join("~");
+      state.lastSdJwtKb = null;
+      state.lastPresentation = null;
+      state.lastPresentationJwt = null;
+      state.lastPresentationFormat = null;
+      state.signedCredentialKey = null;
+      $("signStatus").textContent = "대기";
+      $("signStatus").className = "mini-status";
+      state.attachmentManifest = [];
+      state.attachmentBlockers = [];
+      updateAttachmentHint();
+    }
+
+    function updateAttachmentHint() {
+      const btn = $("submitVerifierBtn");
+      const blockers = state.attachmentBlockers || [];
+      const manifest = state.attachmentManifest || [];
+      if (blockers.length) {
+        btn.disabled = true;
+        $("attachmentHint").innerHTML = `<b style="color:#b91c1c;">원본 첨부 불가</b><br/>${blockers.map(v => `- ${v}`).join("<br/>")}`;
+        return;
+      }
+      btn.disabled = false;
+      if (!manifest.length) {
+        $("attachmentHint").innerHTML = `<b>원본 문서 첨부 없음</b><br/>선택된 claim에 documentEvidence[]가 없어서 JSON 제출만 진행됩니다.`;
+        return;
+      }
+      $("attachmentHint").innerHTML = `<b>원본 문서 함께 제출됨 (${manifest.length}건)</b><br/>` +
+        manifest.map(item => `${item.documentType} / ${item.mediaType} / ${item.byteSize} bytes`).join("<br/>");
+    }
+
+    function updateDisclosurePreview() {
+      const selected = state.disclosureItems.filter(item => state.selectedDisclosureIds.includes(item.id));
+      $("disclosureCountText").textContent = `선택 ${selected.length} / 전체 ${state.disclosureItems.length}`;
+      $("disclosurePreview").innerHTML = selected.length
+        ? selected.map(item => `<div style="padding:6px 0;border-bottom:1px solid #e5e7eb;"><b>${item.label}</b><br/><span style="color:#475569;">${item.preview}</span></div>`).join("")
+        : "<span style=\"color:#64748b;\">선택된 claim이 없습니다.</span>";
+      rebuildSelectedSdJwt();
+    }
+
+    function renderDisclosureUi() {
+      const required = state.requiredDisclosures || [];
+      $("requiredDisclosureHint").textContent = required.length
+        ? `Verifier requiredDisclosures: ${required.join(", ")}`
+        : "Verifier requiredDisclosures 없음 (전체 또는 임의 선택 가능)";
+      const wrap = $("disclosureChecklist");
+      if (!state.disclosureItems.length) {
+        wrap.innerHTML = "<span style=\"color:#64748b;\">SD-JWT disclosure 없음</span>";
+        state.selectedDisclosureIds = [];
+        updateDisclosurePreview();
+        return;
+      }
+      wrap.innerHTML = state.disclosureItems.map(item => {
+        const checked = state.selectedDisclosureIds.includes(item.id) ? "checked" : "";
+        const requiredBadge = required.some(r => pathMatchesRequired(item.pathHint, r))
+          ? "<span style=\"color:#0f766e;font-size:12px;\">required</span>"
+          : "";
+        return `<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;border-bottom:1px solid #f1f5f9;">
+          <input type="checkbox" data-disclosure-id="${item.id}" ${checked} />
+          <span style="flex:1;">
+            <b>${item.label}</b> ${requiredBadge}<br/>
+            <span style="color:#64748b;font-size:12px;">${item.preview}</span>
+          </span>
+        </label>`;
+      }).join("");
+      wrap.querySelectorAll("input[type=checkbox][data-disclosure-id]").forEach((el) => {
+        el.addEventListener("change", (event) => {
+          const id = event.target.getAttribute("data-disclosure-id");
+          if (!id) return;
+          if (event.target.checked) {
+            if (!state.selectedDisclosureIds.includes(id)) state.selectedDisclosureIds.push(id);
+          } else {
+            state.selectedDisclosureIds = state.selectedDisclosureIds.filter(x => x !== id);
+          }
+          updateDisclosurePreview();
+        });
+      });
+      updateDisclosurePreview();
+      updateAttachmentHint();
+    }
+
+    function refreshDisclosureState() {
+      const parsed = parseSdJwtCredential(state.currentSdJwt);
+      state.sdJwtParts = parsed;
+      state.disclosureItems = parsed?.disclosureItems || [];
+      state.selectedDisclosureIds = computeSelectedDisclosureIds(state.disclosureItems, state.requiredDisclosures);
+      renderDisclosureUi();
     }
 
     function updateAccountName() {
@@ -948,6 +1147,7 @@
 
     function listWallets() {
       callAndroid("listWallets", {});
+      panel("walletResult", "<b>지갑 목록 조회 요청:</b><br/>등록된 지갑/계정을 불러오는 중");
       showToast("지갑 목록 동기화 중");
     }
 
@@ -970,9 +1170,6 @@
       $("accountName").value = result.name || "";
       const group = result.mnemonicHash || "standalone";
       $("walletMeta").value = `${result.name || "-"} / ${shortAccount(result.account)} / index ${result.derivationIndex ?? 0} / group ${group}`;
-
-      // Update selector if needed
-      listWallets();
 
       syncVcWithWallet();
     }
@@ -999,11 +1196,13 @@
       callAndroid("createWallet", { overwrite: false });
       $("walletStatus").textContent = "생성 요청됨";
       $("walletStatus").className = "mini-status ok";
+      panel("walletResult", "<b>지갑 생성 요청:</b><br/>완료 후 지갑 목록이 자동 갱신됩니다.");
       showToast("지갑 생성 요청");
     }
 
     function getWalletInfo() {
       callAndroid("getWalletInfo", {});
+      panel("walletResult", "<b>활성 지갑 조회 요청:</b><br/>현재 선택된 지갑 정보를 조회 중");
       showToast("지갑 정보 조회 요청");
     }
 
@@ -1247,6 +1446,7 @@
       $("vcInput").value = result.vcJson;
       state.currentVcJwt = result.vcJwt || null;
       state.currentSdJwt = result.sdJwt || null;
+      refreshDisclosureState();
       clearSignedPresentation("새 issuer VC 수신");
       if (result.credentialId) $("credentialId").value = result.credentialId;
       if (result.issuerAccount) setIssuerField(result.issuerAccount);
@@ -1420,7 +1620,10 @@
         credentialId: $("credentialId").value.trim(),
         vcJson: JSON.stringify(vc),
         vcJwt: state.currentVcJwt,
-        sdJwt: state.currentSdJwt
+        sdJwt: state.selectedSdJwt || state.currentSdJwt,
+        selectedDisclosures: state.disclosureItems
+          .filter(item => state.selectedDisclosureIds.includes(item.id))
+          .map(item => item.encoded)
       });
       $("signStatus").textContent = state.currentSdJwt ? "KB-JWT 생성 중" : "VP 생성 중";
       $("signStatus").className = "mini-status";
@@ -1467,7 +1670,7 @@
           credentialType: $("credentialType").value.trim(),
           vcJson: JSON.stringify(vc),
           vcJwt: state.currentVcJwt,
-          sdJwt: state.currentSdJwt
+          sdJwt: state.selectedSdJwt || state.currentSdJwt
         });
         panel("verifierResult", `<b>Verifier 제출 요청:</b><br/>${$("verifierEndpoint").value.trim()}`);
         showToast("Verifier 제출 요청됨");
@@ -1584,6 +1787,8 @@
             }
             state.lastChallenge = result.nonce || result.challenge || null;
             state.lastDomain = result.aud || result.domain || null;
+            state.requiredDisclosures = result.presentationDefinition?.requiredDisclosures || [];
+            refreshDisclosureState();
           }
           panel("realCoreResult", result.ok
             ? `<b>nonce 수신 완료:</b><br/>${result.nonce || result.challenge}<br/>aud: ${result.aud || result.domain}<br/>expiresAt: ${result.expiresAt || "-"}`
@@ -1607,10 +1812,27 @@
                 return (a.derivationIndex || 0) - (b.derivationIndex || 0);
               });
 
+              const groupOrder = [];
+              const groupMeta = new Map();
+              sorted.forEach((wallet) => {
+                const key = wallet.mnemonicHash || "standalone";
+                if (!groupMeta.has(key)) {
+                  groupMeta.set(key, { key, wallets: [] });
+                  groupOrder.push(key);
+                }
+                groupMeta.get(key).wallets.push(wallet);
+              });
+
+              const groupNameByKey = new Map();
+              groupOrder.forEach((key, idx) => {
+                groupNameByKey.set(key, key === "standalone" ? "외부 복구 지갑" : `내 지갑 ${idx + 1}`);
+              });
+
               selector.innerHTML = sorted.map(w => {
-                  const groupLabel = w.mnemonicHash === "standalone" ? "standalone" : `group:${w.mnemonicHash}`;
+                  const groupKey = w.mnemonicHash || "standalone";
+                  const groupLabel = groupNameByKey.get(groupKey) || "내 지갑";
                   const activeMark = w.account === result.activeAccount ? "★" : " ";
-                  return `<option value="${w.account}" ${w.account === result.activeAccount ? 'selected' : ''}>${activeMark} ${w.name} | ${shortAccount(w.account)} | idx:${w.derivationIndex} | ${groupLabel}</option>`;
+                  return `<option value="${w.account}" ${w.account === result.activeAccount ? 'selected' : ''}>${activeMark} [${groupLabel}] ${w.name || "Account"} (idx:${w.derivationIndex ?? 0}) • ${shortAccount(w.account)}</option>`;
               }).join("");
 
               const activeWallet = sorted.find(w => w.account === result.activeAccount);
@@ -1626,7 +1848,10 @@
                   hdActions.style.display = "grid";
                   upgradeBtn.style.display = activeWallet.hasMnemonic ? "none" : "block";
               }
+              panel("walletResult", `<b>지갑 목록 조회 완료:</b><br/>총 ${sorted.length}개 계정 / 지갑 그룹 ${groupOrder.length}개`);
               updateSummary();
+          } else {
+              panel("walletResult", `<b>지갑 목록 조회 실패:</b><br/>${result.error || "-"}`);
           }
         }
         if (result.action === "SWITCH_WALLET" || result.action === "SET_ACCOUNT_NAME" || result.action === "UPGRADE_TO_MNEMONIC" || result.action === "DERIVE_NEXT_ACCOUNT" || result.action === "REMOVE_WALLET") {
@@ -1664,6 +1889,9 @@
               ? `<br/><b>복구 완료:</b> import 성공${result.holderDidSetRegistrationRequired ? ($("restoreAutoDidSet").checked ? "<br/><b>다음 작업:</b> Holder DIDSet 자동 재등록 중" : "<br/><b>다음 작업:</b> Holder DIDSet 등록") : ""}`
               : "";
             panel("walletResult", `<b>Holder Account:</b><br/>${result.account}<br/><b>DID:</b><br/>${result.did}${mnemonicHint}${restoreHint}`);
+            if (result.action === "CREATE_WALLET" || result.action === "RESTORE_WALLET") {
+              listWallets();
+            }
             if (result.action === "RESTORE_WALLET" && $("restoreAutoDidSet").checked && result.holderDidSetRegistrationRequired) {
               submitHolderDidSet();
             }
@@ -1839,6 +2067,7 @@
           if (result.ok) {
             if (result.vcJwt) state.currentVcJwt = result.vcJwt;
             if (result.sdJwt) state.currentSdJwt = result.sdJwt;
+            refreshDisclosureState();
           }
           if (result.ok) {
             state.vc += 1;
@@ -1913,6 +2142,9 @@
               : credentialKey(presentationCredential(result.presentation));
             state.lastChallenge = result.nonce || result.challenge || null;
             state.lastDomain = result.aud || result.domain || null;
+            state.attachmentManifest = Array.isArray(result.attachmentManifest) ? result.attachmentManifest : [];
+            state.attachmentBlockers = Array.isArray(result.attachmentBlockers) ? result.attachmentBlockers : [];
+            updateAttachmentHint();
             state.sign += 1;
             updateSummary();
           }
@@ -1980,7 +2212,9 @@
     toggleManageMode();
     updateSummary();
     checkBridge();
-    getWalletInfo();
+    listWallets();
+    refreshDisclosureState();
+    updateAttachmentHint();
   </script>
 </body>
 </html>

@@ -127,6 +127,8 @@ class MainActivity : FragmentActivity() {
             walletStateStore = container.walletStateStore,
             xrplHelper = container.xrplHelper,
             credentialRepository = container.credentialRepository,
+            holderDocumentRepository = container.holderDocumentRepository,
+            secureDocumentStore = container.secureDocumentStore,
             appLockStore = container.appLockStore,
             launchQrScanner = { requestJson ->
                 val intent = Intent(this, QrScannerActivity::class.java).apply {

@@ -17,6 +17,7 @@
 - 민감정보(`seed`, `mnemonic`)는 콘솔/분석SDK/원격 로그에 저장하지 않는다.
 - 앱 WebView 기본 진입 URL은 `https://dev-kyvc.khuoo.synology.me/m/`이다.
 - 테스트 페이지는 `app/src/main/assets/index.html`이며, 외부 URL 로딩 실패 시 fallback으로 사용된다.
+- Android 시스템 뒤로가기 버튼은 WebView 히스토리를 먼저 사용한다. (`canGoBack()==true`면 이전 페이지 이동, 아니면 앱 종료)
 
 ## 2) 공통 콜백 처리 템플릿
 

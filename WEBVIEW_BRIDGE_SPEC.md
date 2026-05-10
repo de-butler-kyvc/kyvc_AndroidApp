@@ -46,6 +46,7 @@
 - XRPL ledger 기준 네트워크는 `testnet`이다.
 - 실제 앱 내 WebView는 기본적으로 `https://dev-kyvc.khuoo.synology.me/m/`를 로드한다.
 - 브리지 테스트 페이지(로컬)는 `app/src/main/assets/index.html`이며, 네트워크/도메인 문제로 메인 URL이 실패하면 fallback으로 열린다.
+- Android 뒤로가기 버튼은 WebView 내부 히스토리를 우선 사용한다. 히스토리가 없을 때만 앱이 종료된다.
 
 ## 네트워크 설정 (Testnet)
 

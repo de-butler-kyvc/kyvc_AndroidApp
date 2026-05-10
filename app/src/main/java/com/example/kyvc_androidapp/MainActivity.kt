@@ -47,6 +47,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,6 +72,7 @@ import com.example.kyvc_androidapp.scanner.QrScannerActivity
 import com.example.kyvc_androidapp.ui.main.MainViewModel
 import com.example.kyvc_androidapp.ui.theme.Kyvc_AndroidAppTheme
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.Executor
 
 private enum class AuthMode {
@@ -152,17 +154,30 @@ class MainActivity : FragmentActivity() {
         )
         setContent {
             Kyvc_AndroidAppTheme {
+                var activeWebView by remember { mutableStateOf<WebView?>(null) }
+                val webBackScope = rememberCoroutineScope()
                 AuthenticatedApp(
                     unlockedState = isUnlocked,
                     canUseBiometric = canUseBiometric(),
                     onBiometricAuth = ::showBiometricPrompt
                 ) { unlocked ->
+                    BackHandler(enabled = unlocked) {
+                        val webView = activeWebView
+                        if (webView != null && webView.canGoBack()) {
+                            webBackScope.launch {
+                                webView.goBack()
+                            }
+                        } else {
+                            finish()
+                        }
+                    }
                     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                         if (unlocked) {
                             WebViewScreen(
                                 url = PRIMARY_WEB_URL,
                                 fallbackUrl = LOCAL_TEST_WEB_URL,
                                 bridge = bridge,
+                                onWebViewCreated = { activeWebView = it },
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }
@@ -835,6 +850,7 @@ fun WebViewScreen(
     url: String,
     fallbackUrl: String,
     bridge: WalletBridge,
+    onWebViewCreated: (WebView) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     AndroidView(
@@ -859,6 +875,7 @@ fun WebViewScreen(
                 settings.domStorageEnabled = true
                 addJavascriptInterface(bridge, "Android")
                 bridge.attachWebView(this)
+                onWebViewCreated(this)
                 loadUrl(url)
             }
         },

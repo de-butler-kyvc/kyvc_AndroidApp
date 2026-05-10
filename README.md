@@ -28,6 +28,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - 외부에서 호출 가능한 앱 기능은 반드시 호출 규격 문서와 함께 관리한다.
 - 앱 WebView 기본 진입 URL은 `https://dev-kyvc.khuoo.synology.me/m/` 이다.
 - 브리지 테스트용 화면은 `app/src/main/assets/index.html` 에 있으며, 외부 URL 로딩 실패 시 fallback 페이지로 사용한다.
+- 앱 뒤로가기 동작은 WebView 히스토리 우선이다. 이전 페이지가 있으면 `goBack()`, 없으면 앱을 종료한다.
 
 ## 네트워크 전환 공지 (Devnet -> Testnet)
 

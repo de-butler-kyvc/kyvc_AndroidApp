@@ -94,6 +94,7 @@ dependencies {
     // Crypto & Utilities
     implementation(libs.jcs)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.kotlin.bip39)
 
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

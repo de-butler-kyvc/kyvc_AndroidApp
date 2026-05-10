@@ -1,8 +1,11 @@
 package com.example.kyvc_androidapp
 
 import android.app.Activity
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.os.Bundle
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -157,7 +160,8 @@ class MainActivity : FragmentActivity() {
                     Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                         if (unlocked) {
                             WebViewScreen(
-                                url = "file:///android_asset/index.html",
+                                url = PRIMARY_WEB_URL,
+                                fallbackUrl = LOCAL_TEST_WEB_URL,
                                 bridge = bridge,
                                 modifier = Modifier.padding(innerPadding)
                             )
@@ -570,6 +574,8 @@ class MainActivity : FragmentActivity() {
 
     companion object {
         private const val MIN_PATTERN_POINTS = 4
+        private const val PRIMARY_WEB_URL = "https://dev-kyvc.khuoo.synology.me/m/"
+        private const val LOCAL_TEST_WEB_URL = "file:///android_asset/index.html"
     }
 }
 
@@ -823,13 +829,32 @@ private fun PatternGrid(
     }
 }
 
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun WebViewScreen(url: String, bridge: WalletBridge, modifier: Modifier = Modifier) {
+fun WebViewScreen(
+    url: String,
+    fallbackUrl: String,
+    bridge: WalletBridge,
+    modifier: Modifier = Modifier
+) {
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { context ->
             WebView(context).apply {
-                webViewClient = WebViewClient()
+                var fallbackLoaded = false
+                webViewClient = object : WebViewClient() {
+                    override fun onReceivedError(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                        error: WebResourceError?
+                    ) {
+                        super.onReceivedError(view, request, error)
+                        if (request?.isForMainFrame == true && !fallbackLoaded) {
+                            fallbackLoaded = true
+                            view?.loadUrl(fallbackUrl)
+                        }
+                    }
+                }
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 addJavascriptInterface(bridge, "Android")

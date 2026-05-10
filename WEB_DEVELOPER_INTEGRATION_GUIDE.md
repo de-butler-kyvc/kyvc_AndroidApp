@@ -15,6 +15,8 @@
 - 인증(PIN/패턴/지문), 민감정보 처리, XRPL 서명, 백엔드 API 호출은 네이티브가 담당한다.
 - 웹은 `window.onAndroidResult(resultJson)` 콜백으로 결과만 처리한다.
 - 민감정보(`seed`, `mnemonic`)는 콘솔/분석SDK/원격 로그에 저장하지 않는다.
+- 앱 WebView 기본 진입 URL은 `https://dev-kyvc.khuoo.synology.me/m/`이다.
+- 테스트 페이지는 `app/src/main/assets/index.html`이며, 외부 URL 로딩 실패 시 fallback으로 사용된다.
 
 ## 2) 공통 콜백 처리 템플릿
 

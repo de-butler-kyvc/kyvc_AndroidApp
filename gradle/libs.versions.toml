@@ -19,6 +19,7 @@ ksp = "2.1.10-1.0.30"
 cameraX = "1.5.3"
 mlkitBarcode = "17.3.0"
 biometric = "1.1.0"
+kotlin-bip39 = "1.0.9"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -52,6 +53,7 @@ androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycl
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraX" }
 mlkit-barcode-scanning = { group = "com.google.mlkit", name = "barcode-scanning", version.ref = "mlkitBarcode" }
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "biometric" }
+kotlin-bip39 = { group = "cash.z.ecc.android", name = "kotlin-bip39", version.ref = "kotlin-bip39" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

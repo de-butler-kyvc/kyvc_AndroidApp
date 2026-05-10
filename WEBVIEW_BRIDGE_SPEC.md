@@ -3,10 +3,14 @@
 이 문서는 웹이 Android WebView 브리지를 호출할 때 사용하는 최신 호출 규격 문서다. 브리지 함수가 바뀌면 이 문서를 같이 갱신한다.
 
 - Spec Version: `1.5.0`
-- Last Updated: `2026-05-10`
+- Last Updated: `2026-05-11`
 
 ## Changelog
 
+- `1.5.1` (2026-05-11)
+  - 앱 WebView 기본 진입 URL을 `https://dev-kyvc.khuoo.synology.me/m/`로 변경
+  - 외부 URL 메인 프레임 로딩 실패 시 `app/src/main/assets/index.html` fallback 사용
+  - 테스트 페이지 위치를 문서에 명시
 - `1.5.0` (2026-05-10)
   - XRPL 네트워크 기준을 Devnet에서 Testnet으로 전환
   - Core Base URL 예시를 testnet 환경 변수 형태로 정리
@@ -40,6 +44,8 @@
 - `requestNativeAuth(method="pin")` 호출 시 PIN 입력 화면은 WebView가 아닌 네이티브 `UnlockActivity`에서 렌더링된다. UI는 `app/src/main/assets/pinExample.html` 디자인을 기준으로 구현한다.
 - `seed/mnemonic` 외 민감 키(auth key/private key)는 웹으로 export하지 않는다.
 - XRPL ledger 기준 네트워크는 `testnet`이다.
+- 실제 앱 내 WebView는 기본적으로 `https://dev-kyvc.khuoo.synology.me/m/`를 로드한다.
+- 브리지 테스트 페이지(로컬)는 `app/src/main/assets/index.html`이며, 네트워크/도메인 문제로 메인 URL이 실패하면 fallback으로 열린다.
 
 ## 네트워크 설정 (Testnet)
 

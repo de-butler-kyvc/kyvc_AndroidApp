@@ -3877,6 +3877,7 @@ class WalletBridge(
         private const val SENSITIVE_REASON_XRP_PAYMENT = "xrp-payment"
         private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
+            "dev-kyvc.khuoo.synology.me",
             "dev-core-kyvc.khuoo.synology.me",
             "demo.kyvc.local",
             "dev-api-kyvc.khuoo.synology.me"

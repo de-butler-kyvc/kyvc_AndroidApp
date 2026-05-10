@@ -8,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -37,6 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,6 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -51,9 +55,13 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.example.kyvc_androidapp.security.AppLockStore
 import com.example.kyvc_androidapp.ui.theme.Kyvc_AndroidAppTheme
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.concurrent.Executor
 
 private const val MIN_PATTERN_POINTS = 4
+private const val MAX_PIN_LENGTH = 8
+private const val LOGIN_PIN_LENGTH = 4
 
 class UnlockActivity : FragmentActivity() {
     private lateinit var appLockStore: AppLockStore
@@ -158,6 +166,7 @@ private fun UnlockScreen(
     var errorMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var pin by rememberSaveable { mutableStateOf("") }
     val pattern = remember { mutableStateListOf<Int>() }
+    val pinScope = rememberCoroutineScope()
 
     LaunchedEffect(method) {
         if (method == "biometric") {
@@ -183,6 +192,55 @@ private fun UnlockScreen(
             Box(contentAlignment = Alignment.Center) {
                 Text("지문 인증을 요청하는 중입니다.")
             }
+        }
+        return
+    }
+
+    if (method == "pin") {
+        Surface(modifier = Modifier.fillMaxSize()) {
+            PinAuthScreen(
+                pin = pin,
+                statusMessage = errorMessage,
+                onDigit = { digit ->
+                    if (pin.length < LOGIN_PIN_LENGTH) {
+                        pin += digit
+                        errorMessage = null
+                    }
+                },
+                onBackspace = {
+                    if (pin.isNotEmpty()) {
+                        pin = pin.dropLast(1)
+                        errorMessage = null
+                    }
+                },
+                onSubmit = {
+                    val verified = when {
+                        pin.length != LOGIN_PIN_LENGTH -> {
+                            errorMessage = "PIN은 4자리 숫자여야 합니다."
+                            false
+                        }
+                        else -> appLockStore.verifyPin(pin)
+                    }
+                    if (verified) {
+                        appLockStore.resetAuthFailures()
+                        errorMessage = "지갑 잠금을 해제합니다."
+                        pinScope.launch {
+                            delay(180)
+                            onSuccess()
+                        }
+                    } else if (errorMessage == null) {
+                        appLockStore.recordAuthFailure()
+                        if (appLockStore.isEmailVerificationRequired()) {
+                            onFailure("인증 5회 실패로 이메일 인증이 필요합니다.")
+                        } else {
+                            val remaining = appLockStore.getRemainingAuthAttempts()
+                            errorMessage = "PIN이 올바르지 않습니다. 남은 시도 ${remaining}회"
+                            pin = ""
+                        }
+                    }
+                },
+                onCancel = onCancel
+            )
         }
         return
     }
@@ -309,6 +367,150 @@ private fun UnlockScreen(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun PinAuthScreen(
+    pin: String,
+    statusMessage: String?,
+    onDigit: (String) -> Unit,
+    onBackspace: () -> Unit,
+    onSubmit: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val keyRows = listOf(
+        listOf("1", "2", "3"),
+        listOf("4", "5", "6"),
+        listOf("7", "8", "9"),
+        listOf("", "0", "⌫")
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+            .navigationBarsPadding()
+            .padding(horizontal = 18.dp, vertical = 20.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Top
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFF2F2F2))
+                        .clickable { onCancel() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "<",
+                        color = Color(0xFF0B1D40),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "PIN 로그인",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color(0xFF0B1D40),
+                        fontWeight = FontWeight.ExtraBold
+                    )
+                }
+            Spacer(modifier = Modifier.size(34.dp))
+        }
+
+            Spacer(modifier = Modifier.weight(0.55f))
+
+            Text(
+                text = "PIN 번호를 입력하세요",
+                style = MaterialTheme.typography.headlineSmall,
+                color = Color(0xFF0B1D40),
+                fontWeight = FontWeight.ExtraBold
+            )
+            Spacer(modifier = Modifier.weight(0.65f))
+            Text(
+                text = statusMessage ?: "PIN 4자리를 입력하세요",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color(0xFF6B7280)
+            )
+
+            Spacer(modifier = Modifier.weight(0.65f))
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                repeat(LOGIN_PIN_LENGTH) { index ->
+                    Box(
+                        modifier = Modifier
+                            .size(14.dp)
+                            .clip(CircleShape)
+                            .background(if (index < pin.length) Color(0xFF0B1D40) else Color(0xFFD1D5DB))
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(0.9f))
+            keyRows.forEach { row ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 28.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    row.forEach { key ->
+                        if (key.isBlank()) {
+                            Spacer(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(58.dp)
+                            )
+                            return@forEach
+                        }
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(58.dp)
+                                .clip(RoundedCornerShape(15.dp))
+                                .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(15.dp))
+                                .background(Color.White, RoundedCornerShape(15.dp))
+                                .clickable(enabled = key.isNotBlank()) {
+                                    when (key) {
+                                        "⌫" -> onBackspace()
+                                        else -> onDigit(key)
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            if (key.isNotBlank()) {
+                                Text(
+                                    text = key,
+                                    color = Color(0xFF0B1D40),
+                                    fontWeight = FontWeight.ExtraBold,
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(18.dp))
+            }
+
+            LaunchedEffect(pin) {
+                if (pin.length == LOGIN_PIN_LENGTH) {
+                    onSubmit()
+                }
+            }
+            Spacer(modifier = Modifier.weight(0.65f))
         }
     }
 }

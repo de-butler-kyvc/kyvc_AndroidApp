@@ -37,6 +37,7 @@
 - 웹은 결과만 `window.onAndroidResult(result)` 콜백으로 받는다.
 - PIN/패턴 원문은 웹에서 브리지로 보내지 않는다.
 - 지문/PIN/패턴 UI는 네이티브가 띄운다.
+- `requestNativeAuth(method="pin")` 호출 시 PIN 입력 화면은 WebView가 아닌 네이티브 `UnlockActivity`에서 렌더링된다. UI는 `app/src/main/assets/pinExample.html` 디자인을 기준으로 구현한다.
 - `seed/mnemonic` 외 민감 키(auth key/private key)는 웹으로 export하지 않는다.
 - XRPL ledger 기준 네트워크는 `testnet`이다.
 

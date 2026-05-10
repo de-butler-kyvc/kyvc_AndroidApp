@@ -51,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -78,6 +79,7 @@ class MainActivity : FragmentActivity() {
     private val mainViewModel: MainViewModel by viewModels()
     private lateinit var bridge: WalletBridge
     private lateinit var biometricExecutor: Executor
+    private var isUnlocked = mutableStateOf(false)
     private val qrScanLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val requestJson = result.data?.getStringExtra(QrScannerActivity.EXTRA_REQUEST_JSON)
@@ -98,12 +100,19 @@ class MainActivity : FragmentActivity() {
             val requestJson = result.data?.getStringExtra(UnlockActivity.EXTRA_REQUEST_JSON)
             val method = result.data?.getStringExtra(UnlockActivity.EXTRA_METHOD)
             val error = result.data?.getStringExtra(UnlockActivity.EXTRA_ERROR)
-            bridge.onNativeAuthResult(
-                requestJson = requestJson,
-                method = method,
-                success = result.resultCode == Activity.RESULT_OK,
-                errorMessage = error
-            )
+            if (requestJson.isNullOrBlank()) {
+                if (result.resultCode == Activity.RESULT_OK) {
+                    mainViewModel.appContainer.appLockStore.markSessionUnlocked()
+                    isUnlocked.value = true
+                }
+            } else {
+                bridge.onNativeAuthResult(
+                    requestJson = requestJson,
+                    method = method,
+                    success = result.resultCode == Activity.RESULT_OK,
+                    errorMessage = error
+                )
+            }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -131,11 +140,15 @@ class MainActivity : FragmentActivity() {
                     putExtra(UnlockActivity.EXTRA_METHOD, method)
                 }
                 unlockLauncher.launch(intent)
+            },
+            onSessionStatusChanged = { unlocked ->
+                isUnlocked.value = unlocked
             }
         )
         setContent {
             Kyvc_AndroidAppTheme {
                 AuthenticatedApp(
+                    unlockedState = isUnlocked,
                     canUseBiometric = canUseBiometric(),
                     onBiometricAuth = ::showBiometricPrompt
                 ) { unlocked ->
@@ -192,8 +205,17 @@ class MainActivity : FragmentActivity() {
         prompt.authenticate(promptInfo)
     }
 
+    private fun launchLocalNativeAuth(method: String) {
+        val intent = Intent(this, UnlockActivity::class.java).apply {
+            putExtra(UnlockActivity.EXTRA_REQUEST_JSON, "")
+            putExtra(UnlockActivity.EXTRA_METHOD, method)
+        }
+        unlockLauncher.launch(intent)
+    }
+
     @Composable
     private fun AuthenticatedApp(
+        unlockedState: androidx.compose.runtime.MutableState<Boolean>,
         canUseBiometric: Boolean,
         onBiometricAuth: (
             title: String,
@@ -205,9 +227,10 @@ class MainActivity : FragmentActivity() {
     ) {
         val appLockStore = mainViewModel.appContainer.appLockStore
         val lifecycleOwner = LocalLifecycleOwner.current
-        var unlocked by rememberSaveable { mutableStateOf(false) }
+        var unlocked by unlockedState
         var setupMode by rememberSaveable { mutableStateOf(false) }
         var authMode by rememberSaveable { mutableStateOf(AuthMode.Pin) }
+        val showBiometricInAppLock = false
         var pin by rememberSaveable { mutableStateOf("") }
         var pinConfirm by rememberSaveable { mutableStateOf("") }
         var errorMessage by rememberSaveable { mutableStateOf<String?>(null) }
@@ -306,91 +329,75 @@ class MainActivity : FragmentActivity() {
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
-                        AuthModeSelector(
-                            currentMode = authMode,
-                            pinEnabled = true,
-                            patternEnabled = true,
-                            onModeSelected = {
-                                authMode = it
-                                errorMessage = null
-                                pin = ""
-                                pinConfirm = ""
-                                pattern.clear()
-                                patternConfirm.clear()
-                                patternConfirmMode = false
-                            }
-                        )
-
-                        if (!setupMode && authMode == AuthMode.Pin && !appLockStore.hasPin()) {
-                            Text(
-                                text = "PIN 로그인이 아직 설정되지 않았습니다. 개발용 잠금 방식 재설정 후 PIN을 새로 등록해야 합니다.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        if (!setupMode && !appLockStore.hasPattern()) {
-                            Text(
-                                text = "패턴 로그인이 아직 설정되지 않았습니다. 개발용 잠금 방식 재설정 후 패턴을 새로 등록해야 합니다.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        if (authMode == AuthMode.Pin) {
-                            PinSection(
-                                setupMode = setupMode,
-                                pin = pin,
-                                pinConfirm = pinConfirm,
-                                onPinChange = {
-                                    pin = it.filter(Char::isDigit).take(8)
+                        if (setupMode) {
+                            AuthModeSelector(
+                                currentMode = authMode,
+                                pinEnabled = true,
+                                patternEnabled = true,
+                                onModeSelected = {
+                                    authMode = it
                                     errorMessage = null
-                                },
-                                onPinConfirmChange = {
-                                    pinConfirm = it.filter(Char::isDigit).take(8)
-                                    errorMessage = null
-                                }
-                            )
-                        } else {
-                            PatternSection(
-                                setupMode = setupMode,
-                                pattern = pattern,
-                                patternConfirm = patternConfirm,
-                                patternConfirmMode = patternConfirmMode,
-                                onPointTapped = { point ->
-                                    val target = if (patternConfirmMode) patternConfirm else pattern
-                                    if (!target.contains(point)) {
-                                        target.add(point)
-                                        errorMessage = null
-                                    }
-                                },
-                                onClear = {
+                                    pin = ""
+                                    pinConfirm = ""
                                     pattern.clear()
                                     patternConfirm.clear()
                                     patternConfirmMode = false
-                                    errorMessage = null
-                                },
-                                onMoveToConfirm = {
-                                    patternConfirmMode = true
-                                    patternConfirm.clear()
-                                    errorMessage = null
                                 }
                             )
-                        }
 
-                        errorMessage?.let { message ->
-                            Text(
-                                text = message,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.error
-                            )
-                        }
+                            if (authMode == AuthMode.Pin) {
+                                PinSection(
+                                    setupMode = setupMode,
+                                    pin = pin,
+                                    pinConfirm = pinConfirm,
+                                    onPinChange = {
+                                        pin = it.filter(Char::isDigit).take(8)
+                                        errorMessage = null
+                                    },
+                                    onPinConfirmChange = {
+                                        pinConfirm = it.filter(Char::isDigit).take(8)
+                                        errorMessage = null
+                                    }
+                                )
+                            } else {
+                                PatternSection(
+                                    setupMode = setupMode,
+                                    pattern = pattern,
+                                    patternConfirm = patternConfirm,
+                                    patternConfirmMode = patternConfirmMode,
+                                    onPointTapped = { point ->
+                                        val target = if (patternConfirmMode) patternConfirm else pattern
+                                        if (!target.contains(point)) {
+                                            target.add(point)
+                                            errorMessage = null
+                                        }
+                                    },
+                                    onClear = {
+                                        pattern.clear()
+                                        patternConfirm.clear()
+                                        patternConfirmMode = false
+                                        errorMessage = null
+                                    },
+                                    onMoveToConfirm = {
+                                        patternConfirmMode = true
+                                        patternConfirm.clear()
+                                        errorMessage = null
+                                    }
+                                )
+                            }
 
-                        Button(
-                            onClick = {
-                                when (authMode) {
-                                    AuthMode.Pin -> {
-                                        if (setupMode) {
+                            errorMessage?.let { message ->
+                                Text(
+                                    text = message,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error
+                                )
+                            }
+
+                            Button(
+                                onClick = {
+                                    when (authMode) {
+                                        AuthMode.Pin -> {
                                             when {
                                                 pin.length !in 4..8 -> errorMessage = "PIN은 4~8자리 숫자여야 합니다."
                                                 pin != pinConfirm -> errorMessage = "PIN 확인 값이 일치하지 않습니다."
@@ -403,48 +410,13 @@ class MainActivity : FragmentActivity() {
                                                     errorMessage = null
                                                 }
                                             }
-                                        } else {
-                                            when {
-                                                pin.length !in 4..8 -> errorMessage = "PIN은 4~8자리 숫자여야 합니다."
-                                                appLockStore.isEmailVerificationRequired() -> {
-                                                    appLockStore.clearSession()
-                                                    errorMessage = "인증 5회 실패로 이메일 인증이 필요합니다."
-                                                }
-                                                appLockStore.verifyPin(pin) -> {
-                                                    appLockStore.resetAuthFailures()
-                                                    appLockStore.markSessionUnlocked()
-                                                    unlocked = true
-                                                    pin = ""
-                                                    errorMessage = null
-                                                }
-                                                else -> {
-                                                    appLockStore.recordAuthFailure()
-                                                    errorMessage = if (appLockStore.isEmailVerificationRequired()) {
-                                                        appLockStore.clearSession()
-                                                        "인증 5회 실패로 이메일 인증이 필요합니다."
-                                                    } else {
-                                                        "PIN이 올바르지 않습니다. 남은 시도 ${appLockStore.getRemainingAuthAttempts()}회"
-                                                    }
-                                                }
-                                            }
                                         }
-                                    }
-
-                                    AuthMode.Pattern -> {
-                                        if (setupMode) {
+                                        AuthMode.Pattern -> {
                                             when {
-                                                pattern.size < MIN_PATTERN_POINTS -> {
-                                                    errorMessage = "패턴은 최소 4개의 점을 연결해야 합니다."
-                                                }
-                                                !patternConfirmMode -> {
-                                                    errorMessage = "패턴 확인 단계로 이동해주세요."
-                                                }
-                                                patternConfirm.size < MIN_PATTERN_POINTS -> {
-                                                    errorMessage = "확인용 패턴을 다시 입력해주세요."
-                                                }
-                                                pattern.toList() != patternConfirm.toList() -> {
-                                                    errorMessage = "패턴 확인 값이 일치하지 않습니다."
-                                                }
+                                                pattern.size < MIN_PATTERN_POINTS -> errorMessage = "패턴은 최소 4개의 점을 연결해야 합니다."
+                                                !patternConfirmMode -> errorMessage = "패턴 확인 단계로 이동해주세요."
+                                                patternConfirm.size < MIN_PATTERN_POINTS -> errorMessage = "확인용 패턴을 다시 입력해주세요."
+                                                pattern.toList() != patternConfirm.toList() -> errorMessage = "패턴 확인 값이 일치하지 않습니다."
                                                 else -> {
                                                     appLockStore.setPattern(pattern.toList())
                                                     unlocked = true
@@ -455,80 +427,48 @@ class MainActivity : FragmentActivity() {
                                                     errorMessage = null
                                                 }
                                             }
-                                        } else {
-                                            when {
-                                                pattern.size < MIN_PATTERN_POINTS -> {
-                                                    errorMessage = "패턴은 최소 4개의 점을 연결해야 합니다."
-                                                }
-                                                appLockStore.isEmailVerificationRequired() -> {
-                                                    appLockStore.clearSession()
-                                                    errorMessage = "인증 5회 실패로 이메일 인증이 필요합니다."
-                                                }
-                                                appLockStore.verifyPattern(pattern.toList()) -> {
-                                                    appLockStore.resetAuthFailures()
-                                                    appLockStore.markSessionUnlocked()
-                                                    unlocked = true
-                                                    pattern.clear()
-                                                    errorMessage = null
-                                                }
-                                                else -> {
-                                                    appLockStore.recordAuthFailure()
-                                                    errorMessage = if (appLockStore.isEmailVerificationRequired()) {
-                                                        appLockStore.clearSession()
-                                                        "인증 5회 실패로 이메일 인증이 필요합니다."
-                                                    } else {
-                                                        "패턴이 올바르지 않습니다. 남은 시도 ${appLockStore.getRemainingAuthAttempts()}회"
-                                                    }
-                                                }
-                                            }
                                         }
                                     }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                when {
-                                    setupMode && authMode == AuthMode.Pin -> "PIN 저장"
-                                    setupMode && authMode == AuthMode.Pattern -> "패턴 저장"
-                                    authMode == AuthMode.Pin -> "PIN 로그인"
-                                    else -> "패턴 로그인"
-                                }
-                            )
-                        }
-
-                        if (!setupMode && canUseBiometric && appLockStore.isBiometricEnabled()) {
-                            Button(
-                                enabled = !appLockStore.isEmailVerificationRequired(),
-                                onClick = {
-                                    onBiometricAuth(
-                                        "지문 로그인",
-                                        "지문으로 KYvC 지갑을 엽니다.",
-                                        {
-                                            appLockStore.resetAuthFailures()
-                                            appLockStore.markSessionUnlocked()
-                                            unlocked = true
-                                            pin = ""
-                                            pattern.clear()
-                                            errorMessage = null
-                                        },
-                                        { message ->
-                                            errorMessage = if (appLockStore.isEmailVerificationRequired()) {
-                                                appLockStore.clearSession()
-                                                "인증 5회 실패로 이메일 인증이 필요합니다."
-                                            } else {
-                                                message
-                                            }
-                                        }
-                                    )
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                Text("지문 로그인")
+                                Text(if (authMode == AuthMode.Pin) "PIN 저장" else "패턴 저장")
+                            }
+                        } else {
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Button(
+                                    enabled = !appLockStore.isEmailVerificationRequired(),
+                                    onClick = { launchLocalNativeAuth("pin") },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("PIN 로그인")
+                                }
+                                Button(
+                                    enabled = !appLockStore.isEmailVerificationRequired() && canUseBiometric && appLockStore.isBiometricEnabled(),
+                                    onClick = { launchLocalNativeAuth("biometric") },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("지문 로그인")
+                                }
+                            }
+
+                            TextButton(
+                                enabled = !appLockStore.isEmailVerificationRequired(),
+                                onClick = {
+                                    appLockStore.clearPin()
+                                    setupMode = true
+                                    authMode = AuthMode.Pin
+                                    pin = ""
+                                    pinConfirm = ""
+                                    errorMessage = "테스트용 PIN 재설정을 시작합니다. 새 PIN을 입력하세요."
+                                },
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                Text("PIN 재설정 (테스트)")
                             }
                         }
 
-                        if (setupMode && canUseBiometric) {
+                        if (setupMode && showBiometricInAppLock && canUseBiometric) {
                             TextButton(
                                 onClick = {
                                     if (authMode == AuthMode.Pin) {
@@ -588,7 +528,7 @@ class MainActivity : FragmentActivity() {
                             ) {
                                 Text("저장 후 지문 사용")
                             }
-                        } else if (!setupMode && canUseBiometric && !appLockStore.isBiometricEnabled()) {
+                        } else if (!setupMode && showBiometricInAppLock && canUseBiometric && !appLockStore.isBiometricEnabled()) {
                             TextButton(
                                 enabled = !appLockStore.isEmailVerificationRequired(),
                                 onClick = {
@@ -628,6 +568,99 @@ class MainActivity : FragmentActivity() {
 
     companion object {
         private const val MIN_PATTERN_POINTS = 4
+    }
+}
+
+@Composable
+private fun PinKeypadSection(
+    pin: String,
+    errorMessage: String?,
+    onDigit: (String) -> Unit,
+    onBackspace: () -> Unit,
+    onSubmit: () -> Unit
+) {
+    Spacer(modifier = Modifier.height(8.dp))
+
+    val keyRows = listOf(
+        listOf("1", "2", "3"),
+        listOf("4", "5", "6"),
+        listOf("7", "8", "9"),
+        listOf("", "0", "⌫")
+    )
+
+    Text(
+        text = "PIN 번호를 입력하세요",
+        style = MaterialTheme.typography.titleLarge,
+        color = Color(0xFF0B1D40),
+        fontWeight = FontWeight.ExtraBold
+    )
+    Text(
+        text = "지갑 잠금을 해제합니다.",
+        style = MaterialTheme.typography.bodySmall,
+        color = Color(0xFF6B7280)
+    )
+
+    Spacer(modifier = Modifier.height(14.dp))
+
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        repeat(4) { index ->
+            Box(
+                modifier = Modifier
+                    .size(14.dp)
+                    .clip(CircleShape)
+                    .background(if (index < pin.length) Color(0xFF0B1D40) else Color(0xFFD1D5DB))
+            )
+        }
+    }
+
+    keyRows.forEach { row ->
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            row.forEach { key ->
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(54.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White)
+                        .clickable(enabled = key.isNotBlank()) {
+                            when (key) {
+                                "⌫" -> onBackspace()
+                                else -> onDigit(key)
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (key.isNotBlank()) {
+                        Text(
+                            text = key,
+                            color = Color(0xFF0B1D40),
+                            fontWeight = FontWeight.ExtraBold,
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                    }
+                }
+            }
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+    }
+
+    errorMessage?.let { message ->
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+            textAlign = TextAlign.Center
+        )
+    }
+
+    Button(
+        onClick = onSubmit,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Text("PIN 로그인")
     }
 }
 

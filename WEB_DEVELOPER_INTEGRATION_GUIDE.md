@@ -44,6 +44,13 @@ window.onAndroidResult = (resultJson) => {
 -> 성공 시 30분 세션 시작
 ```
 
+구현 주의:
+- PIN 인증 화면은 웹뷰 페이지가 아니라 네이티브 화면이다.
+- 웹은 `requestNativeAuth(method=pin)`만 호출하고, PIN 입력 UI/검증/실패 집계는 앱이 처리한다.
+- 앱 진입 잠금 화면에서는 `PIN 로그인` / `지문 로그인` 버튼으로 인증 방식을 선택한다.
+- 선택 후 인증 처리는 네이티브 `UnlockActivity` 경로로 실행된다.
+- 테스트용으로 앱 진입 잠금 화면에 `PIN 재설정 (테스트)` 버튼이 있다. (개발/테스트 목적)
+
 필수 분기:
 - `emailVerificationRequired=true`: 인증 버튼 비활성화 + 이메일 인증 UI로 이동
 - `sessionUnlocked=false`: 보호 기능 호출 전 재인증 유도

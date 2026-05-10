@@ -84,6 +84,9 @@ UI/브리지 기본값 규칙:
 - holder DID binding 검증을 통과하려면 holder DID Document 원문을 verifier 요청 `did_documents`에 포함하고, 같은 DID Document의 canonical hash를 XRPL DIDSet `Data`에 등록해야 한다.
 - 앱 잠금은 PIN/패턴/지문 공용 실패 횟수 5회를 공유하며, 5회 초과 시 이메일 인증 완료 전까지 모든 인증 수단을 막는다.
 - 인증 성공 시 30분 세션을 시작하고, 세션 만료 후 앱 복귀 또는 재진입 시 다시 인증한다.
+- 웹에서 `requestNativeAuth(method=pin)` 호출 시 PIN 입력은 웹뷰가 아니라 네이티브 `UnlockActivity`에서 처리한다. PIN UI는 `app/src/main/assets/pinExample.html` 시안을 기준으로 반영했다.
+- 앱 진입 잠금은 `PIN 로그인`/`지문 로그인` 선택 버튼으로 시작하며, 선택된 방식은 `UnlockActivity`에서 처리한다.
+- PIN은 pinExample 키패드 스타일을 사용한다(웹뷰 아님). 테스트용 `PIN 재설정` 버튼을 잠금 화면에 제공한다.
 
 ## 📌 주요 작업 내용
 ### Wallet 및 Bridge 기능 구현 (2025-05-22)

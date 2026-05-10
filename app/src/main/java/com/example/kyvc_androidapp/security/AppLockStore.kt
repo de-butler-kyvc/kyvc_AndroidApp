@@ -52,6 +52,13 @@ class AppLockStore(context: Context) {
         )
     }
 
+    fun clearPin() {
+        prefs.edit()
+            .remove(KEY_PIN_CIPHER_TEXT)
+            .remove(KEY_PIN_IV)
+            .apply()
+    }
+
     fun setPattern(pattern: List<Int>) {
         require(isValidPattern(pattern)) { "Pattern must connect at least 4 points" }
         storeSecret(
@@ -98,12 +105,20 @@ class AppLockStore(context: Context) {
 
     fun recordAuthFailure(): Int {
         val nextCount = (getFailedAuthAttempts() + 1).coerceAtMost(AUTH_FAILURE_THRESHOLD)
-        prefs.edit().putInt(KEY_FAILED_AUTH_ATTEMPTS, nextCount).apply()
+        prefs.edit()
+            .putInt(KEY_FAILED_AUTH_ATTEMPTS, nextCount)
+            .remove(KEY_SENSITIVE_AUTH_REASON)
+            .remove(KEY_SENSITIVE_AUTH_AT_MS)
+            .apply()
         return nextCount
     }
 
     fun resetAuthFailures() {
-        prefs.edit().putInt(KEY_FAILED_AUTH_ATTEMPTS, 0).apply()
+        prefs.edit()
+            .putInt(KEY_FAILED_AUTH_ATTEMPTS, 0)
+            .remove(KEY_SENSITIVE_AUTH_REASON)
+            .remove(KEY_SENSITIVE_AUTH_AT_MS)
+            .apply()
     }
 
     fun markSessionUnlocked() {
@@ -115,6 +130,8 @@ class AppLockStore(context: Context) {
     fun clearSession() {
         prefs.edit()
             .remove(KEY_SESSION_UNLOCKED_AT_MS)
+            .remove(KEY_SENSITIVE_AUTH_REASON)
+            .remove(KEY_SENSITIVE_AUTH_AT_MS)
             .apply()
     }
 
@@ -135,6 +152,39 @@ class AppLockStore(context: Context) {
     fun getSessionRemainingMillis(): Long {
         val expiresAt = getSessionExpiresAtMillis() ?: return 0L
         return (expiresAt - System.currentTimeMillis()).coerceAtLeast(0L)
+    }
+
+    fun markSensitiveActionAuthorized(reason: String) {
+        require(reason.isNotBlank()) { "Sensitive auth reason must not be blank" }
+        prefs.edit()
+            .putString(KEY_SENSITIVE_AUTH_REASON, reason)
+            .putLong(KEY_SENSITIVE_AUTH_AT_MS, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun isSensitiveActionAuthorized(reason: String): Boolean {
+        val storedReason = prefs.getString(KEY_SENSITIVE_AUTH_REASON, null)
+        if (storedReason != reason) return false
+        val authorizedAt = prefs.getLong(KEY_SENSITIVE_AUTH_AT_MS, 0L)
+        if (authorizedAt <= 0L) return false
+        return System.currentTimeMillis() < authorizedAt + SENSITIVE_AUTH_DURATION_MS
+    }
+
+    fun consumeSensitiveActionAuthorization(reason: String): Boolean {
+        val authorized = isSensitiveActionAuthorized(reason)
+        prefs.edit()
+            .remove(KEY_SENSITIVE_AUTH_REASON)
+            .remove(KEY_SENSITIVE_AUTH_AT_MS)
+            .apply()
+        return authorized
+    }
+
+    fun getSensitiveActionRemainingMillis(reason: String): Long {
+        val storedReason = prefs.getString(KEY_SENSITIVE_AUTH_REASON, null)
+        if (storedReason != reason) return 0L
+        val authorizedAt = prefs.getLong(KEY_SENSITIVE_AUTH_AT_MS, 0L)
+        if (authorizedAt <= 0L) return 0L
+        return (authorizedAt + SENSITIVE_AUTH_DURATION_MS - System.currentTimeMillis()).coerceAtLeast(0L)
     }
 
     private fun isValidPattern(pattern: List<Int>): Boolean {
@@ -247,6 +297,8 @@ class AppLockStore(context: Context) {
         private const val KEY_BIOMETRIC_ENABLED = "biometric_enabled"
         private const val KEY_FAILED_AUTH_ATTEMPTS = "failed_auth_attempts"
         private const val KEY_SESSION_UNLOCKED_AT_MS = "session_unlocked_at_ms"
+        private const val KEY_SENSITIVE_AUTH_REASON = "sensitive_auth_reason"
+        private const val KEY_SENSITIVE_AUTH_AT_MS = "sensitive_auth_at_ms"
         private const val ANDROID_KEY_STORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
@@ -257,6 +309,7 @@ class AppLockStore(context: Context) {
         private const val MIN_PATTERN_POINTS = 4
         private const val AUTH_FAILURE_THRESHOLD = 5
         private const val SESSION_DURATION_MS = 30 * 60 * 1000L
+        private const val SENSITIVE_AUTH_DURATION_MS = 60 * 1000L
         private val PIN_REGEX = Regex("^\\d{4,8}$")
     }
 }

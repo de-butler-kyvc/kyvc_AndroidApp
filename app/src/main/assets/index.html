@@ -332,6 +332,7 @@
       <input id="walletAccount" readonly />
       <label>Holder DID</label>
       <input id="walletDid" readonly />
+      <div class="desc" id="didRegistrationLink" style="margin-top:6px;text-decoration:underline;cursor:pointer;" onclick="submitHolderDidSet()">did 등록 상태 확인 전</div>
       <label>계정 구분 정보</label>
       <input id="walletMeta" readonly placeholder="이름 / 주소 / 파생 index / 그룹" />
 
@@ -347,6 +348,7 @@
 
       <div class="mt8">
         <button class="secondary" onclick="submitHolderDidSet()">Holder DIDSet 등록</button>
+        <button class="secondary" onclick="checkHolderDidSet()">Holder DIDSet 상태 조회</button>
       </div>
 
       <div class="grid mt8">
@@ -583,6 +585,12 @@
         <button onclick="scanQR()">QR 스캔 호출</button>
         <button onclick="scanIssueQR()">발급 QR 스캔</button>
         <button onclick="scanPresentationQR()">제출 QR 스캔</button>
+      </div>
+      <div class="grid mt8">
+        <button class="ghost" onclick="openCredentialNativeScreen('requestCredentialIssueComplete', 'REQUEST_CREDENTIAL_ISSUE_COMPLETE')">발급완료 화면</button>
+        <button class="ghost" onclick="openCredentialNativeScreen('requestCredentialIssueConfirm', 'REQUEST_CREDENTIAL_ISSUE_CONFIRM')">발급확인 화면</button>
+        <button class="ghost" onclick="openCredentialNativeScreen('requestCredentialDetail', 'REQUEST_CREDENTIAL_DETAIL')">증명서 상세 화면</button>
+        <button class="ghost" onclick="openCredentialNativeScreen('requestCredentialSubmit', 'REQUEST_CREDENTIAL_SUBMIT')">증명서 제출 화면</button>
       </div>
       <div class="result-panel" id="qrResult"></div>
     </details>
@@ -1170,13 +1178,50 @@
     function applyWallet(result) {
       if (!result?.account) return;
       $("walletAccount").value = result.account;
-      $("walletDid").value = result.did;
+      $("walletDid").value = result.holderDid || result.did || `did:xrpl:1:${result.account}`;
       $("holderAccount").value = result.account;
       $("accountName").value = result.name || "";
       const group = result.mnemonicHash || "standalone";
       $("walletMeta").value = `${result.name || "-"} / ${shortAccount(result.account)} / index ${result.derivationIndex ?? 0} / group ${group}`;
+      updateDidRegistrationLabel(result);
 
       syncVcWithWallet();
+    }
+
+    function updateDidRegistrationLabel(result) {
+      const el = $("didRegistrationLink");
+      if (!el) return;
+      const needsRegistration = result?.didRegistrationRequired || result?.holderDidSetRegistrationRequired || result?.didSetRegistered === false;
+      const label = result?.didRegistrationLabel || (needsRegistration ? "did 등록하기" : "did 등록됨");
+      el.textContent = label;
+      el.style.color = needsRegistration ? "#6b7280" : "#2563eb";
+      el.style.pointerEvents = needsRegistration ? "auto" : "none";
+      el.style.textDecoration = needsRegistration ? "underline" : "none";
+    }
+
+    function resetAccountBoundState() {
+      state.currentVcJwt = null;
+      state.currentSdJwt = null;
+      state.selectedSdJwt = null;
+      state.sdJwtParts = null;
+      state.disclosureItems = [];
+      state.selectedDisclosureIds = [];
+      state.attachmentManifest = [];
+      state.attachmentBlockers = [];
+      state.lastPresentation = null;
+      state.lastPresentationJwt = null;
+      state.lastSdJwtKb = null;
+      state.lastPresentationFormat = null;
+      state.lastDidDocument = null;
+      state.signedCredentialKey = null;
+      state.credentials = [];
+      $("credentialListResult").innerHTML = "";
+      $("signResult").innerHTML = "";
+      $("verifierResult").innerHTML = "";
+      $("disclosureChecklist").innerHTML = "<span style=\"color:#64748b;\">지갑 전환됨. 새 credential을 선택하거나 발급받으세요.</span>";
+      $("disclosurePreview").innerHTML = "";
+      $("disclosureCountText").textContent = "선택 0 / 전체 0";
+      updateAttachmentHint();
     }
 
     function syncVcWithWallet() {
@@ -1402,6 +1447,14 @@
       $("walletStatus").className = "mini-status";
       panel("walletResult", "<b>Holder DIDSet 등록 요청:</b><br/>DID Document URI와 Data hash를 XRPL에 기록 중");
       showToast("Holder DIDSet 등록 요청됨");
+    }
+
+    function checkHolderDidSet() {
+      callAndroid("checkHolderDidSet", {});
+      $("walletStatus").textContent = "DIDSet 확인 중";
+      $("walletStatus").className = "mini-status";
+      panel("walletResult", "<b>Holder DIDSet 상태 조회 요청:</b><br/>XRPL ledger의 DID 객체를 확인 중");
+      showToast("Holder DIDSet 상태 조회 요청됨");
     }
 
     function requestIssuerCredential() {
@@ -1740,6 +1793,37 @@
       showToast("QR 스캔 요청됨");
     }
 
+    function openCredentialNativeScreen(method, action) {
+      const payload = {
+        action,
+        requestId: generateUUID(),
+        issuedAt: new Date().toISOString(),
+        issuerName: "법원행정처",
+        requesterName: "신한은행",
+        credentialTitle: "법인등록증명서",
+        submitCredentialTitle: "법인 KYC 증명서",
+        holderName: "주식회사 케이와이브이씨",
+        registrationNumber: "110111-1234567",
+        companyType: "주식회사",
+        establishedAt: "2020년 3월 15일",
+        representativeName: "홍길동",
+        address: "서울특별시 강남구 테헤란로 123",
+        did: $("walletDid").value.trim() || "did:xrpl:1:rHolder...",
+        holderDid: $("walletDid").value.trim() || "did:xrpl:1:rHolder...",
+        holderAccount: $("walletAccount").value.trim() || "rHolder...",
+        didRegistrationLabel: $("didRegistrationLink").textContent || "did 등록하기",
+        issuedAtFull: "2026.05.07 14:32",
+        displayIssuedAt: "2026.05.07",
+        expiresAt: "2027.05.06",
+        transactionHash: "0x7f3a92e1c4d28b1a..."
+      };
+      callAndroid(method, payload);
+      $("qrStatus").textContent = "네이티브 화면 요청";
+      $("qrStatus").className = "mini-status";
+      panel("qrResult", `<b>네이티브 증명서 화면 요청:</b><br/>${method}<br/>requestId: ${payload.requestId}`);
+      showToast("네이티브 화면 요청");
+    }
+
     function clearLog() {
       $("log").textContent = "";
       showToast("로그 초기화 완료");
@@ -1792,6 +1876,20 @@
             state.xrpl += 1;
             updateSummary();
           }
+        }
+        if (
+          result.action === "REQUEST_CREDENTIAL_ISSUE_COMPLETE" ||
+          result.action === "REQUEST_CREDENTIAL_ISSUE_CONFIRM" ||
+          result.action === "REQUEST_CREDENTIAL_ISSUE_CONFIRM_1" ||
+          result.action === "REQUEST_CREDENTIAL_ISSUE_CONFIRM_2" ||
+          result.action === "REQUEST_CREDENTIAL_DETAIL" ||
+          result.action === "REQUEST_CREDENTIAL_SUBMIT"
+        ) {
+          $("qrStatus").textContent = result.ok ? "네이티브 화면 완료" : "네이티브 화면 취소/실패";
+          $("qrStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("qrResult", result.ok
+            ? `<b>네이티브 증명서 화면 결과:</b><br/>screen: ${result.screen}<br/>result: ${result.result}`
+            : `<b>네이티브 증명서 화면 실패:</b><br/>screen: ${result.screen || "-"}<br/>${result.error || "-"}`);
         }
         if (result.action === "SUBMIT_CREDENTIAL_CREATE") {
           $("xrplStatus").textContent = result.ok ? "발급 완료" : "발급 실패";
@@ -1877,7 +1975,8 @@
               const activeWallet = sorted.find(w => w.account === result.activeAccount);
               if (activeWallet) {
                   $("walletAccount").value = activeWallet.account;
-                  $("walletDid").value = activeWallet.did || "";
+                  $("walletDid").value = activeWallet.holderDid || activeWallet.did || `did:xrpl:1:${activeWallet.account}`;
+                  $("holderAccount").value = activeWallet.account;
                   $("accountName").value = activeWallet.name;
                   const group = activeWallet.mnemonicHash || "standalone";
                   $("walletMeta").value = `${activeWallet.name || "-"} / ${shortAccount(activeWallet.account)} / index ${activeWallet.derivationIndex ?? 0} / group ${group}`;
@@ -1899,7 +1998,9 @@
                     location.reload(); // Restart to initial state
                 } else {
                     applyWallet(result);
+                    resetAccountBoundState();
                     listWallets();
+                    getCredentialSummaries();
                     if (result.action === "UPGRADE_TO_MNEMONIC") {
                       const phrase = result.mnemonic || "(응답에 mnemonic 없음)";
                       panel("walletResult", `<b>비밀문구 백업 생성 완료:</b><br/><div style="background:#fff1f2; color:#be123c; padding:12px; border-radius:8px; margin-top:8px; font-family:monospace; font-weight:bold; word-break:break-all; border:1px solid #fda4af;">${phrase}</div><br/><b>주의:</b> 안전한 곳에 보관하고 로그/원격 저장소에 남기지 마세요.`);
@@ -1923,12 +2024,16 @@
           if (result.ok) {
             state.viewedSecret = null;
             applyWallet(result);
+            resetAccountBoundState();
             const mnemonicHint = result.mnemonic ? `<br/><b>비밀 복구 구문 (안전한 곳에 보관하세요):</b><br/><span style="color:var(--danger);font-weight:bold">${result.mnemonic}</span>` : "";
             const isRestoreAction = result.action === "RESTORE_WALLET" || result.action === "REQUEST_WALLET_RESTORE";
             const restoreHint = isRestoreAction
               ? `<br/><b>복구 완료:</b> import 성공${result.holderDidSetRegistrationRequired ? ($("restoreAutoDidSet").checked ? "<br/><b>다음 작업:</b> Holder DIDSet 자동 재등록 중" : "<br/><b>다음 작업:</b> Holder DIDSet 등록") : ""}`
               : "";
-            panel("walletResult", `<b>Holder Account:</b><br/>${result.account}<br/><b>DID:</b><br/>${result.did}${mnemonicHint}${restoreHint}`);
+            const didHint = typeof result.didSetRegistered === "boolean"
+              ? `<br/><b>DIDSet 상태:</b> ${result.didSetRegistered ? "등록됨" : "미등록"}${result.didRegistrationRequired ? "<br/><b>표시 문구:</b> did 등록하기" : ""}`
+              : "";
+            panel("walletResult", `<b>Holder Account:</b><br/>${result.account}<br/><b>DID:</b><br/>${result.did}${didHint}${mnemonicHint}${restoreHint}`);
             if (result.action === "CREATE_WALLET" || isRestoreAction) {
               listWallets();
             }
@@ -2102,11 +2207,20 @@
           }
         }
         if (result.action === "SUBMIT_HOLDER_DID_SET") {
+          updateDidRegistrationLabel(result);
           $("walletStatus").textContent = result.ok ? "DIDSet 등록 완료" : "DIDSet 등록 실패";
           $("walletStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
           panel("walletResult", result.ok
-            ? `<b>Holder DIDSet 등록 완료:</b><br/>tx: ${result.txHash}<br/>data: ${result.dataHash}<br/>uri: ${result.didDocumentUri}`
+            ? `<b>Holder DIDSet 등록 완료:</b><br/>tx: ${result.txHash}<br/>data: ${result.dataHash}<br/>uri: ${result.didDocumentUri}<br/>표시 문구: ${result.didRegistrationLabel || "did 등록됨"}`
             : `<b>Holder DIDSet 등록 실패:</b><br/>${result.error}`);
+        }
+        if (result.action === "CHECK_HOLDER_DID_SET") {
+          updateDidRegistrationLabel(result);
+          $("walletStatus").textContent = result.ok ? (result.didSetRegistered ? "DIDSet 등록됨" : "DIDSet 미등록") : "DIDSet 조회 실패";
+          $("walletStatus").className = result.ok && result.didSetRegistered ? "mini-status ok" : "mini-status warn";
+          panel("walletResult", result.ok
+            ? `<b>Holder DIDSet 상태:</b><br/>holder: ${result.holderAccount}<br/>registered: ${result.didSetRegistered}<br/>ledger found: ${result.didLedgerEntryFound}<br/>hash matches: ${result.didDocumentHashMatches}<br/>표시 문구: ${result.didRegistrationLabel || "-"}`
+            : `<b>Holder DIDSet 상태 조회 실패:</b><br/>${result.error}`);
         }
         if (result.action === "SAVE_VC") {
           $("vcStatus").textContent = result.ok ? "저장 완료" : "저장 실패";
@@ -2150,7 +2264,7 @@
               `).join("")
             : "<i>저장된 VC가 없습니다.</i>";
           panel("credentialListResult", result.ok
-            ? `<b>저장된 VC 목록</b><br/>${items}`
+            ? `<b>저장된 VC 목록</b><br/>activeAccount: ${result.activeAccount || "-"}<br/>holder 필터: ${result.filteredByHolderAccount ? "ON" : "OFF"}<br/>${items}`
             : `<b>VC 목록 조회 실패:</b><br/>${result.error}`);
         }
         if (result.action === "GET_CREDENTIAL_SUMMARIES") {
@@ -2171,7 +2285,7 @@
               `).join("")
             : "<i>저장된 증명서가 없습니다.</i>";
           panel("credentialListResult", result.ok
-            ? `<b>증명서 요약 목록</b><br/>${items}`
+            ? `<b>증명서 요약 목록</b><br/>activeAccount: ${result.activeAccount || "-"}<br/>holder 필터: ${result.filteredByHolderAccount ? "ON" : "OFF"}<br/>${items}`
             : `<b>증명서 요약 조회 실패:</b><br/>${result.error}`);
         }
         if (result.action === "REFRESH_CREDENTIAL_STATUSES") {

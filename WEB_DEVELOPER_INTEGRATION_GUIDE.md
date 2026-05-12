@@ -37,7 +37,14 @@ window.onAndroidResult = (resultJson) => {
 ## 3) 인증/세션 흐름
 
 ```text
-앱 진입
+<!--
+앱 WebView 페이지 로드 완료
+-> NATIVE_AUTH_SESSION(ok=true, autoLogin=true, sessionUnlocked=true)이 오면 로그인/인증 버튼 화면을 건너뛰고 앱 메인으로 이동
+-->
+
+웹 로그인 성공
+-> setCurrentWebUser(userId=서버 stable id)
+-> walletAccess 확인
 -> getAuthStatus
 -> requestNativeAuth (wallet-login)
 -> (실패 5회 누적) emailVerificationRequired=true
@@ -50,11 +57,14 @@ window.onAndroidResult = (resultJson) => {
 구현 주의:
 - PIN 인증 화면은 웹뷰 페이지가 아니라 네이티브 화면이다.
 - 웹은 `requestNativeAuth(method=pin)`만 호출하고, PIN 입력 UI/검증/실패 집계는 앱이 처리한다.
-- 앱 진입 잠금 화면에서는 `PIN 로그인` / `지문 로그인` 버튼으로 인증 방식을 선택한다.
-- 선택 후 인증 처리는 네이티브 `UnlockActivity` 경로로 실행된다.
-- 테스트용으로 앱 진입 잠금 화면에 `PIN 재설정 (테스트)` 버튼이 있다. (개발/테스트 목적)
+<!-- - 30분 세션 자동 로그인은 인증 버튼 클릭으로 처리하지 않는다. 웹은 앱 진입 직후 수신되는 `NATIVE_AUTH_SESSION`에서 `autoLogin=true`, `sessionUnlocked=true`면 로그인 페이지를 바로 통과시킨다. -->
+- 앱 진입 시 네이티브 테스트 잠금 화면은 띄우지 않는다. WebView를 먼저 표시하고, 웹이 필요한 시점에 `requestNativeAuth`를 호출한다.
+- PIN/패턴 인증 처리는 네이티브 `UnlockActivity` 경로로 실행된다.
+- 기존 앱 진입용 `PIN 로그인`/`지문 로그인` 회색 테스트 화면과 `PIN 재설정 (테스트)` 버튼은 사용하지 않는다.
 
 필수 분기:
+- `walletAccess=owner_mismatch`: 기존 로컬 지갑은 자동 삭제되지 않는다. 웹의 지갑 캐시를 비우고, 사용자가 명시적으로 지갑 삭제를 선택했을 때만 `deleteLocalWalletData` 또는 `logoutAndDeleteLocalWalletData`를 호출한다.
+- `walletAccess=binding_required`: 기존 owner 없는 로컬 지갑이므로 사용자 확인 후 `setCurrentWebUser(bindIfUnbound=true)` 재호출
 - `emailVerificationRequired=true`: 인증 버튼 비활성화 + 이메일 인증 UI로 이동
 - `sessionUnlocked=false`: 보호 기능 호출 전 재인증 유도
 

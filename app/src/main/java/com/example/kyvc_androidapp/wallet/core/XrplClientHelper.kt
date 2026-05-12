@@ -141,6 +141,86 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         return xrplClient.submit(signedTx)
     }
 
+    suspend fun getDidStatus(
+        accountAddress: String,
+        expectedDataHashHex: String? = null
+    ): DidStatusResult {
+        val validatedAccount = runCatching { requireClassicAddress("accountAddress", accountAddress) }.getOrElse {
+            return DidStatusResult(
+                account = accountAddress,
+                found = false,
+                registered = false,
+                dataHash = null,
+                uri = null,
+                hashMatches = false,
+                checkedAtUtc = Instant.now().toString(),
+                error = it.message
+            )
+        }
+        val body = JSONObject()
+            .put("method", "account_objects")
+            .put(
+                "params",
+                JSONArray().put(
+                    JSONObject()
+                        .put("account", validatedAccount)
+                        .put("type", "did")
+                        .put("ledger_index", "validated")
+                )
+            )
+            .toString()
+
+        val request = Request.Builder()
+            .url(rpcUrl)
+            .post(body.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        return httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            val json = runCatching { JSONObject(responseBody) }.getOrElse {
+                throw IllegalStateException("Invalid account_objects response")
+            }
+            val result = json.optJSONObject("result") ?: throw IllegalStateException("account_objects result missing")
+            if (result.optString("status") == "error" || result.has("error")) {
+                return DidStatusResult(
+                    account = validatedAccount,
+                    found = false,
+                    registered = false,
+                    dataHash = null,
+                    uri = null,
+                    hashMatches = false,
+                    checkedAtUtc = Instant.now().toString(),
+                    error = result.optString("error_message").ifBlank {
+                        result.optString("error").ifBlank { "account_objects failed" }
+                    }
+                )
+            }
+
+            val didObject = result.optJSONArray("account_objects")
+                ?.let { objects ->
+                    (0 until objects.length())
+                        .asSequence()
+                        .mapNotNull { objects.optJSONObject(it) }
+                        .firstOrNull { node ->
+                            node.optString("LedgerEntryType").equals("DID", ignoreCase = true)
+                        }
+                }
+            val dataHash = didObject?.optString("Data")?.takeIf { it.isNotBlank() }
+            val expected = expectedDataHashHex?.trim()?.takeIf { it.isNotBlank() }
+            val hashMatches = expected == null || dataHash.equals(expected, ignoreCase = true)
+            DidStatusResult(
+                account = validatedAccount,
+                found = didObject != null,
+                registered = didObject != null && hashMatches,
+                dataHash = dataHash,
+                uri = didObject?.optString("URI")?.takeIf { it.isNotBlank() },
+                hashMatches = didObject != null && hashMatches,
+                checkedAtUtc = Instant.now().toString(),
+                error = null
+            )
+        }
+    }
+
     suspend fun submitXrpPayment(
         seed: Seed,
         destinationAddress: String,
@@ -623,6 +703,17 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         val credentialType: String,
         val flags: Long?,
         val expiration: Long?,
+        val checkedAtUtc: String,
+        val error: String?
+    )
+
+    data class DidStatusResult(
+        val account: String,
+        val found: Boolean,
+        val registered: Boolean,
+        val dataHash: String?,
+        val uri: String?,
+        val hashMatches: Boolean,
         val checkedAtUtc: String,
         val error: String?
     )

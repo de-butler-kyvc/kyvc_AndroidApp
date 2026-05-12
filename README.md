@@ -6,6 +6,7 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 
 - 웹에서 Android 브리지를 호출하는 최신 규격은 [WEBVIEW_BRIDGE_SPEC.md](./WEBVIEW_BRIDGE_SPEC.md)를 기준으로 본다.
 - 웹 구현 흐름/예외처리 빠른 참고는 [WEB_DEVELOPER_INTEGRATION_GUIDE.md](./WEB_DEVELOPER_INTEGRATION_GUIDE.md)를 본다.
+- 웹 로그인 사용자와 로컬 지갑 owner 바인딩 적용 요청은 [WEB_WALLET_OWNER_INTEGRATION_PROMPT.md](./WEB_WALLET_OWNER_INTEGRATION_PROMPT.md)를 웹 개발자에게 전달한다.
 - 브리지 함수 시그니처나 응답 형식이 바뀌면 위 문서를 먼저 같이 갱신한다.
 
 ## ENV 예시
@@ -95,13 +96,20 @@ UI/브리지 기본값 규칙:
 - verifier 제출은 `vp+jwt`가 아니라 `<issuer-jwt>~<selected-disclosures>~<kb-jwt>` 형식의 `sdJwtKb`를 사용한다.
 - verifier challenge 요청은 `aud`를 보내고, 응답의 `nonce`를 KB-JWT payload에 넣는다.
 - holder DID binding 검증을 통과하려면 holder DID Document 원문을 verifier 요청 `did_documents`에 포함하고, 같은 DID Document의 canonical hash를 XRPL DIDSet `Data`에 등록해야 한다.
-- 앱 잠금은 PIN/패턴/지문 공용 실패 횟수 5회를 공유하며, 5회 초과 시 이메일 인증 완료 전까지 모든 인증 수단을 막는다.
-- 인증 성공 시 30분 세션을 시작하고, 세션 만료 후 앱 복귀 또는 재진입 시 다시 인증한다.
+- `getWalletInfo`, `listWallets`, `switchWallet` 등 지갑 관련 응답은 활성 지갑의 DIDSet ledger 등록 여부를 반환한다. 미등록 또는 hash mismatch 상태면 웹은 잔액 아래 링크 자리에 `did 등록하기` 문구와 등록 버튼을 표시해야 한다.
+- DID는 로그인/활성 지갑 계정에 바인딩된다. 웹은 지갑 전환 시 `account`, `holderAccount`, `did`, `holderDid`를 같은 응답 기준으로 함께 갱신하고, 이전 계정의 DID/credential/SD-JWT 선택 상태를 재사용하지 않는다.
+- 로컬 앱 생성 지갑은 최초 생성/복구 시 웹 로그인 사용자에 바인딩된다. 다른 웹 계정으로 로그인하면 기존 로컬 앱 생성 지갑을 삭제하고 새 계정이 새 지갑을 생성할 수 있게 한다. 사용자가 원래 쓰던 지갑이 있으면 본인이 복구 문구로 직접 복구한다.
+- 웹 로그인 직후 지갑 브릿지 호출 전에 `setCurrentWebUser`를 먼저 호출한다. 기존 owner 없는 로컬 지갑은 사용자 확인 후에만 `bindIfUnbound=true`로 1회 바인딩한다.
+- 앱 진입 시 네이티브 테스트 잠금 화면은 띄우지 않고 WebView를 바로 표시한다.
+- PIN/패턴/지문 인증은 웹이 `requestNativeAuth`를 호출할 때만 네이티브 화면으로 처리한다.
+- PIN/패턴/지문 공용 실패 횟수 5회를 공유하며, 5회 초과 시 이메일 인증 완료 전까지 모든 인증 수단을 막는다.
+- 인증 성공 시 30분 세션을 시작하고, 보호 기능 호출 전에 세션 상태를 확인한다.
 - 웹에서 `requestNativeAuth(method=pin)` 호출 시 PIN 입력은 웹뷰가 아니라 네이티브 `UnlockActivity`에서 처리한다. PIN UI는 `app/src/main/assets/pinExample.html` 시안을 기준으로 반영했다.
 - 웹에서 PIN 재설정이 필요하면 `requestPinReset` 브리지를 호출한다. 웹은 새 PIN 값을 받거나 전달하지 않고, Android가 네이티브 PIN 재설정 화면에서 4자리 PIN을 입력받아 저장한다.
-- 앱 진입 잠금은 `PIN 로그인`/`지문 로그인` 선택 버튼으로 시작하며, 선택된 방식은 `UnlockActivity`에서 처리한다.
-- PIN은 pinExample 키패드 스타일을 사용한다(웹뷰 아님). 테스트용 `PIN 재설정` 버튼을 잠금 화면에 제공한다.
+- 기존 앱 진입용 `PIN 로그인`/`지문 로그인` 회색 테스트 화면과 `PIN 재설정 (테스트)` 버튼은 사용하지 않는다.
+- PIN은 pinExample 키패드 스타일을 사용한다(웹뷰 아님).
 - 지문 인증, QR 스캔, 복구 문구 백업, 지갑 복구는 WebView 페이지 이동이 아니라 WebView 위 네이티브 오버레이로 표시한다. 네이티브 오버레이의 헤더/뒤로가기 버튼 크기는 PIN 인증 화면 기준으로 맞춘다.
+- 발급 완료, 발급 확인, 증명서 상세, 증명서 제출 화면도 네이티브 오버레이로 제공한다. `발급확인1.png`와 `발급확인2.png`는 같은 화면의 짧은/긴 캡처로 보고 하나의 스크롤 화면으로 처리한다. 발급 확인과 증명서 제출 화면의 확인/거부 버튼은 스크롤과 독립된 하단 고정 영역에 둔다.
 - 앱 런처 아이콘은 `app/src/main/assets/logo3.png`를 원본으로 사용하고, `kyvc_launcher` adaptive icon 및 density별 mipmap으로 변환해 적용한다.
 
 ## 📌 주요 작업 내용
@@ -121,10 +129,13 @@ UI/브리지 기본값 규칙:
 - **HD Wallet (BIP-39)**: 12개 단어 비밀 복구 구문(Mnemonic Phrase) 생성 및 복구 지원. 단일 비밀문구에서 여러 계정 파생(BIP-44 스타일) 가능.
 - **Account Management**: 계정별 커스텀 이름 설정, 계정 삭제(목록 제거), Standalone 계정의 비밀문구 백업 생성 지원.
 - **Auth Key Separation**: XRPL account key는 `CredentialAccept` 전용으로 유지하고, VP 서명용 holder authentication key를 별도 secp256k1 key로 생성/암호화 저장하도록 분리.
-- **Session Sync**: 로그아웃 시 웹뷰 종료 및 잠금 화면 전환. 네이티브 인증 성공 시 30분 세션 자동 갱신.
+- **Session Sync**: 로그아웃 시 인증 세션과 웹 사용자 세션을 정리하되 로컬 활성 지갑 선택은 유지. 네이티브 인증 성공 시 30분 세션 자동 갱신.
+- **Device Info Bridge**: `/m` 발급 플로우의 백엔드 기기 등록을 위해 `getDeviceInfo` 브릿지에서 앱 설치 기준 stable device id, 기기명, OS, 앱 버전, 활성 holder auth public key를 반환
 - **VP Signing**: `signMessage` 브릿지에서 challenge/domain/VC를 받아 JCS 기반 `DataIntegrityProof` VP를 생성하고 holder DID Document와 함께 WebView 콜백으로 반환
 - **QR Bridge**: 범용 `scanQRCode`와 용도별 `scanIssueQrCode`/`scanPresentationQrCode` 브릿지가 QR 요청/데이터를 `VC_ISSUE`, `VP_REQUEST`, `LOGIN_REQUEST`로 분류해 WebView 콜백으로 전달하도록 연결. `scanIssueQrCode`는 PC Credential Offer QR 원문을 `qrData`로 그대로 반환
 - **Native Overlay UI**: 지문 인증, QR 스캔, 복구 문구 백업, 지갑 복구 화면을 네이티브 오버레이로 구현하고 웹은 브릿지 호출/결과 처리만 담당
+- **Credential Native Screens**: `발급완료.png`, `발급확인1.png`/`발급확인2.png`, `증명서 상세.png`, `증명서 제출.png` 시안을 기준으로 발급/상세/제출 네이티브 화면과 브릿지 결과 콜백 추가. 발급 확인은 `requestCredentialIssueConfirm` 단일 브릿지를 사용하고, 기존 `requestCredentialIssueConfirm1/2`는 호환 alias로 유지
+- **Credential Screen Result Contract**: 발급 확인/제출 화면의 `reject`는 정상 사용자 선택으로 `ok=true, result=reject`를 반환하고, 뒤로가기/닫기만 `ok=false, result=cancel`로 반환
 - **App Icon**: `logo3.png` 기반 KYvC 런처 아이콘을 adaptive icon과 density별 mipmap 리소스로 반영
 - **VC Validation**: VC 저장/서명/상태조회 전에 `credentialSubject.id`, `credentialStatus.subject`, `validFrom/validUntil`을 검증하고 holder wallet과 맞지 않으면 차단
 - **XRPL Status**: credential ledger entry index를 계산해 `ledger_entry`로 status를 조회하고 active 여부를 `CHECK_CREDENTIAL_STATUS` 콜백으로 반환
@@ -136,6 +147,9 @@ UI/브리지 기본값 규칙:
 - **JWT Transition**: 신규 wallet 가이드에 맞춰 issuer 응답의 compact `vc+jwt` 수신/파싱/저장과 Enveloped VC 기반 `vp+jwt` 생성 1차 지원 추가
 - **SD-JWT Transition**: `dc+sd-jwt` credential 파싱/저장, disclosure 1차 검증, nonce/aud challenge, KB-JWT 생성, SD-JWT+KB verifier 제출 분기 추가
 - **Holder DIDSet**: holder DID Document 원문은 verifier 요청에 포함하고, JCS canonical DID Document hash(`1220` + SHA-256)를 XRPL DIDSet `Data`로 등록하는 브릿지 추가
+- **Holder DIDSet Status**: 활성 지갑 DIDSet 등록 여부와 DID Document hash 일치 여부를 조회해 웹이 `did 등록하기`/`did 등록됨` 상태를 표시할 수 있도록 콜백 필드 추가
+- **Account-bound Wallet State**: 지갑 응답에 `holderAccount`, `holderDid`, `didBoundAccount`, `didAccountBindingValid`를 포함하고, 테스트 페이지에서 지갑 전환 시 이전 credential/SD-JWT/disclosure 상태를 초기화
+- **Web User-bound Wallet Access**: `setCurrentWebUser`, `getWalletOwnerStatus`, `deleteLocalWalletData`, `logoutAndDeleteLocalWalletData` 브릿지를 추가해 로컬 앱 생성 지갑을 웹 로그인 사용자에 바인딩하고, 다른 계정 로그인 시 자동 삭제 없이 웹이 명시적으로 지갑 삭제 브릿지를 호출하도록 전환
 - **Verifier Error Handling**: verifier 실패 응답을 challenge, signature, XRPL status, policy, DID Document 오류로 분류해 WebView에 `errorCode/errorTitle/errorHint`로 반환
 - **JWT Regression Test**: `VpSignerTest`에서 ES256K compact JWS 생성, base64url no-padding segment, 64-byte raw `R||S` signature, secp256k1 검증을 확인
 
@@ -184,14 +198,14 @@ UI/브리지 기본값 규칙:
   - VC hash, VP proof, XRPL status 계산 결과를 고정 테스트로 만들어 회귀 방지
 
 ## 현재 구현 상태 요약
-### 앱 잠금 / 인증
-- PIN 로그인
-- 패턴 로그인(탭형 3x3)
-- 지문 로그인 활성화 및 로그인
+### 인증
+- 웹 요청 기반 PIN 로그인
+- 웹 요청 기반 패턴 로그인(탭형 3x3)
+- 웹 요청 기반 지문 로그인
 - PIN/패턴/지문 공용 실패 횟수 집계
 - 5회 실패 시 이메일 인증 필요 상태 전환
 - 이메일 인증 완료 후 실패 횟수 초기화 브리지 (`completeEmailVerification`)
-- 인증 성공 후 30분 세션 유지, 만료 후 재인증
+- 인증 성공 후 30분 세션 유지
 
 ### 앱 내부에서 성공한 것
 - holder 지갑 생성/조회
@@ -286,17 +300,25 @@ UI/브리지 기본값 규칙:
 ### 1) 로그인/세션
 
 ```text
-getAuthStatus
+웹 로그인 성공
+-> setCurrentWebUser(userId, displayHint, environment)
+-> owner_mismatch면 지갑 삭제 버튼 또는 로그아웃 유도
+-> getAuthStatus
 -> requestNativeAuth(reason=wallet-login)
 -> (emailVerificationRequired=true면) 웹 이메일 인증
 -> completeEmailVerification
 -> requestNativeAuth 재시도
 ```
 
+owner 없는 기존 로컬 지갑은 자동으로 현재 로그인 계정에 붙이지 않는다. 웹이 사용자에게 “이 계정에 기존 지갑을 연결” 확인을 받은 뒤 `setCurrentWebUser(bindIfUnbound=true)`를 다시 호출한다.
+
+다른 계정으로 로그인해 `walletAccess=owner_mismatch`가 오면 앱은 기존 로컬 지갑을 자동 삭제하지 않는다. 웹은 지갑 정보를 숨기고, 사용자가 명시적으로 선택한 경우에만 `deleteLocalWalletData` 또는 `logoutAndDeleteLocalWalletData`를 호출한다.
+
 ### 2) 지갑 복구
 
 ```text
-restoreWallet(seed 또는 mnemonic)
+setCurrentWebUser 성공
+-> restoreWallet(seed 또는 mnemonic)
 -> holderDidSetRegistrationRequired 확인
 -> true면 submitHolderDidSet 호출
 -> getWalletInfo로 반영 확인
@@ -370,7 +392,7 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `submitPresentationToVerifier`는 SD-JWT 흐름에서는 `signMessage`로 생성한 `sdJwtKb`와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `format: kyvc-sd-jwt-presentation-v1`, `presentation.sdJwtKb`, `did_documents`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.
 
-`getCredentialSummaries`는 웹의 증명서 목록/카드 화면용 브릿지다. 상태값, 발급일, 만료일, issuer DID, holder DID, credentialType, 증명서 종류(`vct` 또는 VC type)를 raw VC 원문 없이 반환한다. `listCredentials`는 디버그/상세용으로 저장된 VC를 더 넓게 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
+`getCredentialSummaries`는 웹의 증명서 목록/카드 화면용 브릿지다. 상태값, 발급일, 만료일, issuer DID, holder DID, credentialType, 증명서 종류(`vct` 또는 VC type)를 raw VC 원문 없이 반환한다. 증명서 목록/요약/상태 갱신은 모두 현재 활성 지갑의 `holderAccount` 기준으로 필터링된다. 지갑을 전환하면 웹은 이전 목록 캐시를 비우고 다시 조회해야 한다. `listCredentials`는 디버그/상세용으로 저장된 VC를 더 넓게 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
 
 브리지 최신 호출 형식은 [WEBVIEW_BRIDGE_SPEC.md](./WEBVIEW_BRIDGE_SPEC.md)를 기준으로 본다. 웹/서버에서 앱 기능을 움직여야 하면 README보다 위 문서의 메서드별 요청/응답/호출 흐름을 우선 사용한다.
 
@@ -418,7 +440,7 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 - `found: true`, `flags: 0`, `accepted: false`는 조회 실패가 아니라 issuer가 `CredentialCreate`만 완료한 상태다. 이때는 `CredentialAccept 제출`을 누른 뒤 다시 `XRPL 상태 조회`를 실행한다.
 - VP 제출 로그에서 `presentation.verifiableCredential[0]`와 요청의 `vcJson`이 서로 다른 VC라면 이전 VP가 남아 있는 상태다. 현재 UI는 VC가 바뀌면 기존 VP를 폐기하고, 제출 전에도 현재 VC와 VP 내부 VC가 다르면 제출을 차단한다. 이 경우 `실제 Challenge 요청` 후 현재 VC로 `VP 생성 호출`을 다시 실행한다.
 - issuer secret은 `VC 인증` 요청에 필요한 값이 아니다. 필요하다면 서버의 issuer DID 등록 또는 VC 발급 API 쪽에서만 사용된다.
-- 앱 잠금은 인증 성공 후 30분 동안 유지된다. 세션이 만료되면 앱 복귀/재진입 시 다시 인증해야 한다.
+- 네이티브 인증 세션은 인증 성공 후 30분 동안 유지된다. 세션이 만료되면 보호 기능 호출 전 웹이 다시 `requestNativeAuth`를 호출해야 한다.
 - `rIssuerAccountForTestnet`가 들어간 샘플 VC는 저장, 상태 조회, VP 생성, 서버 인증 모두 차단된다. 실제 테스트에는 issuer가 `did:xrpl:1:r...` 형태이고 `credentialStatus.issuer`도 같은 `r...` classic address인 VC를 써야 한다.
 - 디버그 카드에서 `Issuer Seed`에는 `s...` seed를, `Issuer Account`에는 `r...` classic address를 넣는다. 앱은 둘을 반대로 넣은 경우 화면에서 자동 교정한다.
 - XRPL 응답의 `tecDUPLICATE`는 새 트랜잭션 성공이 아니라 같은 ledger object가 이미 있다는 뜻이다. 앱은 이 경우를 “이미 존재”로 표시하고, 상태 확인은 `XRPL 상태 조회`에서 active 여부로 판단한다.

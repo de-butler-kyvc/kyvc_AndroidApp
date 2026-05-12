@@ -37,7 +37,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 
 @Composable
 fun BiometricAuthScreen(
@@ -53,12 +52,17 @@ fun BiometricAuthScreen(
     var currentStatus by remember { mutableStateOf(statusText) }
     var isError by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        delay(1_000)
+    val startAuth = {
+        currentStatus = statusText
+        isError = false
         onStartAuth { message, error ->
             currentStatus = message
             isError = error
         }
+    }
+
+    LaunchedEffect(Unit) {
+        startAuth()
     }
 
     Box(
@@ -107,7 +111,8 @@ fun BiometricAuthScreen(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .align(Alignment.Center),
+                .align(Alignment.TopCenter)
+                .padding(top = 104.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
@@ -117,17 +122,23 @@ fun BiometricAuthScreen(
                 fontWeight = FontWeight.ExtraBold,
                 textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.height(108.dp))
+            Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = description,
                 color = Color(0xFF6B7280),
                 style = MaterialTheme.typography.bodyLarge,
                 textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.height(110.dp))
+        }
+
+        Box(
+            modifier = Modifier.align(Alignment.Center),
+            contentAlignment = Alignment.Center
+        ) {
             FingerprintMark(
                 statusText = currentStatus,
-                isError = isError
+                isError = isError,
+                onRetry = startAuth
             )
         }
 
@@ -152,7 +163,8 @@ fun BiometricAuthScreen(
 @Composable
 private fun FingerprintMark(
     statusText: String,
-    isError: Boolean
+    isError: Boolean,
+    onRetry: () -> Unit
 ) {
     val context = LocalContext.current
     val fingerprintBitmap = remember {
@@ -174,12 +186,13 @@ private fun FingerprintMark(
                     Brush.linearGradient(
                         colors = listOf(Color(0xFF5F7CFF), Color(0xFF8B5CF6))
                     )
-                ),
+                )
+                .clickable { onRetry() },
             contentAlignment = Alignment.Center
         ) {
             Image(
                 bitmap = fingerprintBitmap,
-                contentDescription = null,
+                contentDescription = "지문 인식 재시도",
                 modifier = Modifier.size(116.dp),
                 contentScale = ContentScale.Fit
             )

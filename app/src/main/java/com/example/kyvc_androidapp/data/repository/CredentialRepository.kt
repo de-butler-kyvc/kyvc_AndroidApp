@@ -19,6 +19,10 @@ class CredentialRepository(
         return credentialDao.getAllCredentialsOnce()
     }
 
+    suspend fun getCredentialsByHolderAccount(holderAccount: String): List<CredentialEntity> {
+        return credentialDao.getCredentialsByHolderAccount(holderAccount)
+    }
+
     suspend fun insertCredential(credential: CredentialEntity) {
         credentialDao.insertCredential(credential)
     }

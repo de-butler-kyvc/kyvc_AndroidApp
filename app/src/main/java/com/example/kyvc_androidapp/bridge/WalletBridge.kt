@@ -24,6 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -79,10 +80,12 @@ class WalletBridge(
     private val launchPinReset: (String) -> Unit,
     private val launchMnemonicBackup: (String, String) -> Unit,
     private val launchWalletRestore: (String) -> Unit,
+    private val launchCredentialNativeScreen: (String, String) -> Unit,
     private val onSessionStatusChanged: (Boolean) -> Unit = {}
 ) {
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
     private val devicePrefs: SharedPreferences = context.getSharedPreferences("kyvc-device", Context.MODE_PRIVATE)
+    private val webUserPrefs: SharedPreferences = context.getSharedPreferences("kyvc-web-user-session", Context.MODE_PRIVATE)
     private var currentSeed: Seed? = null
     private var webViewRef: WeakReference<WebView>? = null
     private val vpSigner = VpSigner()
@@ -98,16 +101,248 @@ class WalletBridge(
     }
 
     @JavascriptInterface
+    fun setCurrentWebUser(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("SET_CURRENT_WEB_USER")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("SET_CURRENT_WEB_USER"),
+                    ttlSeconds = 60
+                )
+                val userId = request.text("userId")
+                    ?: request.text("subject")
+                    ?: throw IllegalArgumentException("userId is required")
+                val displayHint = request.text("displayHint")
+                val environment = request.text("environment") ?: "testnet"
+                val bindIfUnbound = request["bindIfUnbound"]?.jsonPrimitive?.booleanOrNull ?: false
+                val userHash = webUserHash(userId, environment)
+                webUserPrefs.edit()
+                    .putString(KEY_CURRENT_WEB_USER_HASH, userHash)
+                    .putString(KEY_CURRENT_WEB_USER_DISPLAY_HINT, displayHint.orEmpty())
+                    .putString(KEY_CURRENT_WEB_USER_ENVIRONMENT, environment)
+                    .apply()
+
+                withContext(Dispatchers.IO) {
+                    val walletCount = walletStateStore.listWallets().size
+                    val owner = walletStateStore.getOwnerBinding()
+                    when {
+                        walletCount == 0 -> {
+                            withContext(Dispatchers.Main) {
+                                emitCallback("SET_CURRENT_WEB_USER", true) {
+                                    request.text("requestId")?.let { put("requestId", it) }
+                                    put("walletAccess", "no_wallet")
+                                    put("walletReady", false)
+                                    put("ownerBound", false)
+                                }
+                            }
+                        }
+                        owner == null && bindIfUnbound -> {
+                            val bound = walletStateStore.bindOwner(
+                                userHash = userHash,
+                                displayHint = displayHint,
+                                environment = environment
+                            )
+                            withContext(Dispatchers.Main) {
+                                emitCallback("SET_CURRENT_WEB_USER", true) {
+                                    request.text("requestId")?.let { put("requestId", it) }
+                                    put("walletAccess", "allowed")
+                                    put("walletReady", true)
+                                    put("ownerBound", true)
+                                    putOwnerBindingFields(bound)
+                                }
+                            }
+                        }
+                        owner == null -> {
+                            withContext(Dispatchers.Main) {
+                                emitCallback("SET_CURRENT_WEB_USER", true) {
+                                    request.text("requestId")?.let { put("requestId", it) }
+                                    put("walletAccess", "binding_required")
+                                    put("walletReady", true)
+                                    put("ownerBound", false)
+                                    put("requiresNativeAuth", true)
+                                    put("errorHint", "기존 로컬 지갑을 현재 로그인 계정에 연결하려면 사용자 확인 후 bindIfUnbound=true로 다시 호출하세요.")
+                                }
+                            }
+                        }
+                        owner.userHash == userHash -> {
+                            withContext(Dispatchers.Main) {
+                                emitCallback("SET_CURRENT_WEB_USER", true) {
+                                    request.text("requestId")?.let { put("requestId", it) }
+                                    put("walletAccess", "allowed")
+                                    put("walletReady", true)
+                                    put("ownerBound", true)
+                                    putOwnerBindingFields(owner)
+                                }
+                            }
+                        }
+                        else -> {
+                            withContext(Dispatchers.Main) {
+                                emitCallback("SET_CURRENT_WEB_USER", true) {
+                                    request.text("requestId")?.let { put("requestId", it) }
+                                    put("walletAccess", "owner_mismatch")
+                                    put("walletReady", false)
+                                    put("ownerBound", true)
+                                    put("deleteRequired", true)
+                                    owner.displayHint?.takeIf { it.isNotBlank() }?.let { put("ownerDisplayHint", it) }
+                                    put("errorHint", "다른 계정의 로컬 지갑이 있습니다. 지갑 삭제는 웹에서 deleteLocalWalletData 브릿지를 명시적으로 호출할 때만 실행됩니다.")
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: WalletOwnerAccessException) {
+                Log.w(TAG, "setCurrentWebUser denied: ${e.code}")
+                emitWalletOwnerAccessFailure("SET_CURRENT_WEB_USER", request, e)
+            } catch (e: Exception) {
+                Log.e(TAG, "setCurrentWebUser failed", e)
+                emitCallback("SET_CURRENT_WEB_USER", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun getWalletOwnerStatus(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("GET_WALLET_OWNER_STATUS")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("GET_WALLET_OWNER_STATUS"),
+                    ttlSeconds = 60
+                )
+                val currentUserHash = currentWebUserHash()
+                val owner = walletStateStore.getOwnerBinding()
+                val walletCount = withContext(Dispatchers.IO) { walletStateStore.listWallets().size }
+                emitCallback("GET_WALLET_OWNER_STATUS", true) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("walletCount", walletCount)
+                    put("walletReady", walletCount > 0)
+                    put("ownerBound", owner != null)
+                    put("currentWebUserSet", currentUserHash != null)
+                    put(
+                        "walletAccess",
+                        when {
+                            walletCount == 0 -> "no_wallet"
+                            owner == null -> "binding_required"
+                            currentUserHash == null -> "web_user_required"
+                            owner.userHash == currentUserHash -> "allowed"
+                            else -> "owner_mismatch"
+                        }
+                    )
+                    owner?.let { putOwnerBindingFields(it) }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "getWalletOwnerStatus failed", e)
+                emitCallback("GET_WALLET_OWNER_STATUS", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun deleteLocalWalletData(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("DELETE_LOCAL_WALLET_DATA")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("DELETE_LOCAL_WALLET_DATA"),
+                    ttlSeconds = 60
+                )
+                require(appLockStore.isSessionUnlocked()) { "활성 인증 세션이 필요합니다." }
+                val allowOwnerMismatch = request["allowOwnerMismatch"]?.jsonPrimitive?.booleanOrNull ?: false
+                if (!allowOwnerMismatch) {
+                    requireWalletOwnerAccess()
+                } else {
+                    requireCurrentWebUserHash()
+                }
+                withContext(Dispatchers.IO) {
+                    walletStateStore.clearAllWalletsAndOwner()
+                    currentSeed = null
+                    withContext(Dispatchers.Main) {
+                        emitCallback("DELETE_LOCAL_WALLET_DATA", true) {
+                            request.text("requestId")?.let { put("requestId", it) }
+                            put("deleted", true)
+                            put("walletReady", false)
+                        }
+                    }
+                }
+            } catch (e: WalletOwnerAccessException) {
+                Log.w(TAG, "deleteLocalWalletData denied: ${e.code}")
+                emitWalletOwnerAccessFailure("DELETE_LOCAL_WALLET_DATA", request, e)
+            } catch (e: Exception) {
+                Log.e(TAG, "deleteLocalWalletData failed", e)
+                emitCallback("DELETE_LOCAL_WALLET_DATA", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun logoutAndDeleteLocalWalletData(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("LOGOUT_AND_DELETE_LOCAL_WALLET_DATA")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("LOGOUT_AND_DELETE_LOCAL_WALLET_DATA"),
+                    ttlSeconds = 60
+                )
+                require(appLockStore.isSessionUnlocked()) { "활성 인증 세션이 필요합니다." }
+                walletStateStore.clearAllWalletsAndOwner()
+                appLockStore.clearSession()
+                clearCurrentWebUser()
+                currentSeed = null
+                onSessionStatusChanged(false)
+                emitCallback("LOGOUT_AND_DELETE_LOCAL_WALLET_DATA", true) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("deleted", true)
+                    put("walletReady", false)
+                    put("sessionUnlocked", false)
+                    put("walletDisconnected", true)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "logoutAndDeleteLocalWalletData failed", e)
+                emitCallback("LOGOUT_AND_DELETE_LOCAL_WALLET_DATA", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun listWallets(jsonPayload: String) {
         scope.launch(Dispatchers.Main) {
             try {
                 requireTrustedBridgeOrigin("LIST_WALLETS")
+                requireWalletOwnerAccess()
                 withContext(Dispatchers.IO) {
                     val wallets = walletStateStore.listWallets()
                     val activeWallet = walletStateStore.getWalletStateOrNull()
+                    val activeDidStatus = activeWallet?.let { didStatusSnapshot(it) }
                     withContext(Dispatchers.Main) {
                         emitCallback("LIST_WALLETS", true) {
                             put("activeAccount", activeWallet?.account ?: "")
+                            activeWallet?.let {
+                                put("activeDid", it.did)
+                                put("activeHolderDid", it.did)
+                            }
+                            activeDidStatus?.let { (expectedDataHash, didStatus) ->
+                                putHolderDidSetStatus(didStatus, expectedDataHash)
+                            }
                             put(
                                 "wallets",
                                 JsonArray(
@@ -115,6 +350,10 @@ class WalletBridge(
                                         buildJsonObject {
                                             put("account", wallet.account)
                                             put("did", wallet.did)
+                                            put("holderAccount", wallet.account)
+                                            put("holderDid", wallet.did)
+                                            put("didBoundAccount", wallet.account)
+                                            put("didAccountBindingValid", wallet.did == "did:xrpl:1:${wallet.account}")
                                             put("name", wallet.name)
                                             put("derivationIndex", wallet.derivationIndex)
                                             put("mnemonicHash", wallet.mnemonic?.let { 
@@ -150,6 +389,7 @@ class WalletBridge(
                     allowedActions = setOf("REMOVE_WALLET"),
                     ttlSeconds = 30
                 )
+                requireWalletOwnerAccess()
                 val account = request.text("account")
                     ?: walletStateStore.getWalletStateOrNull()?.account
                     ?: throw IllegalArgumentException("account is required")
@@ -199,6 +439,7 @@ class WalletBridge(
                     allowedActions = setOf("SET_ACCOUNT_NAME"),
                     ttlSeconds = 30
                 )
+                requireWalletOwnerAccess()
                 val account = request.text("account") ?: walletStateStore.getWalletStateOrNull()?.account
                 val name = request.text("name") ?: throw IllegalArgumentException("name is required")
                 
@@ -207,8 +448,9 @@ class WalletBridge(
                 withContext(Dispatchers.IO) {
                     walletStateStore.setAccountName(account, name)
                     val walletState = walletStateStore.requireWalletState()
+                    val didStatus = didStatusSnapshot(walletState)
                     withContext(Dispatchers.Main) {
-                        emitWalletCallback("SET_ACCOUNT_NAME", true, walletState)
+                        emitWalletCallback("SET_ACCOUNT_NAME", true, walletState, didStatus)
                     }
                 }
             } catch (e: Exception) {
@@ -231,6 +473,7 @@ class WalletBridge(
                     allowedActions = setOf("UPGRADE_TO_MNEMONIC"),
                     ttlSeconds = 30
                 )
+                requireWalletOwnerAccess()
                 val account = request.text("account") ?: walletStateStore.getWalletStateOrNull()?.account
                 
                 if (account == null) throw IllegalStateException("No active account")
@@ -238,8 +481,9 @@ class WalletBridge(
                 withContext(Dispatchers.IO) {
                     val mnemonic = walletStateStore.upgradeToMnemonic(account)
                     val walletState = walletStateStore.requireWalletState()
+                    val didStatus = didStatusSnapshot(walletState)
                     withContext(Dispatchers.Main) {
-                        emitWalletCallback("UPGRADE_TO_MNEMONIC", true, walletState)
+                        emitWalletCallback("UPGRADE_TO_MNEMONIC", true, walletState, didStatus)
                     }
                 }
             } catch (e: Exception) {
@@ -262,6 +506,7 @@ class WalletBridge(
                     allowedActions = setOf("DERIVE_NEXT_ACCOUNT"),
                     ttlSeconds = 30
                 )
+                requireWalletOwnerAccess()
                 val masterAccount = request.text("masterAccount") ?: walletStateStore.getWalletStateOrNull()?.account
                 val customName = request.text("name")
                 
@@ -270,9 +515,10 @@ class WalletBridge(
                 withContext(Dispatchers.IO) {
                     val walletState = walletStateStore.deriveNextAccount(masterAccount, customName)
                     currentSeed = walletStateStore.requireSeed()
+                    val didStatus = didStatusSnapshot(walletState)
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, "New account added: ${walletState.name}", Toast.LENGTH_SHORT).show()
-                        emitWalletCallback("DERIVE_NEXT_ACCOUNT", true, walletState)
+                        emitWalletCallback("DERIVE_NEXT_ACCOUNT", true, walletState, didStatus)
                     }
                 }
             } catch (e: Exception) {
@@ -290,15 +536,17 @@ class WalletBridge(
             try {
                 requireTrustedBridgeOrigin("SWITCH_WALLET")
                 val request = parseJsonObjectOrEmpty(jsonPayload)
+                requireWalletOwnerAccess()
                 val account = request.text("account") ?: throw IllegalArgumentException("account is required")
                 
                 withContext(Dispatchers.IO) {
                     walletStateStore.switchWallet(account)
                     val walletState = walletStateStore.requireWalletState()
                     currentSeed = walletStateStore.requireSeed()
+                    val didStatus = didStatusSnapshot(walletState)
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, "Switched to: ${walletState.account}", Toast.LENGTH_SHORT).show()
-                        emitWalletCallback("SWITCH_WALLET", true, walletState)
+                        emitWalletCallback("SWITCH_WALLET", true, walletState, didStatus)
                     }
                 }
             } catch (e: Exception) {
@@ -316,13 +564,7 @@ class WalletBridge(
             try {
                 requireTrustedBridgeOrigin("GET_AUTH_STATUS")
                 emitCallback("GET_AUTH_STATUS", true) {
-                    put("lockConfigured", appLockStore.hasAnyLock())
-                    put("pinConfigured", appLockStore.hasPin())
-                    put("patternConfigured", appLockStore.hasPattern())
-                    put("biometricEnabled", appLockStore.isBiometricEnabled())
-                    put("availableMethods", availableAuthMethods())
-                    put("walletReady", runCatching { walletStateStore.requireWalletState() }.isSuccess)
-                    putAuthAttemptState()
+                    putAuthStatusFields()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "getAuthStatus failed", e)
@@ -333,6 +575,25 @@ class WalletBridge(
             }
         }
     }
+
+//    fun emitAutoLoginSessionIfAvailable() {
+//        scope.launch(Dispatchers.Main) {
+//            try {
+//                requireTrustedBridgeOrigin("NATIVE_AUTH_SESSION")
+//                if (!appLockStore.isSessionUnlocked()) {
+//                    return@launch
+//                }
+//                emitCallback("NATIVE_AUTH_SESSION", true) {
+//                    put("authenticated", true)
+//                    put("autoLogin", true)
+//                    put("sessionReused", true)
+//                    putAuthStatusFields()
+//                }
+//            } catch (e: Exception) {
+//                Log.d(TAG, "auto login session event skipped: ${e.message}")
+//            }
+//        }
+//    }
 
     @JavascriptInterface
     fun getDeviceInfo(jsonPayload: String) {
@@ -433,8 +694,28 @@ class WalletBridge(
                 require(method in AUTH_METHODS) {
                     "method must be one of ${AUTH_METHODS.joinToString(", ")}"
                 }
-                requireAuthMethodConfigured(method!!)
-                launchNativeAuth(jsonPayload, method)
+                val resolvedMethod = method!!
+                val reason = request.text("reason")
+//                val isSensitiveReason = reason != null && reason in SENSITIVE_AUTH_REASONS
+//                if (appLockStore.isSessionUnlocked() && !isSensitiveReason) {
+//                    val backendResponse = withContext(Dispatchers.IO) {
+//                        performBackendRequestIfPresent(request)
+//                    }
+//                    onSessionStatusChanged(true)
+//                    emitCallback("REQUEST_NATIVE_AUTH", true) {
+//                        requestId?.let { put("requestId", it) }
+//                        put("method", resolvedMethod)
+//                        reason?.let { put("reason", it) }
+//                        put("authenticated", true)
+//                        put("sessionReused", true)
+//                        putAuthAttemptState()
+//                        backendResponse?.json?.let { put("backendResponse", it) }
+//                        backendResponse?.rawText?.let { put("backendResponseText", it) }
+//                    }
+//                    return@launch
+//                }
+                requireAuthMethodConfigured(resolvedMethod)
+                launchNativeAuth(jsonPayload, resolvedMethod)
             } catch (e: Exception) {
                 Log.e(TAG, "requestNativeAuth failed", e)
                 emitCallback("REQUEST_NATIVE_AUTH", false) {
@@ -500,6 +781,7 @@ class WalletBridge(
                 require(appLockStore.isSessionUnlocked()) {
                     "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
                 }
+                requireWalletOwnerAccess()
                 withContext(Dispatchers.IO) {
                     val mnemonicValue = walletStateStore.exportMnemonicValue()
                     require(mnemonicValue.isNotBlank()) {
@@ -532,12 +814,97 @@ class WalletBridge(
                     allowedActions = setOf("REQUEST_WALLET_RESTORE"),
                     ttlSeconds = 30
                 )
+                requireCurrentWebUserHash()
+                if (walletStateStore.listWallets().isNotEmpty()) {
+                    requireWalletOwnerAccess()
+                }
                 launchWalletRestore(jsonPayload)
             } catch (e: Exception) {
                 Log.e(TAG, "requestWalletRestore failed", e)
                 emitCallback("REQUEST_WALLET_RESTORE", false) {
                     requestId?.let { put("requestId", it) }
                     put("restored", false)
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun requestCredentialIssueComplete(jsonPayload: String) {
+        requestCredentialNativeScreen(
+            jsonPayload = jsonPayload,
+            screen = "issueComplete",
+            action = "REQUEST_CREDENTIAL_ISSUE_COMPLETE"
+        )
+    }
+
+    @JavascriptInterface
+    fun requestCredentialIssueConfirm(jsonPayload: String) {
+        requestCredentialNativeScreen(
+            jsonPayload = jsonPayload,
+            screen = "issueConfirm",
+            action = "REQUEST_CREDENTIAL_ISSUE_CONFIRM"
+        )
+    }
+
+    @JavascriptInterface
+    fun requestCredentialIssueConfirm1(jsonPayload: String) {
+        requestCredentialNativeScreen(
+            jsonPayload = jsonPayload,
+            screen = "issueConfirm",
+            action = "REQUEST_CREDENTIAL_ISSUE_CONFIRM_1"
+        )
+    }
+
+    @JavascriptInterface
+    fun requestCredentialIssueConfirm2(jsonPayload: String) {
+        requestCredentialNativeScreen(
+            jsonPayload = jsonPayload,
+            screen = "issueConfirm",
+            action = "REQUEST_CREDENTIAL_ISSUE_CONFIRM_2"
+        )
+    }
+
+    @JavascriptInterface
+    fun requestCredentialDetail(jsonPayload: String) {
+        requestCredentialNativeScreen(
+            jsonPayload = jsonPayload,
+            screen = "credentialDetail",
+            action = "REQUEST_CREDENTIAL_DETAIL"
+        )
+    }
+
+    @JavascriptInterface
+    fun requestCredentialSubmit(jsonPayload: String) {
+        requestCredentialNativeScreen(
+            jsonPayload = jsonPayload,
+            screen = "credentialSubmit",
+            action = "REQUEST_CREDENTIAL_SUBMIT"
+        )
+    }
+
+    private fun requestCredentialNativeScreen(
+        jsonPayload: String,
+        screen: String,
+        action: String
+    ) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            val requestId = request.text("requestId")
+            try {
+                requireTrustedBridgeOrigin(action)
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf(action),
+                    ttlSeconds = 30
+                )
+                launchCredentialNativeScreen(screen, jsonPayload)
+            } catch (e: Exception) {
+                Log.e(TAG, "requestCredentialNativeScreen failed", e)
+                emitCallback(action, false) {
+                    requestId?.let { put("requestId", it) }
+                    put("screen", screen)
                     put("error", e.message ?: "Unknown error")
                 }
             }
@@ -554,11 +921,27 @@ class WalletBridge(
                 withContext(Dispatchers.IO) {
                     val request = parseJsonObjectOrEmpty(jsonPayload)
                     val overwrite = request.text("overwrite")?.toBooleanStrictOrNull() ?: false
+                    val currentUserHash = requireCurrentWebUserHash()
+                    val owner = walletStateStore.getOwnerBinding()
+                    if (owner != null && owner.userHash != currentUserHash) {
+                        throw walletOwnerMismatch(owner)
+                    }
+                    if (walletStateStore.listWallets().isNotEmpty()) {
+                        requireWalletOwnerAccess()
+                    }
                     val walletState = walletStateStore.createWallet(overwrite = overwrite)
+                    if (owner == null) {
+                        walletStateStore.bindOwner(
+                            userHash = currentUserHash,
+                            displayHint = currentWebUserDisplayHint(),
+                            environment = currentWebUserEnvironment()
+                        )
+                    }
                     currentSeed = walletStateStore.requireSeed()
+                    val didStatus = didStatusSnapshot(walletState)
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, "Wallet ready: ${walletState.account}", Toast.LENGTH_SHORT).show()
-                        emitWalletCallback("CREATE_WALLET", true, walletState)
+                        emitWalletCallback("CREATE_WALLET", true, walletState, didStatus)
                     }
                 }
             } catch (e: Exception) {
@@ -580,10 +963,17 @@ class WalletBridge(
 
                 withContext(Dispatchers.IO) {
                     require(appLockStore.isSessionUnlocked()) { "활성 인증 세션이 필요합니다." }
+                    requireWalletOwnerAccess()
                     val walletState = walletStateStore.requireWalletState()
                     currentSeed = walletStateStore.requireSeed()
+                    val didDocument = buildHolderDidDocument(walletState)
+                    val didStatus = didStatusSnapshot(walletState)
                     withContext(Dispatchers.Main) {
-                        emitWalletCallback("GET_WALLET_INFO", true, walletState)
+                        emitCallback("GET_WALLET_INFO", true) {
+                            putWalletFields(walletState)
+                            put("didDocument", didDocument)
+                            putHolderDidSetStatus(didStatus.second, didStatus.first)
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -596,11 +986,43 @@ class WalletBridge(
     }
 
     @JavascriptInterface
+    fun checkHolderDidSet(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                requireTrustedBridgeOrigin("CHECK_HOLDER_DID_SET")
+                requireWalletOwnerAccess()
+                withContext(Dispatchers.IO) {
+                    val walletState = walletStateStore.requireWalletState()
+                    val didDocument = buildHolderDidDocument(walletState)
+                    val expectedDataHash = didDocumentDataHash(didDocument)
+                    val didStatus = xrplHelper.getDidStatus(
+                        accountAddress = walletState.account,
+                        expectedDataHashHex = expectedDataHash
+                    )
+                    withContext(Dispatchers.Main) {
+                        emitCallback("CHECK_HOLDER_DID_SET", true) {
+                            put("holderAccount", walletState.account)
+                            put("holderDid", walletState.did)
+                            putHolderDidSetStatus(didStatus, expectedDataHash)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "checkHolderDidSet failed", e)
+                emitCallback("CHECK_HOLDER_DID_SET", false) {
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun getWalletAssets(jsonPayload: String) {
         scope.launch(Dispatchers.Main) {
             try {
                 // Check WebView URL on Main thread
                 requireTrustedBridgeOrigin("GET_WALLET_ASSETS")
+                requireWalletOwnerAccess()
 
                 withContext(Dispatchers.IO) {
                     val walletState = walletStateStore.requireWalletState()
@@ -656,6 +1078,7 @@ class WalletBridge(
             try {
                 // Check WebView URL on Main thread
                 requireTrustedBridgeOrigin("GET_WALLET_DEPOSIT_INFO")
+                requireWalletOwnerAccess()
 
                 withContext(Dispatchers.IO) {
                     val walletState = walletStateStore.requireWalletState()
@@ -684,6 +1107,7 @@ class WalletBridge(
             try {
                 // Check WebView URL on Main thread
                 requireTrustedBridgeOrigin("GET_WALLET_TRANSACTIONS")
+                requireWalletOwnerAccess()
 
                 withContext(Dispatchers.IO) {
                     val request = parseJsonObjectOrEmpty(jsonPayload)
@@ -745,6 +1169,7 @@ class WalletBridge(
             try {
                 // Check WebView URL on Main thread
                 requireTrustedBridgeOrigin("COPY_WALLET_ADDRESS")
+                requireWalletOwnerAccess()
 
                 val walletState = walletStateStore.requireWalletState()
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -769,6 +1194,7 @@ class WalletBridge(
             try {
                 // Check WebView URL on Main thread
                 requireTrustedBridgeOrigin("SUBMIT_XRP_PAYMENT")
+                requireWalletOwnerAccess()
 
                 withContext(Dispatchers.IO) {
                     require(!appLockStore.isEmailVerificationRequired()) {
@@ -848,6 +1274,7 @@ class WalletBridge(
                     require(appLockStore.isSessionUnlocked()) {
                         "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
                     }
+                    requireWalletOwnerAccess()
                     val walletState = walletStateStore.requireWalletState()
                     val seedValue = walletStateStore.exportSeedValue()
                     
@@ -885,7 +1312,7 @@ class WalletBridge(
                     ttlSeconds = 30
                 )
                 appLockStore.clearSession()
-                walletStateStore.clearActiveWalletSelection()
+                clearCurrentWebUser()
                 currentSeed = null
                 onSessionStatusChanged(false)
                 emitCallback("LOGOUT", true) {
@@ -940,6 +1367,14 @@ class WalletBridge(
 
                 withContext(Dispatchers.IO) {
                     val request = parseJsonObjectOrEmpty(jsonPayload)
+                    val currentUserHash = requireCurrentWebUserHash()
+                    val owner = walletStateStore.getOwnerBinding()
+                    if (owner != null && owner.userHash != currentUserHash) {
+                        throw walletOwnerMismatch(owner)
+                    }
+                    if (walletStateStore.listWallets().isNotEmpty()) {
+                        requireWalletOwnerAccess()
+                    }
                     val seedValue = request.text("seed") ?: request.text("holderSeed")
                     val mnemonicValue = request.text("mnemonic")
                     val authPrivateKeyHex = request.text("authPrivateKeyHex")
@@ -963,6 +1398,13 @@ class WalletBridge(
                             )
                         }
                         else -> throw IllegalArgumentException("seed or mnemonic is required")
+                    }
+                    if (owner == null) {
+                        walletStateStore.bindOwner(
+                            userHash = currentUserHash,
+                            displayHint = currentWebUserDisplayHint(),
+                            environment = currentWebUserEnvironment()
+                        )
                     }
                     val reusedExistingAccount = !overwrite && walletState.account in accountsBefore
                     val holderDidSetRegistrationRequired = !reusedExistingAccount && !restoredWithExistingAuthKey
@@ -1023,6 +1465,7 @@ class WalletBridge(
                     require(appLockStore.isSessionUnlocked()) {
                         "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
                     }
+                    requireWalletOwnerAccess()
                     val walletState = walletStateStore.requireWalletState()
                     val mnemonicValue = walletStateStore.exportMnemonicValue()
 
@@ -1062,6 +1505,7 @@ class WalletBridge(
             try {
                 // Check WebView URL on Main thread
                 requireTrustedBridgeOrigin("SUBMIT_HOLDER_DID_SET")
+                requireWalletOwnerAccess()
 
                 withContext(Dispatchers.IO) {
                     val request = parseJsonObjectOrEmpty(jsonPayload)
@@ -1093,6 +1537,11 @@ class WalletBridge(
                             put("didDocumentUri", didDocumentUri)
                             put("dataHash", dataHash)
                             put("didDocument", Json.parseToJsonElement(didDocument))
+                            put("didSetRegistered", ledgerApplied)
+                            put("holderDidSetRegistered", ledgerApplied)
+                            put("holderDidSetRegistrationRequired", !ledgerApplied)
+                            put("didRegistrationRequired", !ledgerApplied)
+                            put("didRegistrationLabel", if (ledgerApplied) "did 등록됨" else "did 등록하기")
                             put("txHash", txHash)
                             put("engineResult", engineResult)
                             put("engineResultMessage", result.engineResultMessage())
@@ -1117,6 +1566,7 @@ class WalletBridge(
             val request = parseJsonObjectOrEmpty(jsonPayload)
             val requestId = request.text("requestId")
             try {
+                requireWalletOwnerAccess()
                 val metadata = request.obj("metadata") ?: buildJsonObject { }
                 logBridgeFlow(
                     "vc.issue.saveVC.received",
@@ -1258,6 +1708,7 @@ class WalletBridge(
         scope.launch(Dispatchers.IO) {
             try {
                 requireTrustedBridgeOrigin("REGISTER_DOCUMENT_EVIDENCE")
+                requireWalletOwnerAccess()
                 val request = Json.parseToJsonElement(jsonPayload).jsonObject
                 val documentId = request.text("documentId")
                     ?: throw IllegalArgumentException("documentId is required")
@@ -1335,6 +1786,7 @@ class WalletBridge(
             val requestId = request.text("requestId")
             val requestedCredentialId = request.text("credentialId")
             try {
+                requireWalletOwnerAccess()
                 logBridgeFlow(
                     "vc.issue.status.received",
                     mapOf(
@@ -1491,6 +1943,7 @@ class WalletBridge(
     fun verifyVC(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
+                requireWalletOwnerAccess()
                 val request = Json.parseToJsonElement(jsonPayload).jsonObject
                 val savedCredential = request.text("credentialId")
                     ?.takeIf { it.isNotBlank() }
@@ -1591,9 +2044,14 @@ class WalletBridge(
     fun listCredentials(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                val credentials = credentialRepository.getAllCredentialsOnce()
+                requireWalletOwnerAccess()
+                val walletState = walletStateStore.getWalletStateOrNull()
+                    ?: throw IllegalStateException("Wallet has not been created")
+                val credentials = credentialRepository.getCredentialsByHolderAccount(walletState.account)
                 withContext(Dispatchers.Main) {
                     emitCallback("LIST_CREDENTIALS", true) {
+                        put("activeAccount", walletState.account)
+                        put("filteredByHolderAccount", true)
                         put(
                             "credentials",
                             JsonArray(
@@ -1633,9 +2091,14 @@ class WalletBridge(
     fun getCredentialSummaries(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                val credentials = credentialRepository.getAllCredentialsOnce()
+                requireWalletOwnerAccess()
+                val walletState = walletStateStore.getWalletStateOrNull()
+                    ?: throw IllegalStateException("Wallet has not been created")
+                val credentials = credentialRepository.getCredentialsByHolderAccount(walletState.account)
                 withContext(Dispatchers.Main) {
                     emitCallback("GET_CREDENTIAL_SUMMARIES", true) {
+                        put("activeAccount", walletState.account)
+                        put("filteredByHolderAccount", true)
                         put("count", credentials.size)
                         put(
                             "credentials",
@@ -1662,7 +2125,10 @@ class WalletBridge(
     fun refreshAllCredentialStatuses(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
             try {
-                val credentials = credentialRepository.getAllCredentialsOnce()
+                requireWalletOwnerAccess()
+                val walletState = walletStateStore.getWalletStateOrNull()
+                    ?: throw IllegalStateException("Wallet has not been created")
+                val credentials = credentialRepository.getCredentialsByHolderAccount(walletState.account)
                 val results = credentials.map { credential ->
                     val status = xrplHelper.getCredentialStatus(
                         issuerAddress = credential.issuerAccount,
@@ -1689,6 +2155,8 @@ class WalletBridge(
                 }
                 withContext(Dispatchers.Main) {
                     emitCallback("REFRESH_CREDENTIAL_STATUSES", true) {
+                        put("activeAccount", walletState.account)
+                        put("filteredByHolderAccount", true)
                         put("results", JsonArray(results))
                     }
                 }
@@ -1768,6 +2236,7 @@ class WalletBridge(
                 )
 
                 withContext(Dispatchers.IO) {
+                    requireWalletOwnerAccess()
                     val seed = walletStateStore.requireSeed()
                     currentSeed = seed
                     val walletState = walletStateStore.requireWalletState()
@@ -2018,6 +2487,7 @@ class WalletBridge(
                 val baseUrl = request.text("coreBaseUrl")
                     ?: request.text("issuerBaseUrl")
                     ?: throw IllegalArgumentException("coreBaseUrl is required")
+                requireWalletOwnerAccess()
                 val holderState = walletStateStore.requireWalletState()
                 val holderAccount = request.text("holderAccount") ?: holderState.account
                 val holderDid = request.text("holderDid") ?: holderState.did
@@ -2180,6 +2650,7 @@ class WalletBridge(
                 val baseUrl = request.text("coreBaseUrl")
                     ?: request.text("verifierBaseUrl")
                     ?: throw IllegalArgumentException("coreBaseUrl is required")
+                requireWalletOwnerAccess()
                 val walletState = walletStateStore.requireWalletState()
                 val vcJson = resolveVcJson(request)
                 val vcJwt = resolveVcJwt(request)
@@ -2267,6 +2738,7 @@ class WalletBridge(
                 val domain = request.text("domain") ?: "kyvc.local"
                 require(!challenge.isNullOrBlank()) { "challenge or message is required" }
 
+                requireWalletOwnerAccess()
                 val walletState = walletStateStore.requireWalletState()
                 val seed = walletStateStore.requireSeed()
                 val authPrivateKey = walletStateStore.requireAuthPrivateKeyBytes()
@@ -2450,6 +2922,7 @@ class WalletBridge(
         scope.launch(Dispatchers.IO) {
             try {
                 val request = Json.parseToJsonElement(jsonPayload).jsonObject
+                requireWalletOwnerAccess()
                 val walletState = walletStateStore.requireWalletState()
                 val seed = walletStateStore.requireSeed()
                 currentSeed = seed
@@ -2930,11 +3403,26 @@ class WalletBridge(
                 require(normalizedMnemonic.isNotBlank()) { "mnemonic is required" }
                 val overwrite = request.text("overwrite")?.toBooleanStrictOrNull() ?: true
                 val autoRegisterDidSet = request.text("autoRegisterDidSet")?.toBooleanStrictOrNull() ?: false
+                val currentUserHash = requireCurrentWebUserHash()
+                val owner = walletStateStore.getOwnerBinding()
+                if (owner != null && owner.userHash != currentUserHash) {
+                    throw walletOwnerMismatch(owner)
+                }
+                if (walletStateStore.listWallets().isNotEmpty()) {
+                    requireWalletOwnerAccess()
+                }
                 val accountsBefore = walletStateStore.listWallets().map { it.account }.toSet()
                 val walletState = walletStateStore.restoreWalletWithMnemonic(
                     mnemonicString = normalizedMnemonic,
                     overwrite = overwrite
                 )
+                if (owner == null) {
+                    walletStateStore.bindOwner(
+                        userHash = currentUserHash,
+                        displayHint = currentWebUserDisplayHint(),
+                        environment = currentWebUserEnvironment()
+                    )
+                }
                 val reusedExistingAccount = !overwrite && walletState.account in accountsBefore
                 val holderDidSetRegistrationRequired = !reusedExistingAccount
                 currentSeed = walletStateStore.requireSeed()
@@ -2976,6 +3464,27 @@ class WalletBridge(
             request.text("requestId")?.let { put("requestId", it) }
             put("restored", false)
             put("error", "사용자가 지갑 복구를 취소했습니다.")
+        }
+    }
+
+    fun onCredentialNativeScreenResult(
+        requestJson: String?,
+        fallbackAction: String,
+        screen: String,
+        ok: Boolean,
+        result: String,
+        errorMessage: String?
+    ) {
+        val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
+        val action = request.text("action") ?: fallbackAction
+        emitCallback(action, ok) {
+            request.text("requestId")?.let { put("requestId", it) }
+            put("screen", screen)
+            put("result", result)
+            put("confirmed", ok)
+            if (!ok) {
+                put("error", errorMessage ?: "사용자가 화면을 닫았습니다.")
+            }
         }
     }
 
@@ -3296,6 +3805,20 @@ class WalletBridge(
         put("xrpPaymentAuthReady", appLockStore.isSensitiveActionAuthorized(SENSITIVE_REASON_XRP_PAYMENT))
         put("xrpPaymentAuthRemainingMs", appLockStore.getSensitiveActionRemainingMillis(SENSITIVE_REASON_XRP_PAYMENT))
         appLockStore.getSessionExpiresAtMillis()?.let { put("sessionExpiresAtMs", it) }
+    }
+
+    private fun JsonObjectBuilder.putAuthStatusFields() {
+        put("lockConfigured", appLockStore.hasAnyLock())
+        put("pinConfigured", appLockStore.hasPin())
+        put("patternConfigured", appLockStore.hasPattern())
+        put("biometricEnabled", appLockStore.isBiometricEnabled())
+        put("availableMethods", availableAuthMethods())
+        put("walletReady", runCatching {
+            requireWalletOwnerAccess()
+            walletStateStore.requireWalletState()
+        }.isSuccess)
+        put("walletAccess", walletAccessLabel())
+        putAuthAttemptState()
     }
 
     private fun requireAuthMethodConfigured(method: String) {
@@ -4706,16 +5229,180 @@ class WalletBridge(
     private fun emitWalletCallback(
         action: String,
         ok: Boolean,
-        walletState: WalletStateStore.WalletState
+        walletState: WalletStateStore.WalletState,
+        didStatusSnapshot: Pair<String, XrplClientHelper.DidStatusResult>? = null
     ) {
         emitCallback(action, ok) {
-            put("account", walletState.account)
-            put("publicKey", walletState.publicKey)
-            put("authPublicKey", walletState.authPublicKey)
-            put("did", walletState.did)
-            walletState.mnemonic?.let { put("mnemonic", it) }
+            putWalletFields(walletState)
             put("didDocument", buildHolderDidDocument(walletState))
+            didStatusSnapshot?.let { (expectedDataHash, didStatus) ->
+                putHolderDidSetStatus(didStatus, expectedDataHash)
+            }
         }
+    }
+
+    private fun webUserHash(userId: String, environment: String?): String {
+        val normalizedEnvironment = environment?.trim()?.lowercase(Locale.US).orEmpty()
+        val normalizedUserId = userId.trim()
+        require(normalizedUserId.isNotBlank()) { "userId is required" }
+        val input = "kyvc-wallet-owner-v1\n$normalizedEnvironment\n$normalizedUserId"
+        return MessageDigest.getInstance("SHA-256")
+            .digest(input.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
+
+    private fun currentWebUserHash(): String? {
+        return webUserPrefs.getString(KEY_CURRENT_WEB_USER_HASH, null)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun currentWebUserDisplayHint(): String? {
+        return webUserPrefs.getString(KEY_CURRENT_WEB_USER_DISPLAY_HINT, null)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun currentWebUserEnvironment(): String? {
+        return webUserPrefs.getString(KEY_CURRENT_WEB_USER_ENVIRONMENT, null)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun clearCurrentWebUser() {
+        webUserPrefs.edit()
+            .remove(KEY_CURRENT_WEB_USER_HASH)
+            .remove(KEY_CURRENT_WEB_USER_DISPLAY_HINT)
+            .remove(KEY_CURRENT_WEB_USER_ENVIRONMENT)
+            .apply()
+    }
+
+    private fun requireCurrentWebUserHash(): String {
+        return currentWebUserHash() ?: throw WalletOwnerAccessException(
+            code = "WEB_USER_REQUIRED",
+            title = "로그인 사용자 확인이 필요합니다.",
+            hint = "웹 로그인 직후 setCurrentWebUser를 먼저 호출하세요.",
+            shouldLogout = true
+        )
+    }
+
+    private fun requireWalletOwnerAccess() {
+        val currentHash = requireCurrentWebUserHash()
+        val owner = walletStateStore.getOwnerBinding()
+        val hasWallet = walletStateStore.hasWallet()
+        if (!hasWallet) return
+        if (owner == null) {
+            throw WalletOwnerAccessException(
+                code = "WALLET_OWNER_UNBOUND",
+                title = "지갑 소유자 연결이 필요합니다.",
+                hint = "기존 로컬 지갑을 현재 로그인 계정에 연결하려면 사용자 확인 후 setCurrentWebUser(bindIfUnbound=true)를 호출하세요.",
+                shouldLogout = false
+            )
+        }
+        if (owner.userHash != currentHash) {
+            throw walletOwnerMismatch(owner)
+        }
+    }
+
+    private fun walletAccessLabel(): String {
+        val hasWallet = walletStateStore.hasWallet()
+        val owner = walletStateStore.getOwnerBinding()
+        val currentHash = currentWebUserHash()
+        return when {
+            !hasWallet -> "no_wallet"
+            owner == null -> "binding_required"
+            currentHash == null -> "web_user_required"
+            owner.userHash == currentHash -> "allowed"
+            else -> "owner_mismatch"
+        }
+    }
+
+    private fun walletOwnerMismatch(owner: WalletStateStore.WalletOwnerBinding): WalletOwnerAccessException {
+        return WalletOwnerAccessException(
+            code = "WALLET_OWNER_MISMATCH",
+            title = "다른 사용자의 지갑이 있습니다.",
+            hint = "이 기기에는 다른 계정으로 생성된 지갑이 있습니다. 해당 계정으로 로그인해 지갑을 삭제한 뒤 다시 시도하세요.",
+            ownerDisplayHint = owner.displayHint?.takeIf { it.isNotBlank() },
+            shouldLogout = true
+        )
+    }
+
+    private fun emitWalletOwnerAccessFailure(
+        action: String,
+        request: JsonObject,
+        error: WalletOwnerAccessException
+    ) {
+        emitCallback(action, false) {
+            request.text("requestId")?.let { put("requestId", it) }
+            put("walletAccess", error.code.lowercase(Locale.US))
+            put("errorCode", error.code)
+            put("errorTitle", error.title)
+            put("errorHint", error.hint)
+            put("error", error.title)
+            put("shouldLogout", error.shouldLogout)
+            error.ownerDisplayHint?.let { put("ownerDisplayHint", it) }
+        }
+    }
+
+    private fun JsonObjectBuilder.putOwnerBindingFields(owner: WalletStateStore.WalletOwnerBinding) {
+        put("ownerBound", true)
+        owner.displayHint?.takeIf { it.isNotBlank() }?.let { put("ownerDisplayHint", it) }
+        owner.environment?.takeIf { it.isNotBlank() }?.let { put("ownerEnvironment", it) }
+        owner.boundAtMillis?.let { put("ownerBoundAtMs", it) }
+    }
+
+    private suspend fun didStatusSnapshot(
+        walletState: WalletStateStore.WalletState
+    ): Pair<String, XrplClientHelper.DidStatusResult> {
+        val didDocument = buildHolderDidDocument(walletState)
+        val expectedDataHash = didDocumentDataHash(didDocument)
+        val didStatus = runCatching {
+            xrplHelper.getDidStatus(
+                accountAddress = walletState.account,
+                expectedDataHashHex = expectedDataHash
+            )
+        }.getOrElse { error ->
+            XrplClientHelper.DidStatusResult(
+                account = walletState.account,
+                found = false,
+                registered = false,
+                dataHash = null,
+                uri = null,
+                hashMatches = false,
+                checkedAtUtc = nowUtcIso(),
+                error = error.message ?: "DIDSet status lookup failed"
+            )
+        }
+        return expectedDataHash to didStatus
+    }
+
+    private fun JsonObjectBuilder.putWalletFields(walletState: WalletStateStore.WalletState) {
+        put("activeAccount", walletState.account)
+        put("account", walletState.account)
+        put("holderAccount", walletState.account)
+        put("publicKey", walletState.publicKey)
+        put("authPublicKey", walletState.authPublicKey)
+        put("did", walletState.did)
+        put("holderDid", walletState.did)
+        put("didBoundAccount", walletState.account)
+        put("didAccountBindingValid", walletState.did == "did:xrpl:1:${walletState.account}")
+        put("name", walletState.name)
+        put("derivationIndex", walletState.derivationIndex)
+        walletStateStore.getOwnerBinding()?.let { putOwnerBindingFields(it) }
+        walletState.mnemonic?.let { put("mnemonic", it) }
+    }
+
+    private fun JsonObjectBuilder.putHolderDidSetStatus(
+        didStatus: XrplClientHelper.DidStatusResult,
+        expectedDataHash: String
+    ) {
+        val registrationRequired = !didStatus.registered
+        put("didSetRegistered", didStatus.registered)
+        put("holderDidSetRegistered", didStatus.registered)
+        put("holderDidSetRegistrationRequired", registrationRequired)
+        put("didRegistrationRequired", registrationRequired)
+        put("didRegistrationLabel", if (registrationRequired) "did 등록하기" else "did 등록됨")
+        put("expectedDidDocumentDataHash", expectedDataHash)
+        didStatus.dataHash?.let { put("ledgerDidDocumentDataHash", it) }
+        didStatus.uri?.let { put("didDocumentUri", it) }
+        put("didDocumentHashMatches", didStatus.hashMatches)
+        put("didLedgerEntryFound", didStatus.found)
+        put("didCheckedAtUtc", didStatus.checkedAtUtc)
+        didStatus.error?.let { put("didStatusError", it) }
     }
 
     private fun buildHolderDidDocument(walletState: WalletStateStore.WalletState): String {
@@ -4824,6 +5511,14 @@ class WalletBridge(
         val rawText: String
     )
 
+    private class WalletOwnerAccessException(
+        val code: String,
+        val title: String,
+        val hint: String,
+        val ownerDisplayHint: String? = null,
+        val shouldLogout: Boolean
+    ) : IllegalStateException(title)
+
     private companion object {
         private const val TAG = "WalletBridge"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
@@ -4833,6 +5528,9 @@ class WalletBridge(
         private const val KEY_DEVICE_ID = "device_id"
         private const val LOG_HASH_LENGTH = 12
         private const val MAX_LOG_VALUE_LENGTH = 160
+        private const val KEY_CURRENT_WEB_USER_HASH = "current_web_user_hash"
+        private const val KEY_CURRENT_WEB_USER_DISPLAY_HINT = "current_web_user_display_hint"
+        private const val KEY_CURRENT_WEB_USER_ENVIRONMENT = "current_web_user_environment"
         private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
             "dev-kyvc.khuoo.synology.me",

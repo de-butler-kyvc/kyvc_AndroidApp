@@ -27,16 +27,88 @@ class WalletStateStore(
     private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     fun hasWallet(): Boolean {
-        return prefs.contains(KEY_ACTIVE_ACCOUNT) || (prefs.contains(KEY_ENCRYPTED_SEED) && prefs.contains(KEY_IV))
+        migrateLegacyWalletIfNecessary()
+        val accounts = prefs.getStringSet(KEY_WALLET_ACCOUNTS, emptySet()).orEmpty()
+        return accounts.isNotEmpty() || prefs.contains(KEY_ACTIVE_ACCOUNT)
+    }
+
+    fun getOwnerBinding(): WalletOwnerBinding? {
+        val ownerHash = prefs.getString(KEY_OWNER_USER_HASH, null)?.takeIf { it.isNotBlank() } ?: return null
+        return WalletOwnerBinding(
+            userHash = ownerHash,
+            displayHint = prefs.getString(KEY_OWNER_DISPLAY_HINT, null),
+            environment = prefs.getString(KEY_OWNER_ENVIRONMENT, null),
+            boundAtMillis = prefs.getLong(KEY_OWNER_BOUND_AT_MS, 0L).takeIf { it > 0L }
+        )
+    }
+
+    fun bindOwner(
+        userHash: String,
+        displayHint: String? = null,
+        environment: String? = null
+    ): WalletOwnerBinding {
+        require(userHash.isNotBlank()) { "userHash is required" }
+        val existing = getOwnerBinding()
+        require(existing == null || existing.userHash == userHash) {
+            "Wallet is already bound to another web user"
+        }
+        val now = System.currentTimeMillis()
+        prefs.edit()
+            .putString(KEY_OWNER_USER_HASH, userHash)
+            .putString(KEY_OWNER_DISPLAY_HINT, displayHint.orEmpty())
+            .putString(KEY_OWNER_ENVIRONMENT, environment.orEmpty())
+            .putLong(KEY_OWNER_BOUND_AT_MS, existing?.boundAtMillis ?: now)
+            .apply()
+        return getOwnerBinding() ?: WalletOwnerBinding(
+            userHash = userHash,
+            displayHint = displayHint,
+            environment = environment,
+            boundAtMillis = now
+        )
+    }
+
+    fun ownerMatches(userHash: String): Boolean {
+        val owner = getOwnerBinding() ?: return false
+        return owner.userHash == userHash
+    }
+
+    fun clearAllWalletsAndOwner() {
+        migrateLegacyWalletIfNecessary()
+        val accounts = prefs.getStringSet(KEY_WALLET_ACCOUNTS, emptySet())?.toSet().orEmpty()
+        val editor = prefs.edit()
+        accounts.forEach { account ->
+            editor.remove("wallet:${account}:encrypted_seed")
+                .remove("wallet:${account}:seed_iv")
+                .remove("wallet:${account}:public_key")
+                .remove("wallet:${account}:auth_encrypted_private_key")
+                .remove("wallet:${account}:auth_private_key_iv")
+                .remove("wallet:${account}:auth_public_key")
+                .remove("wallet:${account}:did")
+                .remove("wallet:${account}:encrypted_mnemonic")
+                .remove("wallet:${account}:mnemonic_iv")
+                .remove("wallet:${account}:index")
+                .remove("wallet:${account}:name")
+        }
+        editor.remove(KEY_WALLET_ACCOUNTS)
+            .remove(KEY_ACTIVE_ACCOUNT)
+            .remove(KEY_OWNER_USER_HASH)
+            .remove(KEY_OWNER_DISPLAY_HINT)
+            .remove(KEY_OWNER_ENVIRONMENT)
+            .remove(KEY_OWNER_BOUND_AT_MS)
+            .apply()
     }
 
     fun createWallet(overwrite: Boolean = false): WalletState {
         migrateLegacyWalletIfNecessary()
         
         // Multi-wallet is now HD-first.
-        // If overwrite is false and we already have wallets, return the active one instead of creating a new one.
+        // If overwrite is false and we already have wallets, return an existing wallet instead of creating a new one.
         if (!overwrite) {
             getWalletStateOrNull()?.let { return it }
+            listWallets().firstOrNull()?.let { existing ->
+                prefs.edit().putString(KEY_ACTIVE_ACCOUNT, existing.account).apply()
+                return existing
+            }
         }
         
         val mnemonic = walletManager.createRandomMnemonic()
@@ -78,7 +150,13 @@ class WalletStateStore(
 
     fun getWalletStateOrNull(): WalletState? {
         migrateLegacyWalletIfNecessary()
-        val activeAccount = prefs.getString(KEY_ACTIVE_ACCOUNT, null) ?: return null
+        val activeAccount = prefs.getString(KEY_ACTIVE_ACCOUNT, null)
+            ?: prefs.getStringSet(KEY_WALLET_ACCOUNTS, emptySet())
+                .orEmpty()
+                .sorted()
+                .firstOrNull()
+                ?.also { prefs.edit().putString(KEY_ACTIVE_ACCOUNT, it).apply() }
+            ?: return null
         return getWalletByAccount(activeAccount)
     }
 
@@ -453,6 +531,13 @@ class WalletStateStore(
         }
     }
 
+    data class WalletOwnerBinding(
+        val userHash: String,
+        val displayHint: String?,
+        val environment: String?,
+        val boundAtMillis: Long?
+    )
+
     private data class HolderAuthKey(
         val publicKeyHex: String,
         val privateKeyHex: String
@@ -499,6 +584,10 @@ class WalletStateStore(
         private const val KEY_MNEMONIC_IV = "mnemonic_iv"
         private const val KEY_WALLET_ACCOUNTS = "wallet_accounts"
         private const val KEY_ACTIVE_ACCOUNT = "active_account"
+        private const val KEY_OWNER_USER_HASH = "wallet_owner_user_hash"
+        private const val KEY_OWNER_DISPLAY_HINT = "wallet_owner_display_hint"
+        private const val KEY_OWNER_ENVIRONMENT = "wallet_owner_environment"
+        private const val KEY_OWNER_BOUND_AT_MS = "wallet_owner_bound_at_ms"
         private const val ANDROID_KEY_STORE = "AndroidKeyStore"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128

@@ -2,11 +2,15 @@
 
 이 문서는 웹이 Android WebView 브리지를 호출할 때 사용하는 최신 호출 규격 문서다. 브리지 함수가 바뀌면 이 문서를 같이 갱신한다.
 
-- Spec Version: `1.5.2`
-- Last Updated: `2026-05-12`
+- Spec Version: `1.6.0`
+- Last Updated: `2026-05-13`
 
 ## Changelog
 
+- `1.6.0` (2026-05-13)
+  - 웹 로그인 사용자와 로컬 지갑 owner 바인딩 브릿지 추가: `setCurrentWebUser`, `getWalletOwnerStatus`, `deleteLocalWalletData`, `logoutAndDeleteLocalWalletData`
+  - 지갑/VC/XRPL 계열 브릿지는 현재 웹 사용자와 로컬 지갑 owner가 일치할 때만 지갑 정보를 반환
+  - owner 불일치 로그인 시 자동 삭제하지 않고 `walletAccess=owner_mismatch`, `deleteRequired=true`를 반환하도록 규격화
 - `1.5.2` (2026-05-12)
   - `getDeviceInfo` 브릿지 추가
   - `scanIssueQrCode`가 PC QR 원문을 `qrData`로 반환하는 계약 명시
@@ -45,6 +49,10 @@
 - 웹은 브리지 함수만 호출한다.
 - 인증, 민감정보 처리, 백엔드 API 호출은 네이티브가 담당한다.
 - 웹은 결과만 `window.onAndroidResult(result)` 콜백으로 받는다.
+- 웹 로그인 직후 지갑 관련 브릿지를 호출하기 전에 `setCurrentWebUser`로 현재 로그인 사용자를 Android에 알려야 한다.
+- 로컬 지갑은 최초 생성/복구 또는 명시적 기존 지갑 바인딩 시 웹 로그인 사용자에 묶인다.
+- 다른 웹 계정으로 로그인한 상태에서 기존 로컬 지갑 owner와 불일치하면 Android는 기존 로컬 앱 생성 지갑을 삭제하고 새 계정에서 새 지갑 생성/직접 복구 흐름으로 전환한다.
+- 앱 진입 시 네이티브 테스트 잠금 화면은 띄우지 않는다. 인증은 웹이 `requestNativeAuth`를 호출할 때만 네이티브로 표시한다.
 - PIN/패턴 원문은 웹에서 브리지로 보내지 않는다.
 - 지문/PIN/패턴 UI는 네이티브가 띄운다.
 - `requestNativeAuth(method="pin")` 호출 시 PIN 입력 화면은 WebView가 아닌 네이티브 `UnlockActivity`에서 렌더링된다. UI는 `app/src/main/assets/pinExample.html` 디자인을 기준으로 구현한다.
@@ -73,6 +81,8 @@
 ## 현재 외부 호출 대상
 
 - 인증 상태 조회 / 네이티브 인증 요청 / 이메일 인증 완료 처리 / 로그아웃
+- 웹 로그인 사용자 owner 바인딩 / owner 상태 조회 / owner 일치 시 로컬 지갑 삭제
+- 앱 설치 기준 기기 정보 조회
 - 지갑 생성 / 조회 / seed 보기 / 비밀구문 보기 / 복구
 - XRP 잔액 / 입금 주소 / 거래내역 / XRP 송금
 - Holder DIDSet 등록
@@ -93,6 +103,11 @@
 | 메서드 | 상태 | 비고 |
 | --- | --- | --- |
 | `getAuthStatus` | stable | 인증/잠금 상태 단일 조회 기준 |
+| `getDeviceInfo` | stable | 웹 기기 등록용 stable device id/app/device 정보 조회 |
+| `setCurrentWebUser` | stable | 웹 로그인 사용자와 로컬 지갑 owner 접근권한 확인/바인딩 |
+| `getWalletOwnerStatus` | stable | 현재 웹 사용자와 로컬 지갑 owner 상태 조회 |
+| `deleteLocalWalletData` | stable | owner 일치 + 인증 세션 상태에서 로컬 지갑 데이터 삭제 |
+| `logoutAndDeleteLocalWalletData` | stable | 인증 세션 상태에서 로컬 지갑 데이터 삭제 후 로그아웃 |
 | `requestNativeAuth` | stable | PIN/패턴/지문 네이티브 인증 진입 |
 | `requestPinReset` | stable | 웹에서 네이티브 PIN 재설정 화면 호출 |
 | `completeEmailVerification` | stable | 5회 실패 잠금 해제 플로우 |
@@ -112,6 +127,7 @@
 | `requestMnemonicBackup` | stable | 네이티브 복구 문구 백업 화면 호출 |
 | `requestWalletRestore` | stable | 네이티브 지갑 복구 화면 호출 |
 | `submitHolderDidSet` | stable | DIDSet 해시 등록 |
+| `checkHolderDidSet` | stable | 활성 지갑 DIDSet ledger 등록 여부 조회 |
 | `getWalletAssets` | stable | XRP/TrustLine 조회 |
 | `getWalletDepositInfo` | stable | 입금 주소/QR 조회 |
 | `copyWalletAddress` | stable | 주소 클립보드 복사 |
@@ -132,6 +148,12 @@
 | `scanQRCode` | experimental | 범용 QR 스캔 |
 | `scanIssueQrCode` | stable | 증명서 발급 QR 스캔 |
 | `scanPresentationQrCode` | stable | 증명서 제출 요청 QR 스캔 |
+| `requestCredentialIssueComplete` | stable | 네이티브 발급 완료 화면 |
+| `requestCredentialIssueConfirm` | stable | 네이티브 발급 확인 화면 |
+| `requestCredentialIssueConfirm1` | legacy alias | `requestCredentialIssueConfirm`과 같은 화면 |
+| `requestCredentialIssueConfirm2` | legacy alias | `requestCredentialIssueConfirm`과 같은 화면 |
+| `requestCredentialDetail` | stable | 네이티브 증명서 상세 화면 |
+| `requestCredentialSubmit` | stable | 네이티브 증명서 제출 화면 |
 
 ## 공통 호출 형식
 
@@ -223,6 +245,57 @@ deviceId 정책:
 
 ## 인증 브리지
 
+### 0. 기기 정보 조회
+
+Method: `getDeviceInfo`
+
+웹의 `/m` 증명서 발급 플로우에서 백엔드 기기 등록 전에 앱 설치 기준 기기 식별자를 조회할 때 사용한다.
+
+Request:
+
+```json
+{
+  "action": "GET_DEVICE_INFO",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "issuedAt": "2026-05-12T10:00:00Z"
+}
+```
+
+Response:
+
+```json
+{
+  "action": "GET_DEVICE_INFO",
+  "ok": true,
+  "source": "Android",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "deviceId": "stable-device-id",
+  "deviceName": "Samsung Galaxy S24",
+  "os": "Android 15",
+  "appVersion": "1.0",
+  "publicKey": "optional-holder-auth-public-key"
+}
+```
+
+규칙:
+
+- `deviceId`는 앱 설치 기준 UUID이며 앱 재시작 후에도 유지된다.
+- 앱 삭제/재설치 또는 앱 데이터 삭제 시 새 `deviceId`가 생성될 수 있다.
+- `publicKey`는 활성 지갑이 있을 때 holder authentication public key를 반환한다.
+- `requestId`, `action`, `issuedAt`은 공통 요청 검증 대상이며 TTL은 30초다.
+
+실패:
+
+```json
+{
+  "action": "GET_DEVICE_INFO",
+  "ok": false,
+  "source": "Android",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "error": "기기 정보를 확인할 수 없습니다."
+}
+```
+
 ### 1. 인증 상태 조회
 
 Method: `getAuthStatus`
@@ -268,6 +341,204 @@ Response:
 - `sessionExpiresAtMs`: 세션 만료 시각(epoch ms)
 - `xrpPaymentAuthReady`: 최근 송금 재인증이 유효한지
 - `xrpPaymentAuthRemainingMs`: 송금 재인증의 남은 유효 시간(ms)
+
+<!-- ### 1-0. 앱 진입 자동 로그인 세션 이벤트
+
+앱은 WebView 페이지 로드가 끝난 직후 30분 인증 세션이 살아 있으면 웹 호출 없이 아래 이벤트를 자동 발행한다.
+
+```json
+{
+  "action": "NATIVE_AUTH_SESSION",
+  "ok": true,
+  "authenticated": true,
+  "autoLogin": true,
+  "sessionReused": true,
+  "sessionUnlocked": true,
+  "sessionRemainingMs": 1423550,
+  "sessionExpiresAtMs": 1778280000000,
+  "walletReady": true,
+  "walletAccess": "allowed"
+}
+```
+
+웹은 이 이벤트를 받으면 사용자가 인증 버튼을 누르도록 만들지 말고 로그인/인증 페이지를 바로 통과시킨다. `walletAccess`가 `owner_mismatch`이면 지갑 화면은 숨기고 계정 불일치 안내로 보낸다.
+-->
+
+### 1-1. 웹 로그인 사용자 설정 / 지갑 owner 확인
+
+Method: `setCurrentWebUser`
+
+웹 로그인 성공 직후, 지갑 관련 브릿지를 호출하기 전에 반드시 호출한다. `userId`는 이메일이 아니라 서버가 발급하는 변경 불가능한 stable user id를 사용한다.
+
+Request:
+
+```json
+{
+  "action": "SET_CURRENT_WEB_USER",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "issuedAt": "2026-05-13T10:00:00Z",
+  "userId": "server-stable-user-id",
+  "displayHint": "k***@example.com",
+  "environment": "testnet",
+  "bindIfUnbound": false
+}
+```
+
+성공, 지갑 없음:
+
+```json
+{
+  "action": "SET_CURRENT_WEB_USER",
+  "ok": true,
+  "walletAccess": "no_wallet",
+  "walletReady": false,
+  "ownerBound": false
+}
+```
+
+성공, owner 일치:
+
+```json
+{
+  "action": "SET_CURRENT_WEB_USER",
+  "ok": true,
+  "walletAccess": "allowed",
+  "walletReady": true,
+  "ownerBound": true,
+  "ownerDisplayHint": "k***@example.com",
+  "ownerEnvironment": "testnet"
+}
+```
+
+기존 owner 없는 지갑:
+
+```json
+{
+  "action": "SET_CURRENT_WEB_USER",
+  "ok": true,
+  "walletAccess": "binding_required",
+  "walletReady": true,
+  "ownerBound": false,
+  "requiresNativeAuth": true,
+  "errorHint": "기존 로컬 지갑을 현재 로그인 계정에 연결하려면 사용자 확인 후 bindIfUnbound=true로 다시 호출하세요."
+}
+```
+
+owner 불일치:
+
+```json
+{
+  "action": "SET_CURRENT_WEB_USER",
+  "ok": true,
+  "walletAccess": "owner_mismatch",
+  "walletReady": false,
+  "ownerBound": true,
+  "deleteRequired": true,
+  "ownerDisplayHint": "a***@example.com",
+  "errorHint": "다른 계정의 로컬 지갑이 있습니다. 지갑 삭제는 웹에서 deleteLocalWalletData 브릿지를 명시적으로 호출할 때만 실행됩니다."
+}
+```
+
+규칙:
+
+- `userId`는 서버의 stable id를 사용한다. 이메일/전화번호처럼 바뀔 수 있는 값만으로 바인딩하지 않는다.
+- Android는 `environment + userId`를 SHA-256 해시로 저장하며 원문 user id를 저장하지 않는다.
+- 지갑이 없는 상태에서 `createWallet` 또는 `restoreWallet`이 성공하면 현재 웹 사용자에 owner가 저장된다.
+- owner 없는 기존 로컬 지갑은 자동 바인딩하지 않는다. 웹에서 사용자 확인 후 `bindIfUnbound=true`로 재호출한다.
+- `owner_mismatch`면 웹은 기존 지갑 값을 표시하지 말고, 사용자가 지갑 삭제를 명시적으로 선택한 경우에만 `deleteLocalWalletData` 또는 `logoutAndDeleteLocalWalletData`를 호출한다.
+
+### 1-2. 지갑 owner 상태 조회
+
+Method: `getWalletOwnerStatus`
+
+Request:
+
+```json
+{
+  "action": "GET_WALLET_OWNER_STATUS",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "issuedAt": "2026-05-13T10:00:00Z"
+}
+```
+
+Response 주요 필드:
+
+```json
+{
+  "action": "GET_WALLET_OWNER_STATUS",
+  "ok": true,
+  "walletAccess": "allowed",
+  "walletCount": 1,
+  "walletReady": true,
+  "ownerBound": true,
+  "currentWebUserSet": true
+}
+```
+
+`walletAccess` 값:
+
+- `no_wallet`: 로컬 지갑 없음
+- `allowed`: 현재 웹 사용자와 지갑 owner 일치
+- `binding_required`: 기존 로컬 지갑에 owner 없음
+- `web_user_required`: `setCurrentWebUser` 미호출
+- `owner_mismatch`: 현재 웹 사용자와 owner 불일치
+
+### 1-3. 로컬 지갑 데이터 삭제
+
+Method: `deleteLocalWalletData`
+
+현재 웹 사용자와 로컬 지갑 owner가 일치하고, 활성 네이티브 인증 세션이 있을 때 전체 로컬 지갑 데이터를 삭제한다. 다른 owner 지갑 삭제를 명시적으로 허용해야 하는 운영 화면에서는 `allowOwnerMismatch=true`를 함께 보낼 수 있다.
+
+Request:
+
+```json
+{
+  "action": "DELETE_LOCAL_WALLET_DATA",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "issuedAt": "2026-05-13T10:00:00Z"
+}
+```
+
+Response:
+
+```json
+{
+  "action": "DELETE_LOCAL_WALLET_DATA",
+  "ok": true,
+  "deleted": true,
+  "walletReady": false
+}
+```
+
+### 1-4. 로컬 지갑 삭제 후 로그아웃
+
+Method: `logoutAndDeleteLocalWalletData`
+
+웹에서 “지갑 삭제 + 로그아웃” 버튼에 연결할 때 사용한다. 활성 네이티브 인증 세션이 필요하다.
+
+Request:
+
+```json
+{
+  "action": "LOGOUT_AND_DELETE_LOCAL_WALLET_DATA",
+  "requestId": "550e8400-e29b-41d4-a716-446655440000",
+  "issuedAt": "2026-05-13T10:00:00Z"
+}
+```
+
+Response:
+
+```json
+{
+  "action": "LOGOUT_AND_DELETE_LOCAL_WALLET_DATA",
+  "ok": true,
+  "deleted": true,
+  "walletReady": false,
+  "sessionUnlocked": false,
+  "walletDisconnected": true
+}
+```
+
 
 ### 2. 네이티브 인증 요청
 
@@ -1161,6 +1432,65 @@ getWalletInfo
 -> XRPL DIDSet에 URI + canonical DID Document hash 등록
 ```
 
+등록 성공 또는 상태 조회 응답 주요 필드:
+
+```json
+{
+  "didSetRegistered": true,
+  "holderDidSetRegistered": true,
+  "holderDidSetRegistrationRequired": false,
+  "didRegistrationRequired": false,
+  "didRegistrationLabel": "did 등록됨",
+  "didLedgerEntryFound": true,
+  "didDocumentHashMatches": true,
+  "expectedDidDocumentDataHash": "1220...",
+  "ledgerDidDocumentDataHash": "1220..."
+}
+```
+
+웹 표시 기준:
+
+- `didSetRegistered === false` 또는 `didRegistrationRequired === true`면 지갑/증명서 제출 준비 화면에 `did 등록하기` 문구와 등록 버튼을 표시한다.
+- `didSetRegistered === true`면 `did 등록됨` 또는 등록 버튼 숨김으로 처리한다.
+- `didDocumentHashMatches === false`면 기존 DIDSet은 있지만 현재 holder auth key의 DID Document와 ledger hash가 다르다는 뜻이다. 이 경우에도 `did 등록하기`로 재등록을 유도한다.
+- `getWalletInfo`, `listWallets`, `switchWallet`, `createWallet`, `deriveNextAccount`, `setAccountName`, `upgradeToMnemonic` 응답은 활성 지갑 기준 DIDSet 상태 필드를 포함한다. 웹은 지갑 전환 직후 이 응답의 `didRegistrationLabel`로 잔액 아래 링크 문구를 즉시 갱신한다.
+- DID는 계정별 값이다. 웹은 `account`/`holderAccount`와 `did`/`holderDid`를 같은 응답에서 받은 값으로 함께 갱신해야 하며, 이전 계정의 DID를 캐시해서 재사용하면 안 된다.
+- `didAccountBindingValid === false`가 오면 앱 저장소의 account-DID 바인딩이 깨진 상태로 보고 지갑 재조회/복구 점검을 유도한다.
+
+계정 바인딩 필드:
+
+```json
+{
+  "account": "rHolder...",
+  "holderAccount": "rHolder...",
+  "did": "did:xrpl:1:rHolder...",
+  "holderDid": "did:xrpl:1:rHolder...",
+  "didBoundAccount": "rHolder...",
+  "didAccountBindingValid": true
+}
+```
+
+### 12. Holder DIDSet 상태 조회
+
+Method: `checkHolderDidSet`
+
+Request:
+
+```json
+{}
+```
+
+호출 흐름:
+
+```text
+checkHolderDidSet
+-> 활성 지갑 DID Document 생성
+-> canonical DID Document hash 계산
+-> XRPL account_objects(type=did) 조회
+-> ledger Data hash와 현재 DID Document hash 비교
+-> did 등록하기 / did 등록됨 표시값 반환
+```
+
 ## Credential / XRPL 브리지
 
 ### 1. VC 저장
@@ -1245,6 +1575,7 @@ Response:
 ### 2. 증명서 요약 조회
 
 저장된 증명서의 화면 표시용 메타데이터만 반환한다. raw VC/SD-JWT 원문은 포함하지 않는다.
+응답은 현재 활성 지갑의 `holderAccount`와 일치하는 증명서만 포함한다. 한 기기에 여러 지갑/계정이 있어도 다른 지갑에서 발급받은 증명서는 섞어서 반환하지 않는다.
 
 Method: `getCredentialSummaries`
 
@@ -1260,6 +1591,8 @@ Response 주요 필드:
 {
   "action": "GET_CREDENTIAL_SUMMARIES",
   "ok": true,
+  "activeAccount": "rHolder...",
+  "filteredByHolderAccount": true,
   "count": 1,
   "credentials": [
     {
@@ -1293,6 +1626,8 @@ Response 주요 필드:
 
 - 증명서 카드/목록 화면은 이 브릿지를 우선 사용한다.
 - 상세 검증이나 원문 제출이 필요할 때만 `listCredentials` 또는 저장된 credential payload를 사용한다.
+- 지갑 전환 후에는 `getCredentialSummaries`를 다시 호출한다. 웹이 이전 지갑의 목록을 캐시하고 있으면 반드시 비운 뒤 새 응답으로 다시 그린다.
+- `LIST_CREDENTIALS`, `GET_CREDENTIAL_SUMMARIES`, `REFRESH_CREDENTIAL_STATUSES`는 모두 활성 지갑 기준으로 필터링된 결과를 반환한다.
 
 ### 3. XRPL CredentialAccept 제출
 
@@ -1660,6 +1995,76 @@ Response:
 - `scanIssueQrCode`의 `qrData`는 QR에 들어 있던 raw string 그대로다. JSON parse/검증은 WebView 또는 backend가 수행한다.
 - Native는 PC Credential Offer QR 값을 필드별로 재조립하지 않는다. QR 값이 JSON 문자열이어도 URL이어도 그대로 반환한다.
 - 스캔한 원문 `qrData`에는 민감한 challenge나 endpoint가 들어갈 수 있으므로 원격 로그에 저장하지 않는다.
+
+## 네이티브 증명서 화면 브리지
+
+아래 화면은 WebView 페이지 이동이 아니라 Android 네이티브 오버레이로 표시한다. 웹은 화면 진입 요청과 결과 콜백만 처리한다.
+
+지원 화면:
+
+- `requestCredentialIssueComplete`: `발급완료.png`
+- `requestCredentialIssueConfirm`: 발급 확인 화면. `발급확인1.png`와 `발급확인2.png`는 같은 화면의 짧은/긴 캡처이므로 하나의 스크롤 화면으로 처리한다.
+- `requestCredentialDetail`: `증명서 상세.png`
+- `requestCredentialSubmit`: `증명서 제출.png`
+
+공통 Request 예시:
+
+```json
+{
+  "action": "REQUEST_CREDENTIAL_DETAIL",
+  "requestId": "0c8f6d1a-3648-4cb6-a1e1-515ce60f5dd5",
+  "issuedAt": "2026-05-12T10:00:00Z",
+  "issuerName": "법원행정처",
+  "requesterName": "신한은행",
+  "credentialTitle": "법인등록증명서",
+  "submitCredentialTitle": "법인 KYC 증명서",
+  "holderName": "주식회사 케이와이브이씨",
+  "registrationNumber": "110111-1234567",
+  "companyType": "주식회사",
+  "establishedAt": "2020년 3월 15일",
+  "representativeName": "홍길동",
+  "address": "서울특별시 강남구 테헤란로 123",
+  "did": "DID:kyvc:corp:240315",
+  "issuedAtFull": "2026.05.07 14:32",
+  "expiresAt": "2027.05.06",
+  "transactionHash": "0x7f3a92e1c4d28b1a..."
+}
+```
+
+필수 규칙:
+
+- `action`, `requestId`, `issuedAt`은 공통 브리지 검증 대상이다.
+- 발급 확인과 증명서 제출 화면의 확인/거부 버튼은 스크롤과 독립된 하단 고정 영역에 표시한다.
+- 기존 테스트 페이지 호환을 위해 `requestCredentialIssueConfirm1`, `requestCredentialIssueConfirm2`는 남겨두지만, 둘 다 동일한 발급 확인 화면을 연다. 신규 웹은 `requestCredentialIssueConfirm`을 사용한다.
+- 화면은 PNG 시안을 기준으로 네이티브 Compose에서 재현한다.
+- 민감한 raw SD-JWT, disclosure 원문, seed는 이 화면 요청 payload에 넣지 않는다.
+
+공통 Response 예시:
+
+```json
+{
+  "action": "REQUEST_CREDENTIAL_DETAIL",
+  "ok": true,
+  "requestId": "0c8f6d1a-3648-4cb6-a1e1-515ce60f5dd5",
+  "screen": "CredentialDetail",
+  "result": "showQr",
+  "confirmed": true
+}
+```
+
+결과값:
+
+- 발급 완료: `viewCredential`, `home`
+- 발급 확인: `confirm`, `reject`
+- 증명서 상세: `showQr`
+- 증명서 제출: `submit`, `reject`
+- `confirm`, `reject`, `submit`, `showQr`, `viewCredential`, `home`은 사용자가 정상적으로 선택한 결과이므로 `ok=true`로 반환한다.
+- 뒤로가기/닫기: `ok=false`, `result=cancel`
+
+웹 처리 기준:
+
+- 발급 확인/제출 화면에서 사용자가 거부를 누른 경우도 브릿지 호출 자체는 성공이다. 웹은 `ok`가 아니라 `result === "reject"`로 거부 흐름을 처리한다.
+- `ok=false`는 네이티브 화면을 닫았거나 브릿지 검증에 실패한 경우로만 본다.
 
 ## 웹에서 꼭 처리해야 하는 상태값
 

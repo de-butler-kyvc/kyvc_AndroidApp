@@ -72,6 +72,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -106,6 +107,30 @@ private enum class AuthMode {
     Pattern
 }
 
+private enum class CredentialNativeScreen {
+    IssueComplete,
+    IssueConfirm,
+    CredentialDetail,
+    CredentialSubmit;
+
+    companion object {
+        fun from(value: String): CredentialNativeScreen {
+            return when (value) {
+                "issueComplete" -> IssueComplete
+                "issueConfirm", "issueConfirm1", "issueConfirm2" -> IssueConfirm
+                "credentialDetail" -> CredentialDetail
+                "credentialSubmit" -> CredentialSubmit
+                else -> CredentialDetail
+            }
+        }
+    }
+}
+
+private data class CredentialNativeScreenRequest(
+    val screen: CredentialNativeScreen,
+    val requestJson: String
+)
+
 class MainActivity : FragmentActivity() {
     private val mainViewModel: MainViewModel by viewModels()
     private lateinit var bridge: WalletBridge
@@ -116,6 +141,7 @@ class MainActivity : FragmentActivity() {
     private val pinResetRequestJson = mutableStateOf<String?>(null)
     private val mnemonicBackupRequest = mutableStateOf<Pair<String, String>?>(null)
     private val walletRestoreRequestJson = mutableStateOf<String?>(null)
+    private val credentialNativeScreenRequest = mutableStateOf<CredentialNativeScreenRequest?>(null)
     private var pendingQrRequestJson: String? = null
     private val cameraPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -196,6 +222,12 @@ class MainActivity : FragmentActivity() {
             launchWalletRestore = { requestJson ->
                 walletRestoreRequestJson.value = requestJson
             },
+            launchCredentialNativeScreen = { screen, requestJson ->
+                credentialNativeScreenRequest.value = CredentialNativeScreenRequest(
+                    screen = CredentialNativeScreen.from(screen),
+                    requestJson = requestJson
+                )
+            },
             onSessionStatusChanged = { unlocked ->
                 isUnlocked.value = unlocked
             }
@@ -224,6 +256,19 @@ class MainActivity : FragmentActivity() {
                         if (!restoreRequest.isNullOrBlank()) {
                             walletRestoreRequestJson.value = null
                             bridge.onWalletRestoreCancelled(restoreRequest)
+                            return@BackHandler
+                        }
+                        val credentialRequest = credentialNativeScreenRequest.value
+                        if (credentialRequest != null) {
+                            credentialNativeScreenRequest.value = null
+                            bridge.onCredentialNativeScreenResult(
+                                requestJson = credentialRequest.requestJson,
+                                fallbackAction = credentialRequest.screen.fallbackAction(),
+                                screen = credentialRequest.screen.name,
+                                ok = false,
+                                result = "cancel",
+                                errorMessage = "사용자가 화면을 닫았습니다."
+                            )
                             return@BackHandler
                         }
                         val pinResetRequest = pinResetRequestJson.value
@@ -425,6 +470,38 @@ class MainActivity : FragmentActivity() {
                                     }
                                 )
                             }
+                            val nativeCredentialRequest = credentialNativeScreenRequest.value
+                            if (nativeCredentialRequest != null) {
+                                val uiData = remember(nativeCredentialRequest.requestJson) {
+                                    CredentialUiData.from(nativeCredentialRequest.requestJson)
+                                }
+                                NativeCredentialFlowScreen(
+                                    screen = nativeCredentialRequest.screen,
+                                    data = uiData,
+                                    onBack = {
+                                        credentialNativeScreenRequest.value = null
+                                        bridge.onCredentialNativeScreenResult(
+                                            requestJson = nativeCredentialRequest.requestJson,
+                                            fallbackAction = nativeCredentialRequest.screen.fallbackAction(),
+                                            screen = nativeCredentialRequest.screen.name,
+                                            ok = false,
+                                            result = "cancel",
+                                            errorMessage = "사용자가 화면을 닫았습니다."
+                                        )
+                                    },
+                                    onResult = { result ->
+                                        credentialNativeScreenRequest.value = null
+                                        bridge.onCredentialNativeScreenResult(
+                                            requestJson = nativeCredentialRequest.requestJson,
+                                            fallbackAction = nativeCredentialRequest.screen.fallbackAction(),
+                                            screen = nativeCredentialRequest.screen.name,
+                                            ok = true,
+                                            result = result,
+                                            errorMessage = null
+                                        )
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -491,6 +568,12 @@ class MainActivity : FragmentActivity() {
         ) -> Unit,
         content: @Composable (unlocked: Boolean) -> Unit
     ) {
+        LaunchedEffect(Unit) {
+            unlockedState.value = true
+        }
+        content(true)
+        return
+
         val appLockStore = mainViewModel.appContainer.appLockStore
         val lifecycleOwner = LocalLifecycleOwner.current
         var unlocked by unlockedState
@@ -1109,7 +1192,7 @@ private fun qrOverlayCopy(requestJson: String): QrOverlayCopy {
         mode == "issue" || "VC_ISSUE" in actionType || "CREDENTIAL" in actionType -> QrOverlayCopy(
             title = "QR 코드를 스캔하세요",
             subtitle = "증명서 발급 QR을 화면 안에 맞춰주세요.",
-            footer = "혹은 지갑에서 바로 발급받기"
+            footer = null
         )
         mode == "presentation" || "VP_REQUEST" in actionType || "PRESENTATION" in actionType -> QrOverlayCopy(
             title = "QR 코드를 스캔하세요",
@@ -1121,6 +1204,665 @@ private fun qrOverlayCopy(requestJson: String): QrOverlayCopy {
             subtitle = "QR을 화면 안에 맞춰주세요.",
             footer = null
         )
+    }
+}
+
+private fun CredentialNativeScreen.fallbackAction(): String {
+    return when (this) {
+        CredentialNativeScreen.IssueComplete -> "REQUEST_CREDENTIAL_ISSUE_COMPLETE"
+        CredentialNativeScreen.IssueConfirm -> "REQUEST_CREDENTIAL_ISSUE_CONFIRM"
+        CredentialNativeScreen.CredentialDetail -> "REQUEST_CREDENTIAL_DETAIL"
+        CredentialNativeScreen.CredentialSubmit -> "REQUEST_CREDENTIAL_SUBMIT"
+    }
+}
+
+private data class CredentialUiData(
+    val issuerName: String = "법원행정처",
+    val requesterName: String = "신한은행",
+    val credentialTitle: String = "법인등록증명서",
+    val submitCredentialTitle: String = "법인 KYC 증명서",
+    val holderName: String = "주식회사 케이와이브이씨",
+    val registrationNumber: String = "110111-1234567",
+    val companyType: String = "주식회사",
+    val establishedAt: String = "2020년 3월 15일",
+    val representativeName: String = "홍길동",
+    val address: String = "서울특별시 강남구 테헤란로 123",
+    val did: String = "DID:kyvc:corp:240315",
+    val issuedAt: String = "2026.05.07",
+    val issuedAtFull: String = "2026.05.07 14:32",
+    val expiresAt: String = "2027.05.06",
+    val transactionHash: String = "0x7f3a92e1c4d28b1a...",
+    val statusText: String = "정상 · 검증 가능",
+    val didRegistrationLabel: String = "did 등록하기"
+) {
+    companion object {
+        fun from(requestJson: String): CredentialUiData {
+            val json = runCatching { JSONObject(requestJson) }.getOrNull()
+            fun text(name: String, fallback: String): String {
+                return json?.optString(name)?.takeIf { it.isNotBlank() } ?: fallback
+            }
+            return CredentialUiData(
+                issuerName = text("issuerName", "법원행정처"),
+                requesterName = text("requesterName", "신한은행"),
+                credentialTitle = text("credentialTitle", "법인등록증명서"),
+                submitCredentialTitle = text("submitCredentialTitle", "법인 KYC 증명서"),
+                holderName = text("holderName", "주식회사 케이와이브이씨"),
+                registrationNumber = text("registrationNumber", "110111-1234567"),
+                companyType = text("companyType", "주식회사"),
+                establishedAt = text("establishedAt", "2020년 3월 15일"),
+                representativeName = text("representativeName", "홍길동"),
+                address = text("address", "서울특별시 강남구 테헤란로 123"),
+                did = text("holderDid", text("did", "did:xrpl:1:rHolder...")),
+                issuedAt = text("displayIssuedAt", text("issuedDate", "2026.05.07")),
+                issuedAtFull = text("issuedAtFull", "2026.05.07 14:32"),
+                expiresAt = text("expiresAt", "2027.05.06"),
+                transactionHash = text("transactionHash", "0x7f3a92e1c4d28b1a..."),
+                statusText = text("statusText", "정상 · 검증 가능"),
+                didRegistrationLabel = text("didRegistrationLabel", "did 등록하기")
+            )
+        }
+    }
+}
+
+@Composable
+private fun NativeCredentialFlowScreen(
+    screen: CredentialNativeScreen,
+    data: CredentialUiData,
+    onBack: () -> Unit,
+    onResult: (String) -> Unit
+) {
+    when (screen) {
+        CredentialNativeScreen.IssueComplete -> IssueCompleteScreen(data, onResult)
+        CredentialNativeScreen.IssueConfirm -> IssueConfirmScreen(data, onBack = onBack, onResult = onResult)
+        CredentialNativeScreen.CredentialDetail -> CredentialDetailScreen(data, onBack = onBack, onResult = onResult)
+        CredentialNativeScreen.CredentialSubmit -> CredentialSubmitScreen(data, onBack = onBack, onResult = onResult)
+    }
+}
+
+@Composable
+private fun CredentialNativeScaffold(
+    title: String,
+    onBack: (() -> Unit)?,
+    bottomBar: (@Composable () -> Unit)? = null,
+    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFFFBFAFF))
+            .statusBarsPadding()
+            .navigationBarsPadding()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = if (bottomBar == null) 0.dp else 118.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+        ) {
+            CredentialTopBar(title = title, onBack = onBack)
+            Spacer(modifier = Modifier.height(26.dp))
+            content()
+            Spacer(modifier = Modifier.height(28.dp))
+        }
+        if (bottomBar != null) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(Color.White)
+                    .border(1.dp, Color(0xFFECECEA))
+                    .padding(horizontal = 22.dp, vertical = 10.dp)
+                    .navigationBarsPadding()
+            ) {
+                bottomBar()
+            }
+        }
+    }
+}
+
+@Composable
+private fun CredentialTopBar(
+    title: String,
+    onBack: (() -> Unit)?
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(40.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (onBack != null) {
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFF5F5F3))
+                    .clickable { onBack() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("<", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
+        } else {
+            Spacer(modifier = Modifier.size(34.dp))
+        }
+        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+            Text(title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        }
+        Spacer(modifier = Modifier.size(34.dp))
+    }
+}
+
+@Composable
+private fun IssueCompleteScreen(
+    data: CredentialUiData,
+    onResult: (String) -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+            .navigationBarsPadding()
+            .padding(horizontal = 29.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .align(Alignment.Center)
+                .padding(bottom = 90.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .clip(CircleShape)
+                    .background(Brush.linearGradient(listOf(Color(0xFF6885FE), Color(0xFF9A74F8)))),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("✓", color = Color.White, style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
+            }
+            Spacer(modifier = Modifier.height(24.dp))
+            Text("발급 완료", color = Color(0xFF0B1D40), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(28.dp))
+            Text(
+                "${data.credentialTitle}가 지갑에 안전하게 저장되었어요.",
+                color = Color(0xFF8A93A3),
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(28.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(16.dp))
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp)
+            ) {
+                SummaryLine("발급 기관", data.issuerName, strong = true)
+                SummaryLine("증명서", data.credentialTitle, strong = true)
+                SummaryLine("발급 시각", data.issuedAtFull, strong = true)
+                SummaryLine("트랜잭션", data.transactionHash, color = Color(0xFF2F7DFF), strong = true)
+            }
+        }
+        Column(
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            FilledActionButton("증명서 보기") { onResult("viewCredential") }
+            OutlinedActionButton("홈으로") { onResult("home") }
+        }
+    }
+}
+
+@Composable
+private fun IssueConfirmScreen(
+    data: CredentialUiData,
+    onBack: () -> Unit,
+    onResult: (String) -> Unit
+) {
+    CredentialNativeScaffold(
+        title = "발급 확인",
+        onBack = onBack,
+        bottomBar = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                FilledActionButton("확인") { onResult("confirm") }
+                OutlinedActionButton("거부") { onResult("reject") }
+            }
+        }
+    ) {
+        IssuerRequestCard(data)
+        Spacer(modifier = Modifier.height(26.dp))
+        CredentialCard(data, title = "법인 KYC 증명서", issuer = "우리은행", showVerified = false)
+        Spacer(modifier = Modifier.height(26.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("발급될 VC 세부 내용", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.size(10.dp))
+            Text("8개 항목", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        }
+        Spacer(modifier = Modifier.height(14.dp))
+        CredentialDetailList(
+            items = listOf(
+                "법인명" to data.holderName,
+                "법인등록번호" to data.registrationNumber,
+                "법인 종류" to data.companyType,
+                "설립일" to data.establishedAt,
+                "대표자" to data.representativeName,
+                "본점 소재지" to data.address,
+                "DID" to data.did,
+                "유효기간" to "${data.issuedAt} ~ ${data.expiresAt}"
+            )
+        )
+        Spacer(modifier = Modifier.height(24.dp))
+        InfoNotice("확인 후 지갑에 저장됩니다", "거부 시 이 VC는 발급되지 않으며 기록이 남지 않습니다.")
+    }
+}
+
+@Composable
+private fun CredentialDetailScreen(
+    data: CredentialUiData,
+    onBack: () -> Unit,
+    onResult: (String) -> Unit
+) {
+    CredentialNativeScaffold(
+        title = "증명서 상세",
+        onBack = onBack,
+        bottomBar = { FilledActionButton("내 QR 보기") { onResult("showQr") } }
+    ) {
+        CredentialCard(data, title = data.credentialTitle, issuer = data.issuerName, showVerified = true)
+        Spacer(modifier = Modifier.height(20.dp))
+        InfoRowCard("발", "발급기관", data.issuerName)
+        Spacer(modifier = Modifier.height(12.dp))
+        InfoRowCard("유", "유효기간", "${data.issuedAt} - ${data.expiresAt}")
+        Spacer(modifier = Modifier.height(12.dp))
+        InfoRowCard("✓", "상태", data.statusText)
+    }
+}
+
+@Composable
+private fun CredentialSubmitScreen(
+    data: CredentialUiData,
+    onBack: () -> Unit,
+    onResult: (String) -> Unit
+) {
+    CredentialNativeScaffold(
+        title = "증명서 제출",
+        onBack = onBack,
+        bottomBar = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                FilledActionButton("증명서 제출하기") { onResult("submit") }
+                OutlinedActionButton("거부") { onResult("reject") }
+            }
+        }
+    ) {
+        RequesterCard(data)
+        Spacer(modifier = Modifier.height(28.dp))
+        Text("${data.requesterName}이 요청한 필수 정보만 추렸어요.", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(26.dp))
+        Text("발급기관 선택", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(14.dp))
+        SelectBox("우리은행")
+        Spacer(modifier = Modifier.height(26.dp))
+        Text("제출할 증명서 (2건)", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(14.dp))
+        SubmitCredentialRow("법인 KYC 증명서", "우리은행", Color(0xFFA8B7FF))
+        Spacer(modifier = Modifier.height(14.dp))
+        SubmitCredentialRow("검증된 사업자등록증", "우리은행", Color(0xFFD7A9FF))
+        Spacer(modifier = Modifier.height(28.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("공개할 세부 정보", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.size(8.dp))
+            Text("필수 10건 · 선택 7건", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        }
+        Spacer(modifier = Modifier.height(18.dp))
+        DisclosureGroup("KYC 정보", listOf("KYC 관할 국가" to true, "KYC 보증 수준" to true))
+        Spacer(modifier = Modifier.height(14.dp))
+        DisclosureGroup("법인 정보", listOf("법인 유형" to true, "법인명" to true, "법인 등록번호" to true, "설립목적 확인 필요 여부" to false))
+        Spacer(modifier = Modifier.height(14.dp))
+        DisclosureGroup("대표자 정보", listOf("대표자 이름" to true, "대표자 생년월일" to true, "대표자 국적" to true, "대표자 영문명" to false))
+        Spacer(modifier = Modifier.height(14.dp))
+        DisclosureGroup("실소유자 정보", listOf("실소유자 이름" to true, "실소유자 생년월일" to false, "실소유자 국적" to false, "실소유자 영문명" to false, "지분율" to true))
+        Spacer(modifier = Modifier.height(20.dp))
+        WarningSubmitNotice()
+    }
+}
+
+@Composable
+private fun CredentialCard(
+    data: CredentialUiData,
+    title: String,
+    issuer: String,
+    showVerified: Boolean
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(192.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .background(Brush.linearGradient(listOf(Color(0xFF111827), Color(0xFF183B8F), Color(0xFF7C3AED))))
+            .padding(18.dp)
+    ) {
+        Column {
+            Text(issuer, color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(title, color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        }
+        if (showVerified) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(Color.White.copy(alpha = 0.18f))
+                    .border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp))
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
+            ) {
+                Text("검증됨", color = Color.White, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.ExtraBold)
+            }
+        }
+        Column(modifier = Modifier.align(Alignment.BottomStart)) {
+            Text("KYvC", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+            Text("Verifiable Credential", color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.labelSmall)
+        }
+        Row(
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(data.did, color = Color.White.copy(alpha = 0.82f), style = MaterialTheme.typography.labelSmall)
+            Text(data.issuedAt, color = Color.White.copy(alpha = 0.82f), style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@Composable
+private fun IssuerRequestCard(data: CredentialUiData) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .padding(24.dp)
+    ) {
+        Text("발급기관", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(14.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LetterIcon("법")
+            Spacer(modifier = Modifier.size(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(data.issuerName, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+                Text("${data.credentialTitle} 발급 요청", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium)
+            }
+            VerifiedPill()
+        }
+    }
+}
+
+@Composable
+private fun RequesterCard(data: CredentialUiData) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(26.dp))
+            .background(Color.White)
+            .padding(28.dp)
+    ) {
+        Text("요청 기관", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(22.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            LetterIcon("S")
+            Spacer(modifier = Modifier.size(18.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(data.requesterName, color = Color(0xFF0B1D40), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+                Text("법인계좌 개설용 인증", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium)
+            }
+            VerifiedPill()
+        }
+    }
+}
+
+@Composable
+private fun CredentialDetailList(items: List<Pair<String, String>>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .padding(horizontal = 22.dp)
+    ) {
+        items.forEachIndexed { index, item ->
+            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp)) {
+                Text(item.first, color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(item.second, color = if (item.first == "DID") Color(0xFF2F7DFF) else Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+            }
+            if (index != items.lastIndex) {
+                Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
+            }
+        }
+    }
+}
+
+@Composable
+private fun InfoRowCard(letter: String, title: String, body: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(68.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(16.dp))
+            .background(Color.White)
+            .padding(horizontal = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LetterIcon(letter, small = true)
+        Spacer(modifier = Modifier.size(12.dp))
+        Column {
+            Text(title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(body, color = Color(0xFF6B7280), style = MaterialTheme.typography.labelLarge)
+        }
+    }
+}
+
+@Composable
+private fun InfoNotice(title: String, body: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .border(1.dp, Color(0xFFE5EDFF), RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .padding(22.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("♡", color = Color(0xFF2F7DFF), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.size(18.dp))
+        Column {
+            Text(title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(body, color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable
+private fun SelectBox(text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(64.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .border(2.dp, Color(0xFFE5E7EB), RoundedCornerShape(16.dp))
+            .background(Color.White)
+            .padding(horizontal = 20.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text, color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+        Text("⌄", color = Color(0xFF8A93A3), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+    }
+}
+
+@Composable
+private fun SubmitCredentialRow(title: String, issuer: String, color: Color) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(86.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .padding(horizontal = 18.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(modifier = Modifier.size(52.dp).clip(RoundedCornerShape(14.dp)).background(color))
+        Spacer(modifier = Modifier.size(18.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Text(issuer, color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium)
+        }
+        Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(Color(0xFF2F7DFF)), contentAlignment = Alignment.Center) {
+            Text("✓", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+        }
+    }
+}
+
+@Composable
+private fun DisclosureGroup(title: String, items: List<Pair<String, Boolean>>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.White)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .background(Color(0xFFF6F6F5))
+                .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+            Text("⌄", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        }
+        items.forEachIndexed { index, item ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(horizontal = 18.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(8.dp))
+                        .background(if (item.second) Color(0xFF2F7DFF) else Color.White),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (item.second) Text("✓", color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+                }
+                Spacer(modifier = Modifier.size(14.dp))
+                Text(item.first, color = Color(0xFF263445), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Color(0xFFF1F6FF))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text(if (item.second) "필수" else "선택", color = if (item.second) Color(0xFF2F7DFF) else Color(0xFF8A93A3), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.ExtraBold)
+                }
+            }
+            if (index != items.lastIndex) Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
+        }
+    }
+}
+
+@Composable
+private fun WarningSubmitNotice() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color(0xFFFFF4CC))
+            .padding(20.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("▢", color = Color(0xFF0B1D40), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.size(16.dp))
+        Column {
+            Text("제출 시 동의 사항", color = Color(0xFFA34D00), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text("선택한 증명서가 제출되며, 블록체인에 제출 기록이 남습니다.", color = Color(0xFFD97706), style = MaterialTheme.typography.bodyMedium)
+        }
+    }
+}
+
+@Composable
+private fun LetterIcon(letter: String, small: Boolean = false) {
+    Box(
+        modifier = Modifier
+            .size(if (small) 40.dp else 56.dp)
+            .clip(RoundedCornerShape(if (small) 14.dp else 16.dp))
+            .background(Color(0xFF635BEE)),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(letter, color = Color.White, style = if (small) MaterialTheme.typography.titleMedium else MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+    }
+}
+
+@Composable
+private fun VerifiedPill() {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Color(0xFFEFFFF8))
+            .padding(horizontal = 13.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("✓", color = Color(0xFF009B72), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.size(6.dp))
+        Text("인증됨", color = Color(0xFF009B72), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+    }
+}
+
+@Composable
+private fun SummaryLine(label: String, value: String, color: Color = Color(0xFF0B1D40), strong: Boolean = false) {
+    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium)
+        Text(value, color = color, style = MaterialTheme.typography.bodyMedium, fontWeight = if (strong) FontWeight.ExtraBold else FontWeight.Normal)
+    }
+}
+
+@Composable
+private fun FilledActionButton(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFF0B2A55))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+    }
+}
+
+@Composable
+private fun OutlinedActionButton(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(14.dp))
+            .background(Color.White)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
     }
 }
 
@@ -1379,7 +2121,7 @@ private fun PinSetupScreen(
             .background(Color.White)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 24.dp, vertical = 18.dp)
+            .padding(horizontal = 18.dp, vertical = 20.dp)
     ) {
         Row(
             modifier = Modifier
@@ -1389,7 +2131,7 @@ private fun PinSetupScreen(
         ) {
             Box(
                 modifier = Modifier
-                    .size(46.dp)
+                    .size(34.dp)
                     .clip(CircleShape)
                     .background(Color(0xFFF5F5F3))
                     .clickable { onCancel() },
@@ -1398,7 +2140,7 @@ private fun PinSetupScreen(
                 Text(
                     text = "<",
                     color = Color(0xFF0B1D40),
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
             }
@@ -1409,11 +2151,11 @@ private fun PinSetupScreen(
                 Text(
                     text = "PIN 번호 등록",
                     color = Color(0xFF0B1D40),
-                    style = MaterialTheme.typography.titleLarge,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.ExtraBold
                 )
             }
-            Spacer(modifier = Modifier.size(46.dp))
+            Spacer(modifier = Modifier.size(34.dp))
         }
 
         Column(
@@ -1812,6 +2554,8 @@ fun WebViewScreen(
                         view?.evaluateJavascript(WEBVIEW_DIAGNOSTICS_SCRIPT) { result ->
                             Log.d(WEBVIEW_TAG, "layout diagnostics: $result")
                         }
+                        // Auto-login session event is disabled for now.
+                        // bridge.emitAutoLoginSessionIfAvailable()
                     }
 
                     override fun onReceivedError(

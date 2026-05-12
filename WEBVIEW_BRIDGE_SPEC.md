@@ -2,11 +2,17 @@
 
 이 문서는 웹이 Android WebView 브리지를 호출할 때 사용하는 최신 호출 규격 문서다. 브리지 함수가 바뀌면 이 문서를 같이 갱신한다.
 
-- Spec Version: `1.5.0`
-- Last Updated: `2026-05-11`
+- Spec Version: `1.5.2`
+- Last Updated: `2026-05-12`
 
 ## Changelog
 
+- `1.5.2` (2026-05-12)
+  - `getDeviceInfo` 브릿지 추가
+  - `scanIssueQrCode`가 PC QR 원문을 `qrData`로 반환하는 계약 명시
+  - backend prepare `credentialPayload` 기반 `saveVC` 입력 alias 명시
+  - `submitToXRPL` 응답의 `txHash` / `credentialAcceptHash` alias 명시
+  - `checkCredentialStatus` 응답의 `credentialEntryFound` / `credentialAccepted` alias 명시
 - `1.5.1` (2026-05-11)
   - 앱 WebView 기본 진입 URL을 `https://dev-kyvc.khuoo.synology.me/m/`로 변경
   - 외부 URL 메인 프레임 로딩 실패 시 `app/src/main/assets/index.html` fallback 사용
@@ -93,6 +99,7 @@
 | `logout` | stable | 세션 강제 종료 |
 | `createWallet` | stable | 지갑 생성 + DID/DIDDoc 생성 |
 | `getWalletInfo` | stable | 현재 활성 지갑 정보 조회 |
+| `getDeviceInfo` | stable | 앱 설치 단위 deviceId 및 기기 표시 정보 조회 |
 | `listWallets` | stable | 계정 목록/활성 계정/파생정보 조회 |
 | `switchWallet` | stable | 활성 계정 전환 |
 | `setAccountName` | stable | 계정 표시명 변경 |
@@ -152,6 +159,67 @@ window.onAndroidResult = function (resultJson) {
   "source": "Android"
 }
 ```
+
+## Device Bridge
+
+### 1. 기기 정보 조회
+
+Method: `getDeviceInfo`
+
+Request:
+
+```json
+{
+  "action": "GET_DEVICE_INFO",
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "issuedAt": "2026-05-12T00:00:00Z"
+}
+```
+
+Response:
+
+```json
+{
+  "action": "GET_DEVICE_INFO",
+  "ok": true,
+  "source": "Android",
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "deviceId": "android-installation-uuid",
+  "deviceName": "Samsung SM-S918N",
+  "os": "Android",
+  "appVersion": "1.0",
+  "publicKey": "holder-auth-public-key-or-empty"
+}
+```
+
+선행 조건:
+
+- WebView origin은 Android bridge 신뢰 origin이어야 한다.
+- `requestId`는 UUID, `issuedAt`은 ISO-8601 UTC timestamp여야 한다.
+- 요청 TTL은 30초다.
+
+실패 응답:
+
+```json
+{
+  "action": "GET_DEVICE_INFO",
+  "ok": false,
+  "source": "Android",
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "error": "request expired"
+}
+```
+
+deviceId 정책:
+
+- Android OS 고유 ID를 직접 노출하지 않는다.
+- 앱 설치 단위 UUID를 `kyvc-device` SharedPreferences의 `device_id`에 저장하고 재사용한다.
+- 앱 삭제/재설치 시 deviceId는 바뀔 수 있다.
+
+민감정보 비노출 정책:
+
+- `seed`, `mnemonic`, private key, auth private key는 절대 포함하지 않는다.
+- `publicKey`는 활성 지갑의 holder auth public key가 있을 때만 반환하며, 없으면 빈 문자열이다.
 
 ## 인증 브리지
 
@@ -1103,8 +1171,20 @@ Method: `saveVC`
 
 - expanded JSON VC
 - `vcJwt`
+- `credentialJwt`
 - `credential`
 - `sdJwt`
+- `vcJson`
+- `credentialPayload`
+- `metadata`
+
+backend prepare 응답의 `credentialPayload` wrapper를 그대로 넘길 수 있다. Android는 다음 alias를 순서대로 해석한다.
+
+- credential 원문: `sdJwt`, `credentialJwt`, `vcJwt`, `vcJson`, `credentialPayload`, `credential`
+- credentialId: request `credentialId`, `metadata.credentialId`, credential `credentialId/id/jti`
+- issuer: `metadata.issuerDid`, `metadata.issuerAccount`, credential status
+- holder: `metadata.holderDid`, `metadata.holderXrplAddress`, active wallet
+- type/hash/date: `metadata.credentialType`, `metadata.vcHash`, `metadata.issuedAt`, `metadata.expiresAt`
 
 SD-JWT 예시:
 
@@ -1113,6 +1193,54 @@ SD-JWT 예시:
   "credential": "<issuer-jwt>~<disclosure-1>~<disclosure-2>"
 }
 ```
+
+backend prepare credentialPayload 예시:
+
+```json
+{
+  "action": "SAVE_VC",
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "issuedAt": "2026-05-12T00:00:00Z",
+  "credentialId": "200",
+  "credential": "<sd-jwt string 또는 vc json object>",
+  "sdJwt": "<sd-jwt string>",
+  "vcJwt": "<jwt string>",
+  "vcJson": "{\"id\":\"200\"}",
+  "metadata": {
+    "credentialId": 200,
+    "credentialType": "KYC_CREDENTIAL",
+    "issuerDid": "did:xrpl:1:rIssuer...",
+    "issuerAccount": "rIssuer...",
+    "holderDid": "did:xrpl:1:rHolder...",
+    "holderXrplAddress": "rHolder...",
+    "vcHash": "...",
+    "issuedAt": "2026-05-12T16:00:00",
+    "expiresAt": "2027-05-12T16:00:00",
+    "format": "dc+sd-jwt"
+  }
+}
+```
+
+Response:
+
+```json
+{
+  "action": "SAVE_VC",
+  "ok": true,
+  "source": "Android",
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "credentialId": "200",
+  "issuerDid": "did:xrpl:1:rIssuer...",
+  "issuerAccount": "rIssuer...",
+  "holderDid": "did:xrpl:1:rHolder...",
+  "holderAccount": "rHolder...",
+  "credentialType": "KYC_CREDENTIAL",
+  "saved": true,
+  "format": "dc+sd-jwt"
+}
+```
+
+저장 전 holder DID/account가 active wallet과 다르면 실패한다. SD-JWT/VC 원문과 disclosure 원문은 Logcat에 출력하지 않는다.
 
 ### 2. 증명서 요약 조회
 
@@ -1181,6 +1309,33 @@ Request:
 }
 ```
 
+입력 alias:
+
+- `issuerAccount`, `issuerAddress`, `issuer`, `issuer_account`
+- `holderAccount`, `holderXrplAddress`, `holder`, `subject`, `subjectAccount`, `holder_account`
+- `credentialType`, `credentialTypeHex`, `credential_type`
+
+Response:
+
+```json
+{
+  "action": "SUBMIT_TO_XRPL",
+  "ok": true,
+  "source": "Android",
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "credentialId": "200",
+  "issuerAccount": "rIssuer...",
+  "holderAccount": "rHolder...",
+  "credentialType": "KYC_CREDENTIAL",
+  "txHash": "ABCDEF...",
+  "credentialAcceptHash": "ABCDEF...",
+  "engineResult": "tesSUCCESS",
+  "acceptedAt": "2026-05-12T16:01:00Z"
+}
+```
+
+`txHash`와 `credentialAcceptHash`는 같은 XRPL CredentialAccept transaction hash다.
+
 호출 흐름:
 
 ```text
@@ -1199,9 +1354,14 @@ Request:
 
 ```json
 {
-  "credentialId": "urn:uuid:..."
+  "credentialId": "urn:uuid:...",
+  "issuerAccount": "rIssuer...",
+  "holderAccount": "rHolder...",
+  "credentialType": "KYC_CREDENTIAL"
 }
 ```
+
+`credentialId`만 전달하면 저장된 VC에서 issuer/holder/type을 복원한다. 저장된 VC가 없으면 `issuerAccount`, `holderAccount`, `credentialType`을 직접 전달해야 한다.
 
 Response 주요 필드:
 
@@ -1209,11 +1369,22 @@ Response 주요 필드:
 {
   "action": "CHECK_CREDENTIAL_STATUS",
   "ok": true,
+  "credentialId": "200",
   "found": true,
+  "credentialEntryFound": true,
   "active": true,
-  "accepted": true
+  "accepted": true,
+  "credentialAccepted": true,
+  "txHash": "ABCDEF..."
 }
 ```
+
+호환 alias:
+
+- `found` = `credentialEntryFound`
+- `accepted` = `credentialAccepted`
+- `active` = ledger entry가 존재하고 accepted 상태이며 만료/비활성 상태가 아닌 경우
+- `txHash`는 로컬에 저장된 `credentialAcceptHash`가 있을 때 포함된다.
 
 ## Issuer / Verifier 브리지
 
@@ -1410,8 +1581,21 @@ Response:
   "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
   "mode": "scanned",
   "actionType": "VC_ISSUE",
-  "qrData": "{...}",
-  "endpoint": "https://..."
+  "qrData": "{\"type\":\"CREDENTIAL_OFFER\",\"offerId\":100,\"qrToken\":\"...\",\"expiresAt\":\"...\"}"
+}
+```
+
+취소/실패 Response:
+
+```json
+{
+  "action": "SCAN_ISSUE_QR_CODE",
+  "ok": false,
+  "source": "Android",
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "mode": "issue",
+  "actionType": "VC_ISSUE",
+  "error": "QR scan cancelled"
 }
 ```
 
@@ -1422,7 +1606,7 @@ Response:
 -> scanIssueQrCode 호출
 -> Android가 네이티브 QR 스캐너 표시
 -> 사용자가 발급 QR을 흰색 정사각형 프레임 안에 맞춤
--> Android가 QR payload를 파싱해 SCAN_ISSUE_QR_CODE 반환
+-> Android가 QR 원문을 재조립하지 않고 qrData로 SCAN_ISSUE_QR_CODE 반환
 -> 웹이 반환값으로 issuer 발급 플로우 진행
 ```
 
@@ -1473,6 +1657,8 @@ Response:
 
 - 기존 `scanQRCode`는 계속 동작하지만, 운영 웹에서는 용도별 브릿지(`scanIssueQrCode`, `scanPresentationQrCode`)를 우선 사용한다.
 - QR 화면은 WebView 페이지 이동이 아니라 WebView 위에 표시되는 네이티브 오버레이다.
+- `scanIssueQrCode`의 `qrData`는 QR에 들어 있던 raw string 그대로다. JSON parse/검증은 WebView 또는 backend가 수행한다.
+- Native는 PC Credential Offer QR 값을 필드별로 재조립하지 않는다. QR 값이 JSON 문자열이어도 URL이어도 그대로 반환한다.
 - 스캔한 원문 `qrData`에는 민감한 challenge나 endpoint가 들어갈 수 있으므로 원격 로그에 저장하지 않는다.
 
 ## 웹에서 꼭 처리해야 하는 상태값

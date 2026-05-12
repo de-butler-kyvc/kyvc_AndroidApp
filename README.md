@@ -110,6 +110,7 @@ UI/브리지 기본값 규칙:
 - **Wallet Core**: XRPL 계정 생성 및 `CredentialAccept` 트랜잭션 제출 기능 기초 구현
 - **Storage**: `CredentialEntity`를 통한 VC 로컬 저장소 구축
 - **Bridge**: 웹에서 안드로이드 기능을 호출할 수 있는 `Android` 브릿지 객체 등록
+- **Device Bridge**: `getDeviceInfo` 브릿지가 앱 설치 단위 UUID deviceId, deviceName, Android OS, appVersion을 반환. seed/mnemonic/private key는 반환하지 않음
 - **XRPL Submit**: `submitToXRPL` 브릿지에서 holder seed, issuer account, credential type을 검증한 뒤 XRPL testnet `CredentialAccept`를 제출하고 tx hash를 Room DB에 반영
 - **Issuer CredentialCreate**: `submitCredentialCreate` 브릿지에서 issuer seed로 XRPL testnet `CredentialCreate`를 제출해 ledger credential entry를 생성
 - **WebView Callback**: VC 저장 및 XRPL 제출 결과를 `window.onAndroidResult`로 반환하도록 테스트 페이지 연동
@@ -122,7 +123,7 @@ UI/브리지 기본값 규칙:
 - **Auth Key Separation**: XRPL account key는 `CredentialAccept` 전용으로 유지하고, VP 서명용 holder authentication key를 별도 secp256k1 key로 생성/암호화 저장하도록 분리.
 - **Session Sync**: 로그아웃 시 웹뷰 종료 및 잠금 화면 전환. 네이티브 인증 성공 시 30분 세션 자동 갱신.
 - **VP Signing**: `signMessage` 브릿지에서 challenge/domain/VC를 받아 JCS 기반 `DataIntegrityProof` VP를 생성하고 holder DID Document와 함께 WebView 콜백으로 반환
-- **QR Bridge**: 범용 `scanQRCode`와 용도별 `scanIssueQrCode`/`scanPresentationQrCode` 브릿지가 QR 요청/데이터를 `VC_ISSUE`, `VP_REQUEST`, `LOGIN_REQUEST`로 분류해 WebView 콜백으로 전달하도록 연결
+- **QR Bridge**: 범용 `scanQRCode`와 용도별 `scanIssueQrCode`/`scanPresentationQrCode` 브릿지가 QR 요청/데이터를 `VC_ISSUE`, `VP_REQUEST`, `LOGIN_REQUEST`로 분류해 WebView 콜백으로 전달하도록 연결. `scanIssueQrCode`는 PC Credential Offer QR 원문을 `qrData`로 그대로 반환
 - **Native Overlay UI**: 지문 인증, QR 스캔, 복구 문구 백업, 지갑 복구 화면을 네이티브 오버레이로 구현하고 웹은 브릿지 호출/결과 처리만 담당
 - **App Icon**: `logo3.png` 기반 KYvC 런처 아이콘을 adaptive icon과 density별 mipmap 리소스로 반영
 - **VC Validation**: VC 저장/서명/상태조회 전에 `credentialSubject.id`, `credentialStatus.subject`, `validFrom/validUntil`을 검증하고 holder wallet과 맞지 않으면 차단
@@ -347,7 +348,7 @@ requestVerifierChallenge (nonce/aud 수신)
 }
 ```
 
-Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의 `holderAccount`가 다르면 제출하지 않는다. 성공/실패 결과는 `window.onAndroidResult` 콜백의 `SUBMIT_TO_XRPL` action으로 전달된다.
+Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의 `holderAccount`가 다르면 제출하지 않는다. 성공/실패 결과는 `window.onAndroidResult` 콜백의 `SUBMIT_TO_XRPL` action으로 전달된다. 성공 응답에는 동일한 XRPL transaction hash를 `txHash`와 `credentialAcceptHash`로 함께 반환한다.
 
 `submitCredentialCreate`는 issuer가 ledger에 `CredentialCreate`를 올릴 때 쓴다. 이 요청은 `issuerSeed`, `subjectAccount`, `credentialType`을 받으며, issuer seed는 앱에 저장하지 않는다. `vcJson`이 있으면 거기서 subject/type을 보강해서 사용한다. 성공/실패 결과는 `SUBMIT_CREDENTIAL_CREATE` action으로 반환된다.
 
@@ -359,9 +360,11 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 샘플 VC에서는 웹 화면의 `issuerAccount` 입력값으로 placeholder issuer를 교체할 수 있다. 단, 실서버가 발급한 `vc+jwt`는 issuer가 서명한 원문이므로 화면 입력값으로 `issuer`나 `credentialStatus.issuer`를 덮어쓰지 않는다. VC JWT payload의 issuer 값을 기준으로 입력칸을 맞추고, payload를 임의 수정하지 않는다.
 
-`scanQRCode`는 발급자/검증자가 제시하는 요청 QR을 읽는 범용 브릿지다. 운영 웹에서는 용도별로 `scanIssueQrCode`(증명서 발급 QR), `scanPresentationQrCode`(증명서 제출 요청 QR)를 우선 사용한다. 두 브릿지는 QR에 담긴 요청 JSON 또는 텍스트를 읽어 `requestId`, `purpose`, `endpoint`, `expiresInSec`, `qrData`를 추출하고, 각각 `SCAN_ISSUE_QR_CODE`, `SCAN_PRESENTATION_QR_CODE` 콜백으로 WebView에 반환한다. 네이티브 QR 화면은 `app/src/main/assets/발급용큐알.png`, `app/src/main/assets/제출용큐알.png` 시안처럼 흰색 네모 상자 안에 정사각형 스캔 영역을 배치한다.
+`scanQRCode`는 발급자/검증자가 제시하는 요청 QR을 읽는 범용 브릿지다. 운영 웹에서는 용도별로 `scanIssueQrCode`(증명서 발급 QR), `scanPresentationQrCode`(증명서 제출 요청 QR)를 우선 사용한다. 두 브릿지는 QR에 담긴 요청 JSON 또는 텍스트를 읽어 `requestId`, `purpose`, `endpoint`, `expiresInSec`, `qrData`를 추출하고, 각각 `SCAN_ISSUE_QR_CODE`, `SCAN_PRESENTATION_QR_CODE` 콜백으로 WebView에 반환한다. `scanIssueQrCode`의 `qrData`는 PC Credential Offer QR의 raw string 그대로이며 Android에서 필드별로 재조립하지 않는다. 네이티브 QR 화면은 `app/src/main/assets/발급용큐알.png`, `app/src/main/assets/제출용큐알.png` 시안처럼 흰색 네모 상자 안에 정사각형 스캔 영역을 배치한다.
 
-`checkCredentialStatus`는 VC의 issuer/holder/credentialType으로 XRPL `Credential` ledger entry의 index를 계산해 현재 validated ledger에서 조회한다. 응답의 `Flags`에 accepted bit가 켜져 있고 expiration이 유효하면 active로 판정한다.
+`checkCredentialStatus`는 VC의 issuer/holder/credentialType으로 XRPL `Credential` ledger entry의 index를 계산해 현재 validated ledger에서 조회한다. 응답의 `Flags`에 accepted bit가 켜져 있고 expiration이 유효하면 active로 판정한다. WebView 호환을 위해 `found/credentialEntryFound`, `accepted/credentialAccepted`, `active`를 함께 반환한다.
+
+`getDeviceInfo`는 `/m/vc/issue` prepare/confirm 흐름에서 사용할 deviceId를 반환한다. deviceId는 Android OS ID가 아니라 앱 설치 단위 UUID이며 `kyvc-device` SharedPreferences에 저장해 재사용한다. 응답에는 `deviceId`, `deviceName`, `os`, `appVersion`, `publicKey`가 포함되고 seed/mnemonic/private key는 포함하지 않는다.
 
 예전 expanded JSON용 `verifyVC`와 `canonicalHash 반영` 흐름은 신규 기본 플로우에서 사용하지 않는다. `dc+sd-jwt`는 issuer JWT signature와 disclosure digest가 proof 역할을 하므로 expanded JSON의 `proof`가 없어도 정상이다. 실제 credential 검증은 `실제 Credential 인증 요청`으로 core verifier에 맡긴다.
 

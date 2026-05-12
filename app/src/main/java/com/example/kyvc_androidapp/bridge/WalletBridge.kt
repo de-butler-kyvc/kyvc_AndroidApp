@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.os.Build
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -81,6 +82,7 @@ class WalletBridge(
     private val onSessionStatusChanged: (Boolean) -> Unit = {}
 ) {
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
+    private val devicePrefs: SharedPreferences = context.getSharedPreferences("kyvc-device", Context.MODE_PRIVATE)
     private var currentSeed: Seed? = null
     private var webViewRef: WeakReference<WebView>? = null
     private val vpSigner = VpSigner()
@@ -326,6 +328,52 @@ class WalletBridge(
                 Log.e(TAG, "getAuthStatus failed", e)
                 emitCallback("GET_AUTH_STATUS", false) {
                     putAuthAttemptState()
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun getDeviceInfo(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("GET_DEVICE_INFO")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("GET_DEVICE_INFO"),
+                    ttlSeconds = 30
+                )
+                val walletState = withContext(Dispatchers.IO) {
+                    walletStateStore.getWalletStateOrNull()
+                }
+                val deviceId = getOrCreateDeviceId()
+                val deviceName = resolveDeviceName()
+                val appVersion = resolveAppVersion()
+                logBridgeFlow(
+                    "vc.issue.deviceInfo.success",
+                    mapOf(
+                        "requestId" to request.text("requestId"),
+                        "deviceId" to deviceId,
+                        "deviceName" to deviceName,
+                        "appVersion" to appVersion,
+                        "walletReady" to (walletState != null),
+                        "hasPublicKey" to !walletState?.authPublicKey.isNullOrBlank()
+                    )
+                )
+                emitCallback("GET_DEVICE_INFO", true) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("deviceId", deviceId)
+                    put("deviceName", deviceName)
+                    put("os", "Android")
+                    put("appVersion", appVersion)
+                    put("publicKey", walletState?.authPublicKey ?: "")
+                }
+            } catch (e: Exception) {
+                logBridgeFailure("vc.issue.deviceInfo.failed", request.text("requestId"), e)
+                emitCallback("GET_DEVICE_INFO", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
                     put("error", e.message ?: "Unknown error")
                 }
             }
@@ -1066,51 +1114,138 @@ class WalletBridge(
     @JavascriptInterface
     fun saveVC(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            val requestId = request.text("requestId")
             try {
-                val envelope = parseCredentialEnvelope(jsonPayload)
-                val json = envelope.payload
+                val metadata = request.obj("metadata") ?: buildJsonObject { }
+                logBridgeFlow(
+                    "vc.issue.saveVC.received",
+                    mapOf(
+                        "requestId" to requestId,
+                        "credentialId" to (request.text("credentialId") ?: metadata.text("credentialId")),
+                        "hasMetadata" to metadata.isNotEmpty(),
+                        "hasSdJwt" to !firstText(request, "sdJwt", "sd_jwt").isNullOrBlank(),
+                        "hasCredentialJwt" to !firstText(request, "credentialJwt", "credential_jwt").isNullOrBlank(),
+                        "hasVcJwt" to !firstText(request, "vcJwt", "vc_jwt").isNullOrBlank(),
+                        "hasVcJson" to !request.text("vcJson").isNullOrBlank(),
+                        "hasCredentialText" to !request.text("credential").isNullOrBlank(),
+                        "hasCredentialObject" to (request.obj("credential") != null),
+                        "hasCredentialPayload" to (!request.text("credentialPayload").isNullOrBlank() || request.obj("credentialPayload") != null),
+                        "payloadLen" to jsonPayload.length,
+                        "payloadHash" to shortSha256(jsonPayload)
+                    )
+                )
+                val envelope = resolveSaveCredentialEnvelope(request, jsonPayload)
+                val normalizedCredential = normalizeCredentialPayloadForSave(
+                    payload = envelope.payload,
+                    request = request,
+                    metadata = metadata,
+                    walletState = walletStateStore.getWalletStateOrNull()
+                )
+                logBridgeFlow(
+                    "vc.issue.saveVC.normalized",
+                    mapOf(
+                        "requestId" to requestId,
+                        "format" to envelope.format,
+                        "rawCredentialLen" to envelope.rawCredential.length,
+                        "rawCredentialHash" to shortSha256(envelope.rawCredential),
+                        "credentialId" to (firstText(request, "credentialId")
+                            ?: firstText(metadata, "credentialId")
+                            ?: firstText(normalizedCredential, "credentialId", "id", "jti")),
+                        "issuerDid" to (normalizedCredential.text("issuerDid") ?: normalizedCredential.text("issuer")),
+                        "issuerAccount" to normalizedCredential.text("issuerAccount"),
+                        "holderDid" to normalizedCredential.text("holderDid"),
+                        "holderAccount" to normalizedCredential.text("holderAccount"),
+                        "credentialType" to normalizedCredential.text("credentialType"),
+                        "hasStatus" to (normalizedCredential.obj("credentialStatus") != null),
+                        "hasSubject" to (normalizedCredential.obj("credentialSubject") != null)
+                    )
+                )
                 validateCredentialJwt(envelope, issuerDidDocument = null)
-                validateCredentialAgainstWallet(json, walletStateStore.getWalletStateOrNull())
-                val issuerProof = verifyIssuerProof(json)
+                validateCredentialAgainstWallet(normalizedCredential, walletStateStore.getWalletStateOrNull())
+                val issuerProof = verifyIssuerProof(normalizedCredential)
                 require(!issuerProof.supported || issuerProof.verified) {
                     issuerProof.error ?: "issuer proof verification failed"
                 }
-                val status = json.obj("credentialStatus")
-                val subject = json.obj("credentialSubject")
-                val issuerDid = json.text("issuerDid") ?: json.text("issuer").orEmpty()
-                val holderDid = json.text("holderDid") ?: subject?.text("id").orEmpty()
+                val status = normalizedCredential.obj("credentialStatus")
+                val subject = normalizedCredential.obj("credentialSubject")
+                val issuerDid = normalizedCredential.text("issuerDid") ?: normalizedCredential.text("issuer").orEmpty()
+                val holderDid = normalizedCredential.text("holderDid") ?: subject?.text("id").orEmpty()
                 val entity = CredentialEntity(
-                    credentialId = json.text("credentialId") ?: json.text("id").orEmpty(),
+                    credentialId = firstText(request, "credentialId")
+                        ?: firstText(metadata, "credentialId")
+                        ?: firstText(normalizedCredential, "credentialId", "id", "jti")
+                        ?: "",
                     vcJson = envelope.rawCredential,
                     issuerDid = issuerDid,
-                    issuerAccount = json.text("issuerAccount")
+                    issuerAccount = firstText(metadata, "issuerAccount")
+                        ?: firstText(request, "issuerAccount", "issuerAddress", "issuer_account")
+                        ?: normalizedCredential.text("issuerAccount")
                         ?: status?.text("issuer")
                         ?: accountFromDid(issuerDid),
                     holderDid = holderDid,
-                    holderAccount = json.text("holderAccount")
+                    holderAccount = firstText(metadata, "holderXrplAddress", "holderAccount", "holder_account")
+                        ?: firstText(request, "holderXrplAddress", "holderAccount", "holder_account")
+                        ?: normalizedCredential.text("holderAccount")
                         ?: status?.text("subject")
                         ?: accountFromDid(holderDid),
-                    credentialType = json.text("credentialType") ?: status?.text("credentialType").orEmpty(),
-                    vcCoreHash = json.text("vcCoreHash") ?: status?.text("vcCoreHash").orEmpty(),
-                    validFrom = json.text("validFrom") ?: json.text("issuanceDate").orEmpty(),
-                    validUntil = json.text("validUntil") ?: json.text("expirationDate").orEmpty()
+                    credentialType = firstText(metadata, "credentialType")
+                        ?: firstText(request, "credentialType", "credentialTypeHex", "credential_type")
+                        ?: normalizedCredential.text("credentialType")
+                        ?: status?.text("credentialType")
+                        ?: "KYC_CREDENTIAL",
+                    vcCoreHash = firstText(metadata, "vcHash", "vcCoreHash")
+                        ?: firstText(request, "vcHash", "vcCoreHash")
+                        ?: normalizedCredential.text("vcCoreHash")
+                        ?: status?.text("vcCoreHash")
+                        ?: computeVcCoreHash(normalizedCredential),
+                    validFrom = firstText(metadata, "issuedAt", "validFrom")
+                        ?: firstText(normalizedCredential, "validFrom", "issuanceDate", "issuedAt")
+                        ?: nowUtcIso(),
+                    validUntil = firstText(metadata, "expiresAt", "validUntil", "expirationDate")
+                        ?: firstText(normalizedCredential, "validUntil", "expirationDate", "expiresAt")
+                        ?: ""
                 )
                 require(entity.credentialId.isNotBlank()) { "credentialId or id is required" }
+                require(entity.issuerAccount.isNotBlank()) { "issuerAccount is required" }
+                require(entity.holderAccount.isNotBlank()) { "holderAccount is required" }
+                require(entity.credentialType.isNotBlank()) { "credentialType is required" }
                 credentialRepository.insertCredential(entity)
+                logBridgeFlow(
+                    "vc.issue.saveVC.saved",
+                    mapOf(
+                        "requestId" to requestId,
+                        "credentialId" to entity.credentialId,
+                        "issuerAccount" to entity.issuerAccount,
+                        "holderAccount" to entity.holderAccount,
+                        "credentialType" to entity.credentialType,
+                        "validFrom" to entity.validFrom,
+                        "validUntil" to entity.validUntil,
+                        "format" to envelope.format
+                    )
+                )
                 scope.launch(Dispatchers.Main) {
                     Toast.makeText(context, "VC Saved Successfully", Toast.LENGTH_SHORT).show()
                     emitCallback("SAVE_VC", true) {
+                        requestId?.let { put("requestId", it) }
                         put("credentialId", entity.credentialId)
+                        put("issuerDid", entity.issuerDid)
+                        put("issuerAccount", entity.issuerAccount)
+                        put("holderDid", entity.holderDid)
+                        put("holderAccount", entity.holderAccount)
+                        put("credentialType", entity.credentialType)
+                        put("saved", true)
                         envelope.vcJwt?.let { put("vcJwt", it) }
                         envelope.sdJwt?.let { put("sdJwt", it) }
                         put("format", envelope.format)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "saveVC failed", e)
+                logBridgeFailure("vc.issue.saveVC.failed", requestId, e)
                 scope.launch(Dispatchers.Main) {
                     Toast.makeText(context, "Failed to save VC: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback("SAVE_VC", false) {
+                        requestId?.let { put("requestId", it) }
                         put("error", e.message ?: "Unknown error")
                     }
                 }
@@ -1196,30 +1331,90 @@ class WalletBridge(
     @JavascriptInterface
     fun checkCredentialStatus(jsonPayload: String) {
         scope.launch(Dispatchers.IO) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            val requestId = request.text("requestId")
+            val requestedCredentialId = request.text("credentialId")
             try {
-                val request = Json.parseToJsonElement(jsonPayload).jsonObject
-                val savedCredential = request.text("credentialId")
+                logBridgeFlow(
+                    "vc.issue.status.received",
+                    mapOf(
+                        "requestId" to requestId,
+                        "credentialId" to requestedCredentialId,
+                        "hasIssuerAccount" to !firstText(request, "issuerAccount", "issuerAddress", "issuer", "issuer_account").isNullOrBlank(),
+                        "hasHolderAccount" to !firstText(request, "holderAccount", "holderXrplAddress", "holder", "subject", "subjectAccount", "holder_account").isNullOrBlank(),
+                        "hasCredentialType" to !firstText(request, "credentialType", "credentialTypeHex", "credential_type").isNullOrBlank(),
+                        "hasCredentialStatus" to (request.obj("credentialStatus") != null),
+                        "hasVcJson" to !request.text("vcJson").isNullOrBlank(),
+                        "hasSdJwt" to !firstText(request, "sdJwt", "sd_jwt").isNullOrBlank(),
+                        "payloadLen" to jsonPayload.length,
+                        "payloadHash" to shortSha256(jsonPayload)
+                    )
+                )
+                val savedCredential = requestedCredentialId
                     ?.takeIf { it.isNotBlank() }
                     ?.let { credentialRepository.getCredentialById(it) }
-                val vcJson = resolveVcJson(request)
-                val vc = Json.parseToJsonElement(vcJson).jsonObject
-                validateCredentialAgainstWallet(vc, walletStateStore.getWalletStateOrNull())
-                val status = vc.obj("credentialStatus")
-                    ?: throw IllegalArgumentException("credentialStatus is required")
+                val directIssuerAccount = xrplAccountFromText(
+                    firstText(request, "issuerAccount", "issuerAddress", "issuer", "issuer_account")
+                )
+                val directHolderAccount = xrplAccountFromText(
+                    firstText(
+                        request,
+                        "holderAccount",
+                        "holderXrplAddress",
+                        "holder",
+                        "subject",
+                        "subjectAccount",
+                        "holder_account"
+                    )
+                )
+                val directCredentialType = firstText(request, "credentialType", "credentialTypeHex", "credential_type")
+                val walletState = walletStateStore.getWalletStateOrNull()
+                val vc = if (
+                    directIssuerAccount.isNullOrBlank() ||
+                    directHolderAccount.isNullOrBlank() ||
+                    directCredentialType.isNullOrBlank()
+                ) {
+                    Json.parseToJsonElement(resolveVcJson(request)).jsonObject.also {
+                        validateCredentialAgainstWallet(it, walletState)
+                    }
+                } else {
+                    null
+                }
+                val status = request.obj("credentialStatus")
+                    ?: request.obj("credential")?.obj("credentialStatus")
+                    ?: vc?.obj("credentialStatus")
 
-                val issuerAccount = request.text("issuerAccount")
-                    ?: status.text("issuer")
+                val issuerAccount = directIssuerAccount
+                    ?: xrplAccountFromText(status?.text("issuer"))
                     ?: savedCredential?.issuerAccount
-                    ?: accountFromDid(request.text("issuerDid").orEmpty())
-                val holderAccount = request.text("holderAccount")
-                    ?: status.text("subject")
+                    ?: firstText(request, "issuerDid")?.let(::accountFromDid)
+                val holderAccount = directHolderAccount
+                    ?: xrplAccountFromText(status?.text("subject"))
                     ?: savedCredential?.holderAccount
-                    ?: walletStateStore.getWalletStateOrNull()?.account
+                    ?: walletState?.account
                     ?: throw IllegalArgumentException("holderAccount is required")
-                val credentialType = request.text("credentialType")
-                    ?: status.text("credentialType")
+                val credentialType = directCredentialType
+                    ?: status?.text("credentialType")
                     ?: savedCredential?.credentialType
                     ?: throw IllegalArgumentException("credentialType is required")
+
+                require(!issuerAccount.isNullOrBlank()) { "issuerAccount is required" }
+                logBridgeFlow(
+                    "vc.issue.status.query",
+                    mapOf(
+                        "requestId" to requestId,
+                        "credentialId" to (savedCredential?.credentialId ?: requestedCredentialId),
+                        "savedCredentialFound" to (savedCredential != null),
+                        "issuerAccount" to issuerAccount,
+                        "holderAccount" to holderAccount,
+                        "credentialType" to credentialType
+                    )
+                )
+                walletState?.let { activeWallet ->
+                    require(holderAccount == activeWallet.account) {
+                        "holder account mismatch: wallet=${activeWallet.account}, request=$holderAccount"
+                    }
+                }
 
                 val result = xrplHelper.getCredentialStatus(
                     issuerAddress = issuerAccount,
@@ -1238,18 +1433,36 @@ class WalletBridge(
                         credentialRepository.updateCredential(nextCredential)
                     }
                 }
+                logBridgeFlow(
+                    "vc.issue.status.result",
+                    mapOf(
+                        "requestId" to requestId,
+                        "credentialId" to (savedCredential?.credentialId ?: requestedCredentialId),
+                        "found" to result.found,
+                        "accepted" to result.accepted,
+                        "active" to result.active,
+                        "credentialIndex" to result.credentialIndex,
+                        "flags" to result.flags,
+                        "expiration" to result.expiration,
+                        "error" to result.error
+                    )
+                )
 
                 withContext(Dispatchers.Main) {
                     emitCallback("CHECK_CREDENTIAL_STATUS", true) {
-                        put("credentialId", savedCredential?.credentialId.orEmpty())
+                        requestId?.let { put("requestId", it) }
+                        put("credentialId", savedCredential?.credentialId ?: requestedCredentialId.orEmpty())
                         put("credentialIndex", result.credentialIndex)
                         put("found", result.found)
+                        put("credentialEntryFound", result.found)
                         put("active", result.active)
                         put("accepted", result.accepted)
+                        put("credentialAccepted", result.accepted)
                         put("issuerAccount", result.issuerAccount)
                         put("holderAccount", result.holderAccount)
                         put("credentialType", result.credentialType)
                         put("checkedAtUtc", result.checkedAtUtc)
+                        savedCredential?.credentialAcceptHash?.let { put("txHash", it) }
                         result.flags?.let { put("flags", it) }
                         result.expiration?.let { put("expiration", it) }
                         result.error?.let { put("error", it) }
@@ -1261,10 +1474,12 @@ class WalletBridge(
                     ).show()
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "checkCredentialStatus failed", e)
+                logBridgeFailure("vc.issue.status.failed", requestId, e, mapOf("credentialId" to requestedCredentialId))
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "Credential status check failed: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback("CHECK_CREDENTIAL_STATUS", false) {
+                        requestId?.let { put("requestId", it) }
+                        requestedCredentialId?.let { put("credentialId", it) }
                         put("error", e.message ?: "Unknown error")
                     }
                 }
@@ -1534,10 +1749,23 @@ class WalletBridge(
     @JavascriptInterface
     fun submitToXRPL(jsonPayload: String) {
         scope.launch(Dispatchers.Main) {
-            val request = Json.parseToJsonElement(jsonPayload).jsonObject
+            val request = parseJsonObjectOrEmpty(jsonPayload)
             try {
-                // Check WebView URL on Main thread
                 requireTrustedBridgeOrigin("SUBMIT_TO_XRPL")
+                logBridgeFlow(
+                    "vc.issue.xrpl.received",
+                    mapOf(
+                        "requestId" to request.text("requestId"),
+                        "credentialId" to request.text("credentialId"),
+                        "hasIssuerAccount" to !firstText(request, "issuerAccount", "issuerAddress", "issuer", "issuer_account").isNullOrBlank(),
+                        "hasHolderAccount" to !firstText(request, "holderAccount", "holderXrplAddress", "holder", "subject", "subjectAccount", "holder_account").isNullOrBlank(),
+                        "hasCredentialType" to !firstText(request, "credentialType", "credentialTypeHex", "credential_type").isNullOrBlank(),
+                        "hasCredentialStatus" to (request.obj("credentialStatus") != null),
+                        "hasDirectVc" to (request.obj("credential") != null || !request.text("vcJson").isNullOrBlank() || !request.text("sdJwt").isNullOrBlank()),
+                        "payloadLen" to jsonPayload.length,
+                        "payloadHash" to shortSha256(jsonPayload)
+                    )
+                )
 
                 withContext(Dispatchers.IO) {
                     val seed = walletStateStore.requireSeed()
@@ -1547,29 +1775,80 @@ class WalletBridge(
                     val savedCredential = request.text("credentialId")
                         ?.takeIf { it.isNotBlank() }
                         ?.let { credentialRepository.getCredentialById(it) }
-                    val vcJson = resolveVcJson(request)
-                    val vcObject = Json.parseToJsonElement(vcJson).jsonObject
-                    validateCredentialAgainstWallet(vcObject, walletStateStore.getWalletStateOrNull())
+                    val hasDirectLedgerFields = !firstText(
+                        request,
+                        "issuerAccount",
+                        "issuerAddress",
+                        "issuer",
+                        "issuer_account"
+                    ).isNullOrBlank() &&
+                        !firstText(
+                            request,
+                            "holderAccount",
+                            "holderXrplAddress",
+                            "holder",
+                            "subject",
+                            "subjectAccount",
+                            "holder_account"
+                        ).isNullOrBlank() &&
+                        !firstText(
+                            request,
+                            "credentialType",
+                            "credentialTypeHex",
+                            "credential_type"
+                        ).isNullOrBlank()
+                    val vcObject = if (hasDirectLedgerFields) {
+                        null
+                    } else {
+                        Json.parseToJsonElement(resolveVcJson(request)).jsonObject.also {
+                            validateCredentialAgainstWallet(it, walletStateStore.getWalletStateOrNull())
+                        }
+                    }
                     val vcStatus = request.obj("credentialStatus")
                         ?: request.obj("credential")?.obj("credentialStatus")
-                        ?: vcObject.obj("credentialStatus")
+                        ?: vcObject?.obj("credentialStatus")
 
-                    val issuerAccount = request.text("issuerAccount")
-                        ?: vcStatus?.text("issuer")
-                        ?: savedCredential?.issuerAccount
-                        ?: accountFromDid(request.text("issuerDid").orEmpty())
-                    val credentialType = request.text("credentialType")
+                    val issuerAccount = xrplAccountFromText(
+                        firstText(request, "issuerAccount", "issuerAddress", "issuer", "issuer_account")
+                            ?: vcStatus?.text("issuer")
+                            ?: savedCredential?.issuerAccount
+                            ?: firstText(request, "issuerDid")?.let(::accountFromDid)
+                    )
+                    val credentialType = firstText(request, "credentialType", "credentialTypeHex", "credential_type")
                         ?: vcStatus?.text("credentialType")
                         ?: savedCredential?.credentialType
-                    val expectedHolderAccount = request.text("holderAccount")
-                        ?: vcStatus?.text("subject")
-                        ?: savedCredential?.holderAccount
-                        ?: walletState.account
+                    val expectedHolderAccount = xrplAccountFromText(
+                        firstText(
+                            request,
+                            "holderAccount",
+                            "holderXrplAddress",
+                            "holder",
+                            "subject",
+                            "subjectAccount",
+                            "holder_account"
+                        )
+                            ?: vcStatus?.text("subject")
+                            ?: savedCredential?.holderAccount
+                            ?: walletState.account
+                    )
 
                     require(!issuerAccount.isNullOrBlank()) { "issuerAccount is required" }
                     require(!credentialType.isNullOrBlank()) { "credentialType is required" }
 
                     val holderAccount = seed.deriveKeyPair().publicKey().deriveAddress().value()
+                    logBridgeFlow(
+                        "vc.issue.xrpl.resolved",
+                        mapOf(
+                            "requestId" to request.text("requestId"),
+                            "credentialId" to (savedCredential?.credentialId ?: request.text("credentialId")),
+                            "savedCredentialFound" to (savedCredential != null),
+                            "hasDirectLedgerFields" to hasDirectLedgerFields,
+                            "issuerAccount" to issuerAccount,
+                            "holderAccount" to holderAccount,
+                            "expectedHolderAccount" to expectedHolderAccount,
+                            "credentialType" to credentialType
+                        )
+                    )
                     if (!expectedHolderAccount.isNullOrBlank()) {
                         require(holderAccount == expectedHolderAccount) {
                             "holder account mismatch: seed=$holderAccount, vc=$expectedHolderAccount"
@@ -1585,6 +1864,19 @@ class WalletBridge(
                     val engineResult = result.engineResult()
                     val ledgerApplied = engineResult == "tesSUCCESS"
                     val alreadyExists = engineResult == "tecDUPLICATE"
+                    logBridgeFlow(
+                        "vc.issue.xrpl.result",
+                        mapOf(
+                            "requestId" to request.text("requestId"),
+                            "credentialId" to (savedCredential?.credentialId ?: request.text("credentialId")),
+                            "txHash" to txHash,
+                            "engineResult" to engineResult,
+                            "accepted" to result.accepted(),
+                            "applied" to result.applied(),
+                            "ledgerApplied" to ledgerApplied,
+                            "alreadyExists" to alreadyExists
+                        )
+                    )
 
                     if (ledgerApplied || alreadyExists) savedCredential?.let {
                         credentialRepository.updateCredential(
@@ -1598,14 +1890,17 @@ class WalletBridge(
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, "XRPL submitted: $engineResult", Toast.LENGTH_LONG).show()
                         emitCallback("SUBMIT_TO_XRPL", ledgerApplied || alreadyExists) {
-                            put("credentialId", savedCredential?.credentialId.orEmpty())
+                            request.text("requestId")?.let { put("requestId", it) }
+                            put("credentialId", savedCredential?.credentialId ?: request.text("credentialId").orEmpty())
                             put("holderAccount", holderAccount)
                             put("issuerAccount", issuerAccount)
                             put("credentialType", credentialType)
                             put("txHash", txHash)
+                            put("credentialAcceptHash", txHash)
                             put("engineResult", engineResult)
                             put("engineResultMessage", result.engineResultMessage())
                             put("accepted", result.accepted())
+                            put("acceptedAt", nowUtcIso())
                             put("applied", result.applied())
                             put("ledgerApplied", ledgerApplied)
                             put("alreadyExists", alreadyExists)
@@ -1613,8 +1908,28 @@ class WalletBridge(
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "submitToXRPL failed", e)
+                logBridgeFailure(
+                    "vc.issue.xrpl.failed",
+                    request.text("requestId"),
+                    e,
+                    mapOf("credentialId" to request.text("credentialId"))
+                )
                 emitCallback("SUBMIT_TO_XRPL", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    request.text("credentialId")?.let { put("credentialId", it) }
+                    firstText(request, "issuerAccount", "issuerAddress", "issuer", "issuer_account")?.let {
+                        put("issuerAccount", xrplAccountFromText(it) ?: it)
+                    }
+                    firstText(request, "holderAccount", "holderXrplAddress", "holder", "subject", "subjectAccount", "holder_account")?.let {
+                        put("holderAccount", xrplAccountFromText(it) ?: it)
+                    }
+                    firstText(request, "credentialType", "credentialTypeHex", "credential_type")?.let {
+                        put("credentialType", it)
+                    }
+                    if (isInactiveXrplAccountMessage(e.message.orEmpty())) {
+                        put("errorCode", "XRPL_ACCOUNT_NOT_ACTIVATED")
+                        put("errorHint", "Fund the holder and issuer accounts on XRPL testnet before CredentialAccept")
+                    }
                     put("error", e.message ?: "Unknown error")
                 }
             }
@@ -2376,6 +2691,23 @@ class WalletBridge(
                 val qrData = request.text("qrData") ?: request.text("data") ?: request.text("text")
                 val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
                 val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
+                logBridgeFlow(
+                    "vc.issue.qr.request",
+                    mapOf(
+                        "callbackAction" to callbackAction,
+                        "requestId" to requestId,
+                        "mode" to (qrMode ?: "generic"),
+                        "forcedActionType" to forcedActionType,
+                        "hasInlineQr" to !qrData.isNullOrBlank(),
+                        "qrLen" to (qrData?.length ?: 0),
+                        "qrHash" to shortSha256(qrData),
+                        "actionType" to qrInfo.actionType,
+                        "hasEndpoint" to !qrInfo.endpoint.isNullOrBlank(),
+                        "hasCoreBaseUrl" to !qrInfo.coreBaseUrl.isNullOrBlank(),
+                        "hasChallenge" to !qrInfo.challenge.isNullOrBlank(),
+                        "expiresAt" to qrInfo.expiresAt
+                    )
+                )
                 registerQrChallengeIfPresent(qrInfo)
 
                 withContext(Dispatchers.Main) {
@@ -2385,11 +2717,20 @@ class WalletBridge(
                         putQrRequestInfo(qrInfo)
                     }
                     if (qrData.isNullOrBlank()) {
+                        logBridgeFlow(
+                            "vc.issue.qr.launchNative",
+                            mapOf(
+                                "callbackAction" to callbackAction,
+                                "requestId" to requestId,
+                                "mode" to (qrMode ?: "generic"),
+                                "actionType" to qrInfo.actionType
+                            )
+                        )
                         launchQrScanner(request.toString())
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "scanQRCode failed", e)
+                logBridgeFailure("vc.issue.qr.request.failed", null, e, mapOf("callbackAction" to callbackAction))
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "QR scan failed: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback(callbackAction, false) {
@@ -2406,7 +2747,22 @@ class WalletBridge(
                 val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
                 val callbackAction = request.text("_callbackAction") ?: "SCAN_QR_CODE"
                 if (!errorMessage.isNullOrBlank()) {
+                    val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
+                    val qrInfo = buildQrRequestInfo(request, buildJsonObject { }, null)
+                    logBridgeFlow(
+                        "vc.issue.qr.cancelled",
+                        mapOf(
+                            "callbackAction" to callbackAction,
+                            "requestId" to requestId,
+                            "mode" to (request.text("_qrMode") ?: "generic"),
+                            "actionType" to qrInfo.actionType,
+                            "error" to errorMessage
+                        )
+                    )
                     emitCallback(callbackAction, false) {
+                        put("requestId", requestId)
+                        put("mode", request.text("_qrMode") ?: "cancelled")
+                        putQrRequestInfo(qrInfo)
                         put("error", errorMessage)
                         requestJson?.let { put("request", it) }
                     }
@@ -2416,6 +2772,22 @@ class WalletBridge(
                 val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
                 val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
                 val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
+                logBridgeFlow(
+                    "vc.issue.qr.scanned",
+                    mapOf(
+                        "callbackAction" to callbackAction,
+                        "requestId" to requestId,
+                        "mode" to (request.text("_qrMode") ?: "generic"),
+                        "actionType" to qrInfo.actionType,
+                        "qrLen" to (qrData?.length ?: 0),
+                        "qrHash" to shortSha256(qrData),
+                        "hasJsonPayload" to qrPayload.isNotEmpty(),
+                        "hasEndpoint" to !qrInfo.endpoint.isNullOrBlank(),
+                        "hasCoreBaseUrl" to !qrInfo.coreBaseUrl.isNullOrBlank(),
+                        "hasChallenge" to !qrInfo.challenge.isNullOrBlank(),
+                        "expiresAt" to qrInfo.expiresAt
+                    )
+                )
                 registerQrChallengeIfPresent(qrInfo)
 
                 emitCallback(callbackAction, true) {
@@ -2424,7 +2796,7 @@ class WalletBridge(
                     putQrRequestInfo(qrInfo)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "onQrScanResult failed", e)
+                logBridgeFailure("vc.issue.qr.result.failed", null, e)
                 emitCallback("SCAN_QR_CODE", false) {
                     put("error", e.message ?: "Unknown error")
                 }
@@ -2611,6 +2983,210 @@ class WalletBridge(
         return (this[name] as? JsonPrimitive)
             ?.contentOrNull
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun firstText(source: JsonObject?, vararg names: String): String? {
+        if (source == null) return null
+        return names.firstNotNullOfOrNull { name -> source.text(name) }
+    }
+
+    private fun logBridgeFlow(event: String, fields: Map<String, Any?> = emptyMap()) {
+        Log.i(TAG, buildLogMessage(event, fields))
+    }
+
+    private fun logBridgeFailure(
+        event: String,
+        requestId: String?,
+        error: Exception,
+        fields: Map<String, Any?> = emptyMap()
+    ) {
+        Log.e(
+            TAG,
+            buildLogMessage(
+                event,
+                fields + mapOf(
+                    "requestId" to requestId,
+                    "errorClass" to error::class.java.simpleName,
+                    "error" to error.message
+                )
+            )
+        )
+    }
+
+    private fun buildLogMessage(event: String, fields: Map<String, Any?>): String {
+        val details = fields.entries.joinToString(" ") { (key, value) ->
+            "$key=${sanitizeLogValue(value)}"
+        }
+        return if (details.isBlank()) event else "$event $details"
+    }
+
+    private fun sanitizeLogValue(value: Any?): String {
+        return when (value) {
+            null -> "null"
+            is Boolean, is Number -> value.toString()
+            else -> value.toString()
+                .replace('\r', '_')
+                .replace('\n', '_')
+                .replace('\t', '_')
+                .take(MAX_LOG_VALUE_LENGTH)
+        }
+    }
+
+    private fun shortSha256(value: String?): String {
+        if (value.isNullOrBlank()) return ""
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(LOG_HASH_LENGTH)
+    }
+
+    private fun kotlinx.serialization.json.JsonObjectBuilder.putIfNotBlank(name: String, value: String?) {
+        if (!value.isNullOrBlank()) {
+            put(name, value)
+        }
+    }
+
+    private fun getOrCreateDeviceId(): String {
+        val existing = devicePrefs.getString(KEY_DEVICE_ID, null)
+        if (!existing.isNullOrBlank()) return existing
+        val generated = UUID.randomUUID().toString()
+        devicePrefs.edit().putString(KEY_DEVICE_ID, generated).apply()
+        return generated
+    }
+
+    private fun resolveDeviceName(): String {
+        val name = listOf(Build.MANUFACTURER, Build.MODEL)
+            .mapNotNull { it?.trim()?.takeIf { value -> value.isNotBlank() } }
+            .joinToString(" ")
+            .trim()
+        return name.ifBlank { "Android Device" }
+    }
+
+    private fun resolveAppVersion(): String {
+        return runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.0"
+    }
+
+    private fun xrplAccountFromText(value: String?): String? {
+        val normalized = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        return if (normalized.startsWith("did:xrpl:1:")) accountFromDid(normalized) else normalized
+    }
+
+    private fun xrplDidFromText(value: String?): String? {
+        val normalized = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        return normalized.takeIf { it.startsWith("did:xrpl:1:") }
+    }
+
+    private fun resolveSaveCredentialEnvelope(request: JsonObject, rawPayload: String): CredentialEnvelope {
+        val rawCredential = firstText(request, "sdJwt", "sd_jwt")
+            ?: firstText(request, "credentialJwt", "credential_jwt")
+            ?: firstText(request, "vcJwt", "vc_jwt")
+            ?: request.text("vcJson")
+            ?: request.text("credentialPayload")
+            ?: request.text("credential")
+            ?: request.obj("credentialPayload")?.toString()
+            ?: request.obj("credential")?.toString()
+            ?: rawPayload.takeIf { isDirectCredentialPayload(request) }
+            ?: throw IllegalArgumentException("credential, sdJwt, vcJwt, or vcJson is required")
+        return parseCredentialEnvelope(rawCredential)
+    }
+
+    private fun isDirectCredentialPayload(request: JsonObject): Boolean {
+        return request.obj("credentialStatus") != null ||
+            request.obj("credentialSubject") != null ||
+            request.text("issuer") != null ||
+            request.text("issuerDid") != null
+    }
+
+    private fun normalizeCredentialPayloadForSave(
+        payload: JsonObject,
+        request: JsonObject,
+        metadata: JsonObject,
+        walletState: WalletStateStore.WalletState?
+    ): JsonObject {
+        val payloadStatus = payload.obj("credentialStatus")
+        val payloadSubject = payload.obj("credentialSubject")
+        val issuerAccount = xrplAccountFromText(
+            firstText(metadata, "issuerAccount")
+                ?: firstText(request, "issuerAccount", "issuerAddress", "issuer_account")
+                ?: payload.text("issuerAccount")
+                ?: payloadStatus?.text("issuer")
+                ?: firstText(metadata, "issuerDid")
+                ?: firstText(request, "issuerDid")
+                ?: payload.text("issuerDid")
+                ?: payload.text("issuer")
+        )
+        val holderAccount = xrplAccountFromText(
+            firstText(metadata, "holderXrplAddress", "holderAccount", "holder_account")
+                ?: firstText(request, "holderXrplAddress", "holderAccount", "holder_account")
+                ?: payload.text("holderAccount")
+                ?: payloadStatus?.text("subject")
+                ?: firstText(metadata, "holderDid")
+                ?: firstText(request, "holderDid")
+                ?: payload.text("holderDid")
+                ?: payloadSubject?.text("id")
+                ?: walletState?.account
+        )
+        val issuerDid = firstText(metadata, "issuerDid")
+            ?: firstText(request, "issuerDid")
+            ?: payload.text("issuerDid")
+            ?: xrplDidFromText(payload.text("issuer"))
+            ?: issuerAccount?.let { "did:xrpl:1:$it" }
+        val holderDid = firstText(metadata, "holderDid")
+            ?: firstText(request, "holderDid")
+            ?: payload.text("holderDid")
+            ?: xrplDidFromText(payloadSubject?.text("id"))
+            ?: holderAccount?.let { "did:xrpl:1:$it" }
+            ?: walletState?.did
+        val credentialType = firstText(metadata, "credentialType")
+            ?: firstText(request, "credentialType", "credentialTypeHex", "credential_type")
+            ?: payload.text("credentialType")
+            ?: payloadStatus?.text("credentialType")
+            ?: "KYC_CREDENTIAL"
+        val vcCoreHash = firstText(metadata, "vcHash", "vcCoreHash")
+            ?: firstText(request, "vcHash", "vcCoreHash")
+            ?: payload.text("vcCoreHash")
+            ?: payloadStatus?.text("vcCoreHash")
+        val credentialId = firstText(request, "credentialId")
+            ?: firstText(metadata, "credentialId")
+            ?: firstText(payload, "credentialId", "id", "jti")
+            ?: firstText(request, "id")
+        val validFrom = firstText(metadata, "issuedAt", "validFrom")
+            ?: firstText(payload, "validFrom", "issuanceDate", "issuedAt")
+        val validUntil = firstText(metadata, "expiresAt", "validUntil", "expirationDate")
+            ?: firstText(payload, "validUntil", "expirationDate", "expiresAt")
+
+        return buildJsonObject {
+            payload.forEach { (key, value) -> put(key, value) }
+            putIfNotBlank("credentialId", credentialId)
+            putIfNotBlank("id", payload.text("id") ?: credentialId)
+            putIfNotBlank("issuer", issuerDid)
+            putIfNotBlank("issuerDid", issuerDid)
+            putIfNotBlank("issuerAccount", issuerAccount)
+            putIfNotBlank("holderDid", holderDid)
+            putIfNotBlank("holderAccount", holderAccount)
+            putIfNotBlank("credentialType", credentialType)
+            putIfNotBlank("vcCoreHash", vcCoreHash)
+            putIfNotBlank("validFrom", validFrom)
+            putIfNotBlank("validUntil", validUntil)
+            put(
+                "credentialSubject",
+                buildJsonObject {
+                    payloadSubject?.forEach { (key, value) -> put(key, value) }
+                    putIfNotBlank("id", payloadSubject?.text("id") ?: holderDid)
+                }
+            )
+            put(
+                "credentialStatus",
+                buildJsonObject {
+                    payloadStatus?.forEach { (key, value) -> put(key, value) }
+                    putIfNotBlank("issuer", issuerAccount)
+                    putIfNotBlank("subject", holderAccount)
+                    putIfNotBlank("credentialType", credentialType)
+                    putIfNotBlank("vcCoreHash", vcCoreHash)
+                    firstText(metadata, "credentialStatusId")?.let { put("statusId", it) }
+                }
+            )
+        }
     }
 
     private fun buildCredentialSummary(credential: CredentialEntity): JsonObject {
@@ -3746,8 +4322,13 @@ class WalletBridge(
 
     private suspend fun resolveVcJson(request: JsonObject): String {
         request.text("sdJwt")?.let { return parseCredentialEnvelope(it).payload.toString() }
+        request.text("sd_jwt")?.let { return parseCredentialEnvelope(it).payload.toString() }
+        request.text("credentialJwt")?.takeIf { isSdJwt(it) }?.let { return parseCredentialEnvelope(it).payload.toString() }
+        request.text("credential_jwt")?.takeIf { isSdJwt(it) }?.let { return parseCredentialEnvelope(it).payload.toString() }
         request.text("vcJson")?.let { return parseCredentialEnvelope(it).payload.toString() }
         request.text("credential")?.takeIf { isSdJwt(it) }?.let { return parseCredentialEnvelope(it).payload.toString() }
+        request.text("credentialJwt")?.takeIf { isCompactJwt(it) }?.let { return decodeJwtPayload(it).toString() }
+        request.text("credential_jwt")?.takeIf { isCompactJwt(it) }?.let { return decodeJwtPayload(it).toString() }
         request.text("vcJwt")?.let { return decodeJwtPayload(it).toString() }
         request.text("credential")?.takeIf { isCompactJwt(it) }?.let { return decodeJwtPayload(it).toString() }
         request.obj("credential")?.let { return it.toString() }
@@ -3762,6 +4343,8 @@ class WalletBridge(
     }
 
     private suspend fun resolveVcJwt(request: JsonObject): String? {
+        request.text("credentialJwt")?.takeIf { isCompactJwt(it) }?.let { return it }
+        request.text("credential_jwt")?.takeIf { isCompactJwt(it) }?.let { return it }
         request.text("vcJwt")?.takeIf { isCompactJwt(it) }?.let { return it }
         request.text("vcJson")?.takeIf { isCompactJwt(it) }?.let { return it }
         request.text("credential")?.takeIf { isCompactJwt(it) }?.let { return it }
@@ -3777,6 +4360,9 @@ class WalletBridge(
 
     private suspend fun resolveSdJwt(request: JsonObject): String? {
         request.text("sdJwt")?.takeIf { isSdJwt(it) }?.let { return it }
+        request.text("sd_jwt")?.takeIf { isSdJwt(it) }?.let { return it }
+        request.text("credentialJwt")?.takeIf { isSdJwt(it) }?.let { return it }
+        request.text("credential_jwt")?.takeIf { isSdJwt(it) }?.let { return it }
         request.text("credential")?.takeIf { isSdJwt(it) }?.let { return it }
         request.text("vcJson")?.let { raw ->
             val envelope = runCatching { parseCredentialEnvelope(raw) }.getOrNull()
@@ -3812,6 +4398,8 @@ class WalletBridge(
         val json = Json.parseToJsonElement(trimmed).jsonObject
         val sdJwtValue = json.text("sdJwt")
             ?: json.text("sd_jwt")
+            ?: json.text("credentialJwt")?.takeIf { isSdJwt(it) }
+            ?: json.text("credential_jwt")?.takeIf { isSdJwt(it) }
             ?: json.text("credential")?.takeIf { isSdJwt(it) }
         if (!sdJwtValue.isNullOrBlank()) {
             val sdJwt = parseSdJwtCredential(sdJwtValue)
@@ -3825,7 +4413,9 @@ class WalletBridge(
                 format = "dc+sd-jwt"
             )
         }
-        val jwt = json.text("vcJwt")
+        val jwt = json.text("credentialJwt")?.takeIf { isCompactJwt(it) }
+            ?: json.text("credential_jwt")?.takeIf { isCompactJwt(it) }
+            ?: json.text("vcJwt")
             ?: json.text("credential")?.takeIf { isCompactJwt(it) }
             ?: json.text("vc_jwt")
         if (!jwt.isNullOrBlank()) {
@@ -4240,6 +4830,9 @@ class WalletBridge(
         private val OCTET_STREAM = "application/octet-stream".toMediaType()
         private val AUTH_METHODS = setOf("pin", "pattern", "biometric")
         private const val SENSITIVE_REASON_XRP_PAYMENT = "xrp-payment"
+        private const val KEY_DEVICE_ID = "device_id"
+        private const val LOG_HASH_LENGTH = 12
+        private const val MAX_LOG_VALUE_LENGTH = 160
         private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
             "dev-kyvc.khuoo.synology.me",

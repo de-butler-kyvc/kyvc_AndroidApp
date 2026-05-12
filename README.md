@@ -8,6 +8,16 @@ kyvc의 안드로이드 전용 앱 개발용 레포지토리입니다.
 - 웹 구현 흐름/예외처리 빠른 참고는 [WEB_DEVELOPER_INTEGRATION_GUIDE.md](./WEB_DEVELOPER_INTEGRATION_GUIDE.md)를 본다.
 - 브리지 함수 시그니처나 응답 형식이 바뀌면 위 문서를 먼저 같이 갱신한다.
 
+## ENV 예시
+
+- 팀 공통 설정 예시: [.env.example](./.env.example)
+- Android SDK 로컬 설정 예시: [local.properties.example](./local.properties.example)
+
+주의:
+- 현재 앱은 `.env`를 자동 로드하지 않는다.
+- `.env.example`은 팀 간 URL/엔드포인트 기준 공유용 문서 파일이다.
+- 실제 동작 값은 `MainActivity` 상수와 WebView 입력값(`coreBaseUrl`)에서 사용된다.
+
 ## 문서 갱신 규칙
 
 - 새로운 기능을 구현하면 `README.md`의 구현 상태와 사용 흐름을 같이 갱신한다.
@@ -88,8 +98,11 @@ UI/브리지 기본값 규칙:
 - 앱 잠금은 PIN/패턴/지문 공용 실패 횟수 5회를 공유하며, 5회 초과 시 이메일 인증 완료 전까지 모든 인증 수단을 막는다.
 - 인증 성공 시 30분 세션을 시작하고, 세션 만료 후 앱 복귀 또는 재진입 시 다시 인증한다.
 - 웹에서 `requestNativeAuth(method=pin)` 호출 시 PIN 입력은 웹뷰가 아니라 네이티브 `UnlockActivity`에서 처리한다. PIN UI는 `app/src/main/assets/pinExample.html` 시안을 기준으로 반영했다.
+- 웹에서 PIN 재설정이 필요하면 `requestPinReset` 브리지를 호출한다. 웹은 새 PIN 값을 받거나 전달하지 않고, Android가 네이티브 PIN 재설정 화면에서 4자리 PIN을 입력받아 저장한다.
 - 앱 진입 잠금은 `PIN 로그인`/`지문 로그인` 선택 버튼으로 시작하며, 선택된 방식은 `UnlockActivity`에서 처리한다.
 - PIN은 pinExample 키패드 스타일을 사용한다(웹뷰 아님). 테스트용 `PIN 재설정` 버튼을 잠금 화면에 제공한다.
+- 지문 인증, QR 스캔, 복구 문구 백업, 지갑 복구는 WebView 페이지 이동이 아니라 WebView 위 네이티브 오버레이로 표시한다. 네이티브 오버레이의 헤더/뒤로가기 버튼 크기는 PIN 인증 화면 기준으로 맞춘다.
+- 앱 런처 아이콘은 `app/src/main/assets/logo3.png`를 원본으로 사용하고, `kyvc_launcher` adaptive icon 및 density별 mipmap으로 변환해 적용한다.
 
 ## 📌 주요 작업 내용
 ### Wallet 및 Bridge 기능 구현 (2025-05-22)
@@ -109,7 +122,9 @@ UI/브리지 기본값 규칙:
 - **Auth Key Separation**: XRPL account key는 `CredentialAccept` 전용으로 유지하고, VP 서명용 holder authentication key를 별도 secp256k1 key로 생성/암호화 저장하도록 분리.
 - **Session Sync**: 로그아웃 시 웹뷰 종료 및 잠금 화면 전환. 네이티브 인증 성공 시 30분 세션 자동 갱신.
 - **VP Signing**: `signMessage` 브릿지에서 challenge/domain/VC를 받아 JCS 기반 `DataIntegrityProof` VP를 생성하고 holder DID Document와 함께 WebView 콜백으로 반환
-- **QR Bridge**: `scanQRCode` 브릿지가 QR 요청/데이터를 `VC_ISSUE`, `VP_REQUEST`, `LOGIN_REQUEST`로 분류해 `SCAN_QR_CODE` 콜백으로 전달하도록 연결
+- **QR Bridge**: 범용 `scanQRCode`와 용도별 `scanIssueQrCode`/`scanPresentationQrCode` 브릿지가 QR 요청/데이터를 `VC_ISSUE`, `VP_REQUEST`, `LOGIN_REQUEST`로 분류해 WebView 콜백으로 전달하도록 연결
+- **Native Overlay UI**: 지문 인증, QR 스캔, 복구 문구 백업, 지갑 복구 화면을 네이티브 오버레이로 구현하고 웹은 브릿지 호출/결과 처리만 담당
+- **App Icon**: `logo3.png` 기반 KYvC 런처 아이콘을 adaptive icon과 density별 mipmap 리소스로 반영
 - **VC Validation**: VC 저장/서명/상태조회 전에 `credentialSubject.id`, `credentialStatus.subject`, `validFrom/validUntil`을 검증하고 holder wallet과 맞지 않으면 차단
 - **XRPL Status**: credential ledger entry index를 계산해 `ledger_entry`로 status를 조회하고 active 여부를 `CHECK_CREDENTIAL_STATUS` 콜백으로 반환
 - **Verifier Submit**: `submitPresentationToVerifier` 브릿지에서 signed VP, holder DID Document, policy, XRPL status 요구조건을 묶어 `/verifier/presentations/verify` 요청을 POST
@@ -309,9 +324,13 @@ requestVerifierChallenge (nonce/aud 수신)
 
 `createWallet`은 Android 내부에서 secp256k1 holder seed를 만들고 Keystore 보호 AES-GCM 키로 암호화 저장한다. `getWalletInfo`는 seed를 반환하지 않고 holder account, public key, DID만 반환한다.
 
+신규 XRPL 계정은 입금 전까지 ledger에 존재하지 않아 `actNotFound`가 날 수 있다. 앱은 이를 치명 오류로 보지 않고 `getWalletAssets`에서 `ok=true`, `accountActivated=false`, `depositRequired=true`로 반환한다. 웹은 이 상태에서 이탈시키지 말고 입금 주소/QR을 보여준 뒤, 입금 후 다시 자산 조회를 실행해야 한다.
+
 `exportWalletSeed`는 활성 인증 세션이 있을 때만 holder seed를 1회 응답으로 반환한다. 현재 웹 테스트 흐름에서는 이를 `Seed 보기`로 사용하고, 필요 시 네이티브 클립보드 복사만 지원한다. 이 값은 민감정보이므로 웹 로그, 분석 SDK, 원격 저장소에 남기면 안 된다.
 
 `restoreWallet`은 seed 또는 12단어 mnemonic 기반 복구를 웹에 노출한다. 복구 후에는 holder auth key가 새로 생성되므로 `holderDidSetRegistrationRequired: true`가 반환되고, 이 경우 `submitHolderDidSet`를 다시 실행해야 한다.
+
+웹이 복구 문구 백업/지갑 복구를 네이티브 화면으로 처리해야 할 때는 `requestMnemonicBackup`, `requestWalletRestore`를 사용한다. 두 화면은 각각 `app/src/main/assets/복구문구 백업.png`, `app/src/main/assets/지갑복구.png` 시안을 기준으로 구현되어 있으며, 웹은 mnemonic 원문을 직접 받거나 전달하지 않는다.
 
 `deriveNextAccount`는 현재 활성 계정이 mnemonic 백업 상태(`hasMnemonic=true`)일 때만 실행한다. standalone 계정이면 먼저 `upgradeToMnemonic`을 실행해야 한다.
 
@@ -340,7 +359,7 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 샘플 VC에서는 웹 화면의 `issuerAccount` 입력값으로 placeholder issuer를 교체할 수 있다. 단, 실서버가 발급한 `vc+jwt`는 issuer가 서명한 원문이므로 화면 입력값으로 `issuer`나 `credentialStatus.issuer`를 덮어쓰지 않는다. VC JWT payload의 issuer 값을 기준으로 입력칸을 맞추고, payload를 임의 수정하지 않는다.
 
-`scanQRCode`는 발급자/검증자가 제시하는 요청 QR을 읽는 용도다. 현재 구현은 QR에 담긴 요청 JSON 또는 텍스트를 읽어 `requestId`, `purpose`, `endpoint`, `expiresInSec`, `qrData`를 추출하고, 스캔 결과를 `SCAN_QR_CODE` 콜백으로 WebView에 반환한다. 즉, 임의의 정적 이미지가 아니라 VP 요청, VC 발급 요청, 로그인 요청처럼 실제 플로우를 시작하는 QR을 대상으로 한다.
+`scanQRCode`는 발급자/검증자가 제시하는 요청 QR을 읽는 범용 브릿지다. 운영 웹에서는 용도별로 `scanIssueQrCode`(증명서 발급 QR), `scanPresentationQrCode`(증명서 제출 요청 QR)를 우선 사용한다. 두 브릿지는 QR에 담긴 요청 JSON 또는 텍스트를 읽어 `requestId`, `purpose`, `endpoint`, `expiresInSec`, `qrData`를 추출하고, 각각 `SCAN_ISSUE_QR_CODE`, `SCAN_PRESENTATION_QR_CODE` 콜백으로 WebView에 반환한다. 네이티브 QR 화면은 `app/src/main/assets/발급용큐알.png`, `app/src/main/assets/제출용큐알.png` 시안처럼 흰색 네모 상자 안에 정사각형 스캔 영역을 배치한다.
 
 `checkCredentialStatus`는 VC의 issuer/holder/credentialType으로 XRPL `Credential` ledger entry의 index를 계산해 현재 validated ledger에서 조회한다. 응답의 `Flags`에 accepted bit가 켜져 있고 expiration이 유효하면 active로 판정한다.
 
@@ -348,7 +367,7 @@ Android 내부에 저장된 holder seed에서 복원한 account와 VC/request의
 
 `submitPresentationToVerifier`는 SD-JWT 흐름에서는 `signMessage`로 생성한 `sdJwtKb`와 holder DID Document를 verifier 검증 요청으로 전송한다. 요청에는 `format: kyvc-sd-jwt-presentation-v1`, `presentation.sdJwtKb`, `did_documents`, `require_status`, `status_mode`를 포함하며, Android 쪽에서 먼저 holder DID/subject/issuer/credentialType과 XRPL status active 여부를 다시 확인한 뒤 POST를 보낸다. WebView는 `SUBMIT_TO_VERIFIER` 콜백으로 verifier 응답을 받는다.
 
-`listCredentials`는 앱에 저장된 VC를 목록으로 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
+`getCredentialSummaries`는 웹의 증명서 목록/카드 화면용 브릿지다. 상태값, 발급일, 만료일, issuer DID, holder DID, credentialType, 증명서 종류(`vct` 또는 VC type)를 raw VC 원문 없이 반환한다. `listCredentials`는 디버그/상세용으로 저장된 VC를 더 넓게 보여주고, `refreshAllCredentialStatuses`는 저장된 각 VC의 XRPL status를 다시 조회해 로컬 상태를 갱신한다. `registerVerifierChallenge`는 challenge를 로컬에 저장하고 만료 시간을 기록한다. `submitPresentationToVerifier`는 proof 안의 `challenge`를 사용해 동일 challenge 재제출을 막는다.
 
 브리지 최신 호출 형식은 [WEBVIEW_BRIDGE_SPEC.md](./WEBVIEW_BRIDGE_SPEC.md)를 기준으로 본다. 웹/서버에서 앱 기능을 움직여야 하면 README보다 위 문서의 메서드별 요청/응답/호출 흐름을 우선 사용한다.
 

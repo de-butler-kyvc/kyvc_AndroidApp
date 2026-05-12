@@ -88,6 +88,7 @@
 | --- | --- | --- |
 | `getAuthStatus` | stable | 인증/잠금 상태 단일 조회 기준 |
 | `requestNativeAuth` | stable | PIN/패턴/지문 네이티브 인증 진입 |
+| `requestPinReset` | stable | 웹에서 네이티브 PIN 재설정 화면 호출 |
 | `completeEmailVerification` | stable | 5회 실패 잠금 해제 플로우 |
 | `logout` | stable | 세션 강제 종료 |
 | `createWallet` | stable | 지갑 생성 + DID/DIDDoc 생성 |
@@ -101,6 +102,8 @@
 | `exportWalletSeed` | stable | 민감정보, 세션 필요 |
 | `exportWalletMnemonic` | stable | 민감정보, 세션 필요 |
 | `restoreWallet` | stable | seed/mnemonic 복구 |
+| `requestMnemonicBackup` | stable | 네이티브 복구 문구 백업 화면 호출 |
+| `requestWalletRestore` | stable | 네이티브 지갑 복구 화면 호출 |
 | `submitHolderDidSet` | stable | DIDSet 해시 등록 |
 | `getWalletAssets` | stable | XRP/TrustLine 조회 |
 | `getWalletDepositInfo` | stable | 입금 주소/QR 조회 |
@@ -108,6 +111,7 @@
 | `getWalletTransactions` | stable | account_tx 최근 내역 |
 | `submitXrpPayment` | stable | 송금 전 네이티브 재인증 필요 |
 | `saveVC` | stable | VC/SD-JWT 저장 |
+| `getCredentialSummaries` | stable | 화면 표시용 증명서 요약 조회 |
 | `checkCredentialStatus` | stable | XRPL 상태 조회 |
 | `refreshAllCredentialStatuses` | stable | 상태 일괄 동기화 |
 | `submitToXRPL` | stable | CredentialAccept |
@@ -118,7 +122,9 @@
 | `registerVerifierChallenge` | stable | 로컬 challenge guard 등록 |
 | `signMessage` | stable | SD-JWT+KB 또는 VP 생성 분기 |
 | `submitPresentationToVerifier` | stable | verifier 제출 |
-| `scanQRCode` | experimental | 운영 QR 스키마 확정 전 |
+| `scanQRCode` | experimental | 범용 QR 스캔 |
+| `scanIssueQrCode` | stable | 증명서 발급 QR 스캔 |
+| `scanPresentationQrCode` | stable | 증명서 제출 요청 QR 스캔 |
 
 ## 공통 호출 형식
 
@@ -272,7 +278,79 @@ Response:
 }
 ```
 
-### 3. 이메일 인증 완료 처리
+### 3. PIN 재설정 요청
+
+웹이 PIN 값을 직접 받거나 전달하지 않고, Android 네이티브 PIN 재설정 화면을 띄울 때 사용한다.
+
+Method: `requestPinReset`
+
+Request:
+
+```json
+{
+  "action": "REQUEST_PIN_RESET",
+  "requestId": "f76c7a7e-9e8d-4636-b9e1-6b5964240f10",
+  "issuedAt": "2026-05-12T00:10:30Z",
+  "reason": "user-request"
+}
+```
+
+필수 규칙:
+
+- `requestId`: UUID
+- `issuedAt`: ISO-8601 UTC
+- 요청 TTL: 30초
+- 웹은 새 PIN 값을 보내지 않는다.
+- Android가 네이티브 PIN 재설정 화면을 띄우고, 4자리 입력 완료 시 앱 내부 암호화 저장소에 저장한다.
+- 인증 실패 5회로 `emailVerificationRequired=true` 상태면 재설정 요청은 거부된다. 이 경우 웹에서 이메일 인증 완료 후 `completeEmailVerification`을 먼저 호출한다.
+
+성공 응답:
+
+```json
+{
+  "action": "REQUEST_PIN_RESET",
+  "ok": true,
+  "requestId": "f76c7a7e-9e8d-4636-b9e1-6b5964240f10",
+  "reason": "user-request",
+  "reset": true,
+  "failedAttempts": 0,
+  "remainingAttempts": 5,
+  "failureThreshold": 5,
+  "emailVerificationRequired": false,
+  "sessionUnlocked": true,
+  "sessionRemainingMs": 1800000
+}
+```
+
+취소/실패 응답:
+
+```json
+{
+  "action": "REQUEST_PIN_RESET",
+  "ok": false,
+  "requestId": "f76c7a7e-9e8d-4636-b9e1-6b5964240f10",
+  "reset": false,
+  "failedAttempts": 0,
+  "remainingAttempts": 5,
+  "failureThreshold": 5,
+  "emailVerificationRequired": false,
+  "error": "사용자가 PIN 재설정을 취소했습니다."
+}
+```
+
+호출 흐름:
+
+```text
+웹의 PIN 재설정 버튼 클릭
+-> requestPinReset 호출
+-> Android가 requestId/action/issuedAt/origin 검증
+-> Android가 네이티브 PIN 재설정 화면 표시
+-> 사용자가 새 PIN 4자리 입력
+-> Android가 PIN을 저장하고 실패 횟수 초기화 + 30분 세션 시작
+-> REQUEST_PIN_RESET 결과를 onAndroidResult로 반환
+```
+
+### 4. 이메일 인증 완료 처리
 
 웹에서 이메일 인증을 자체적으로 끝낸 뒤, Android 쪽 실패 횟수를 초기화할 때 사용한다.
 
@@ -304,7 +382,7 @@ Response:
 }
 ```
 
-### 4. 로그아웃
+### 5. 로그아웃
 
 Method: `logout`
 
@@ -556,6 +634,7 @@ Method: `removeWallet`
 - 브리지 결과는 항상 `action + ok + error` 기준으로 분기하고, 성공 가정 코드를 두지 않는다.
 - testnet 전환 이후에는 계정 활성 여부를 testnet faucet/funding 기준으로 확인한다.
 - `actNotFound`는 holder/issuer 계정이 testnet에서 미활성일 가능성이 가장 높다.
+- 신규 지갑 생성 직후 XRPL ledger에는 아직 계정이 없을 수 있다. 이 상태는 오류가 아니라 `accountActivated=false`, `depositRequired=true` 상태로 취급하고, 웹은 입금 주소/QR을 보여줘야 한다.
 
 ### 4. 자산 조회
 
@@ -574,6 +653,8 @@ Response 주요 필드:
   "action": "GET_WALLET_ASSETS",
   "ok": true,
   "account": "r...",
+  "accountActivated": true,
+  "depositRequired": false,
   "xrpBalanceDrops": "12345678",
   "xrpBalanceXrp": "12.345678",
   "ownerCount": 2,
@@ -592,13 +673,39 @@ Response 주요 필드:
 }
 ```
 
+미활성 신규 계정 응답 예시:
+
+```json
+{
+  "action": "GET_WALLET_ASSETS",
+  "ok": true,
+  "account": "r...",
+  "accountActivated": false,
+  "depositRequired": true,
+  "trustLineCount": 0,
+  "lines": [],
+  "checkedAtUtc": "2026-05-09T12:00:00Z",
+  "errorCode": "XRPL_ACCOUNT_NOT_ACTIVATED",
+  "errorTitle": "XRPL 계정 활성화 필요",
+  "errorHint": "이 주소로 XRP를 입금한 뒤 자산 조회를 다시 실행하세요.",
+  "error": "XRPL account is not activated. Deposit XRP to this address first."
+}
+```
+
+웹 처리 기준:
+
+- `ok=true && depositRequired=true`: 오류 화면으로 보내지 말고 입금 주소/QR을 표시한다.
+- `CredentialAccept`, `DIDSet`, 송금은 ledger sequence가 필요하므로 입금 전에는 실행할 수 없다.
+- 입금 후 `getWalletAssets`를 다시 호출해 `accountActivated=true`가 되는지 확인한다.
+
 호출 흐름:
 
 ```text
 웹이 자산 조회 버튼 클릭
 -> getWalletAssets 호출
 -> Android가 현재 holder account 기준 account_info / account_lines 조회
--> XRP 잔액 + trust line 목록을 웹에 반환
+-> 활성 계정이면 XRP 잔액 + trust line 목록 반환
+-> 미활성 계정이면 ok=true + depositRequired=true 반환
 ```
 
 ### 5. 입금 정보 조회
@@ -838,7 +945,79 @@ Response 주요 필드:
 }
 ```
 
-### 10. 지갑 복구
+### 10. 네이티브 복구 문구 백업 화면
+
+웹이 복구 문구를 직접 표시하지 않고 Android 네이티브 화면에서 보여줄 때 사용한다. UI는 `app/src/main/assets/복구문구 백업.png` 시안을 기준으로 구현한다.
+
+Method: `requestMnemonicBackup`
+
+Request:
+
+```json
+{
+  "action": "REQUEST_MNEMONIC_BACKUP",
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "issuedAt": "2026-05-12T10:00:00Z"
+}
+```
+
+규칙:
+
+- 활성 인증 세션이 있어야 한다.
+- 이메일 인증 필요 상태에서는 거부된다.
+- Android가 복구 문구를 네이티브 화면에 표시하고, 웹 콜백에는 mnemonic 원문을 반환하지 않는다.
+
+Response:
+
+```json
+{
+  "action": "REQUEST_MNEMONIC_BACKUP",
+  "ok": true,
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "confirmed": true
+}
+```
+
+### 11. 네이티브 지갑 복구 화면
+
+웹이 복구 문구 입력값을 직접 받지 않고 Android 네이티브 화면에서 입력받을 때 사용한다. UI는 `app/src/main/assets/지갑복구.png` 시안을 기준으로 구현한다.
+
+Method: `requestWalletRestore`
+
+Request:
+
+```json
+{
+  "action": "REQUEST_WALLET_RESTORE",
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "issuedAt": "2026-05-12T10:00:00Z",
+  "overwrite": true,
+  "autoRegisterDidSet": false
+}
+```
+
+규칙:
+
+- Android가 12/24단어 입력 화면을 띄운다.
+- 웹은 mnemonic 원문을 받거나 전달하지 않는다.
+- 복구 성공 시 holder auth key가 새로 생성될 수 있으므로 `holderDidSetRegistrationRequired`를 확인한다.
+
+Response 주요 필드:
+
+```json
+{
+  "action": "REQUEST_WALLET_RESTORE",
+  "ok": true,
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "restored": true,
+  "holderDidSetRegistrationRequired": true,
+  "account": "r...",
+  "did": "did:xrpl:1:r...",
+  "didDocument": "{...}"
+}
+```
+
+### 12. 지갑 복구
 
 Method: `restoreWallet`
 
@@ -935,7 +1114,59 @@ SD-JWT 예시:
 }
 ```
 
-### 2. XRPL CredentialAccept 제출
+### 2. 증명서 요약 조회
+
+저장된 증명서의 화면 표시용 메타데이터만 반환한다. raw VC/SD-JWT 원문은 포함하지 않는다.
+
+Method: `getCredentialSummaries`
+
+Request:
+
+```json
+{}
+```
+
+Response 주요 필드:
+
+```json
+{
+  "action": "GET_CREDENTIAL_SUMMARIES",
+  "ok": true,
+  "count": 1,
+  "credentials": [
+    {
+      "credentialId": "urn:uuid:...",
+      "status": "active",
+      "statusLabel": "활성",
+      "issuedAt": "2026-05-12T00:00:00Z",
+      "expiresAt": "2026-06-12T00:00:00Z",
+      "issuerDid": "did:xrpl:1:rIssuer...",
+      "issuerAccount": "rIssuer...",
+      "holderDid": "did:xrpl:1:rHolder...",
+      "holderAccount": "rHolder...",
+      "credentialType": "ABC123...",
+      "credentialKind": "https://kyvc.example/vct/legal-entity-kyc-v1",
+      "format": "dc+sd-jwt",
+      "accepted": true
+    }
+  ]
+}
+```
+
+상태값:
+
+- `active`: CredentialAccept 완료, 만료/비활성 아님
+- `issued`: 발급 저장됨, 아직 CredentialAccept 전
+- `inactive`: revoke 또는 XRPL 상태 동기화에서 inactive 확인
+- `expired`: 만료일 지남
+- `notYetValid`: 유효 시작일 전
+
+웹 처리 기준:
+
+- 증명서 카드/목록 화면은 이 브릿지를 우선 사용한다.
+- 상세 검증이나 원문 제출이 필요할 때만 `listCredentials` 또는 저장된 credential payload를 사용한다.
+
+### 3. XRPL CredentialAccept 제출
 
 Method: `submitToXRPL`
 
@@ -960,7 +1191,7 @@ Request:
 -> active: true / accepted: true 확인
 ```
 
-### 3. XRPL 상태 조회
+### 4. XRPL 상태 조회
 
 Method: `checkCredentialStatus`
 
@@ -1131,7 +1362,7 @@ requestIssuerCredential
 
 ## QR 브리지
 
-### QR 스캔
+### 1. 범용 QR 스캔
 
 Method: `scanQRCode`
 
@@ -1154,6 +1385,95 @@ Response:
   "actionType": "VC_ISSUE"
 }
 ```
+
+### 2. 증명서 발급 QR 스캔
+
+발급자 화면의 credential offer / VC 발급 QR을 읽을 때 사용한다. 네이티브는 `app/src/main/assets/발급용큐알.png` 시안을 기준으로 QR 화면을 띄운다.
+
+Method: `scanIssueQrCode`
+
+Request 예시:
+
+```json
+{
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "issuedAt": "2026-05-12T10:00:00Z"
+}
+```
+
+Response:
+
+```json
+{
+  "action": "SCAN_ISSUE_QR_CODE",
+  "ok": true,
+  "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
+  "mode": "scanned",
+  "actionType": "VC_ISSUE",
+  "qrData": "{...}",
+  "endpoint": "https://..."
+}
+```
+
+호출 흐름:
+
+```text
+웹의 증명서 발급 QR 버튼 클릭
+-> scanIssueQrCode 호출
+-> Android가 네이티브 QR 스캐너 표시
+-> 사용자가 발급 QR을 흰색 정사각형 프레임 안에 맞춤
+-> Android가 QR payload를 파싱해 SCAN_ISSUE_QR_CODE 반환
+-> 웹이 반환값으로 issuer 발급 플로우 진행
+```
+
+### 3. 증명서 제출 QR 스캔
+
+검증자 화면의 presentation request / 제출 요청 QR을 읽을 때 사용한다. 네이티브는 `app/src/main/assets/제출용큐알.png` 시안을 기준으로 QR 화면을 띄운다.
+
+Method: `scanPresentationQrCode`
+
+Request 예시:
+
+```json
+{
+  "requestId": "4d14d98a-dbb1-4078-b3df-8cfa131f3377",
+  "issuedAt": "2026-05-12T10:00:00Z"
+}
+```
+
+Response:
+
+```json
+{
+  "action": "SCAN_PRESENTATION_QR_CODE",
+  "ok": true,
+  "requestId": "4d14d98a-dbb1-4078-b3df-8cfa131f3377",
+  "mode": "scanned",
+  "actionType": "VP_REQUEST",
+  "qrData": "{...}",
+  "challenge": "...",
+  "domain": "https://...",
+  "endpoint": "https://..."
+}
+```
+
+호출 흐름:
+
+```text
+웹의 증명서 제출 QR 버튼 클릭
+-> scanPresentationQrCode 호출
+-> Android가 네이티브 QR 스캐너 표시
+-> 사용자가 제출 요청 QR을 흰색 정사각형 프레임 안에 맞춤
+-> Android가 QR payload를 파싱하고 challenge/nonce가 있으면 로컬 guard에 등록
+-> Android가 SCAN_PRESENTATION_QR_CODE 반환
+-> 웹이 반환값으로 challenge/signMessage/submitPresentationToVerifier 흐름 진행
+```
+
+공통 주의:
+
+- 기존 `scanQRCode`는 계속 동작하지만, 운영 웹에서는 용도별 브릿지(`scanIssueQrCode`, `scanPresentationQrCode`)를 우선 사용한다.
+- QR 화면은 WebView 페이지 이동이 아니라 WebView 위에 표시되는 네이티브 오버레이다.
+- 스캔한 원문 `qrData`에는 민감한 challenge나 endpoint가 들어갈 수 있으므로 원격 로그에 저장하지 않는다.
 
 ## 웹에서 꼭 처리해야 하는 상태값
 

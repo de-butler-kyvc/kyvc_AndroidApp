@@ -352,6 +352,8 @@
       <div class="grid mt8">
         <button class="ghost" onclick="viewWalletSeed()">Seed 보기</button>
         <button class="ghost" onclick="viewWalletMnemonic()">비밀문구 보기</button>
+        <button class="ghost" onclick="openNativeMnemonicBackup()">네이티브 백업</button>
+        <button class="ghost" onclick="openNativeWalletRestore()">네이티브 복구</button>
         <button class="ghost" id="copySecretBtn" onclick="copyViewedSecret()">값 복사</button>
         <button class="ghost" onclick="logoutApp()">로그아웃</button>
       </div>
@@ -562,6 +564,7 @@
       <div class="grid mt8">
         <button class="secondary" onclick="randomizeVC()">샘플 변경</button>
         <button class="secondary" onclick="listCredentials()">VC 목록 조회</button>
+        <button class="secondary" onclick="getCredentialSummaries()">증명서 요약 조회</button>
         <button class="ghost" onclick="refreshAllCredentialStatuses()">상태 전체 갱신</button>
       </div>
       <div class="card-head">
@@ -578,6 +581,8 @@
       <div class="grid mt8">
         <button class="secondary" onclick="updateQRPreview()">QR 갱신</button>
         <button onclick="scanQR()">QR 스캔 호출</button>
+        <button onclick="scanIssueQR()">발급 QR 스캔</button>
+        <button onclick="scanPresentationQR()">제출 QR 스캔</button>
       </div>
       <div class="result-panel" id="qrResult"></div>
     </details>
@@ -1288,18 +1293,6 @@
       });
     }
 
-    function viewWalletSeed() {
-      callAndroid("exportWalletSeed", {
-        action: "EXPORT_WALLET_SEED",
-        requestId: generateUUID(),
-        issuedAt: new Date().toISOString()
-      });
-      $("walletStatus").textContent = "seed 열람 요청";
-      $("walletStatus").className = "mini-status warn";
-      panel("walletResult", "<b>Seed 열람 요청:</b><br/>활성 인증 세션이 있어야 하며, 결과는 로그에 남기지 않습니다.");
-      showToast("Seed 열람 요청");
-    }
-
     function viewWalletMnemonic() {
       callAndroid("exportWalletMnemonic", {
         action: "EXPORT_WALLET_MNEMONIC",
@@ -1311,6 +1304,32 @@
       panel("walletResult", "<b>비밀문구 열람 요청:</b><br/>활성 인증 세션이 있어야 하며, 결과는 로그에 남기지 않습니다.");
       $("copySecretBtn").textContent = "비밀문구 복사";
       showToast("비밀문구 열람 요청");
+    }
+
+    function openNativeMnemonicBackup() {
+      callAndroid("requestMnemonicBackup", {
+        action: "REQUEST_MNEMONIC_BACKUP",
+        requestId: generateUUID(),
+        issuedAt: new Date().toISOString()
+      });
+      $("walletStatus").textContent = "네이티브 백업 요청";
+      $("walletStatus").className = "mini-status warn";
+      panel("walletResult", "<b>네이티브 복구 문구 백업:</b><br/>앱 화면에서 복구 문구를 확인합니다.");
+      showToast("네이티브 백업 요청");
+    }
+
+    function openNativeWalletRestore() {
+      callAndroid("requestWalletRestore", {
+        action: "REQUEST_WALLET_RESTORE",
+        requestId: generateUUID(),
+        issuedAt: new Date().toISOString(),
+        overwrite: true,
+        autoRegisterDidSet: $("restoreAutoDidSet").checked
+      });
+      $("walletStatus").textContent = "네이티브 복구 요청";
+      $("walletStatus").className = "mini-status warn";
+      panel("walletResult", "<b>네이티브 지갑 복구:</b><br/>앱 화면에서 복구 문구를 입력합니다.");
+      showToast("네이티브 복구 요청");
     }
 
     function viewWalletSeed() {
@@ -1535,6 +1554,14 @@
       showToast("VC 목록 조회 요청됨");
     }
 
+    function getCredentialSummaries() {
+      callAndroid("getCredentialSummaries", {});
+      $("vcStatus").textContent = "요약 조회 중";
+      $("vcStatus").className = "mini-status";
+      panel("credentialListResult", "<b>증명서 요약 조회 요청:</b> 처리 중");
+      showToast("증명서 요약 조회 요청됨");
+    }
+
     function refreshAllCredentialStatuses() {
       callAndroid("refreshAllCredentialStatuses", {});
       $("vcStatus").textContent = "상태 갱신 중";
@@ -1688,16 +1715,28 @@
 
     function scanQR() {
       const purpose = $("qrType").value;
+      scanQRWithBridge("scanQRCode", purpose);
+    }
+
+    function scanIssueQR() {
+      scanQRWithBridge("scanIssueQrCode", "VC_ISSUE");
+    }
+
+    function scanPresentationQR() {
+      scanQRWithBridge("scanPresentationQrCode", "VP_REQUEST");
+    }
+
+    function scanQRWithBridge(method, purpose) {
       const payload = {
         purpose,
         requestId: "req-" + Date.now(),
         endpoint: "https://demo.kyvc.local/callback",
         expiresInSec: 180
       };
-      callAndroid("scanQRCode", payload);
+      callAndroid(method, payload);
       $("qrStatus").textContent = "스캔 요청됨";
       $("qrStatus").className = "mini-status";
-      panel("qrResult", `<b>QR 스캔 요청:</b> ${purpose}<br/>requestId: ${payload.requestId}`);
+      panel("qrResult", `<b>QR 스캔 요청:</b> ${purpose}<br/>bridge: ${method}<br/>requestId: ${payload.requestId}`);
       showToast("QR 스캔 요청됨");
     }
 
@@ -1878,21 +1917,22 @@
                 showToast("작업 실패: " + result.error);
             }
         }
-        if (result.action === "CREATE_WALLET" || result.action === "GET_WALLET_INFO" || result.action === "RESTORE_WALLET") {
+        if (result.action === "CREATE_WALLET" || result.action === "GET_WALLET_INFO" || result.action === "RESTORE_WALLET" || result.action === "REQUEST_WALLET_RESTORE") {
           $("walletStatus").textContent = result.ok ? "준비됨" : "오류";
           $("walletStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
           if (result.ok) {
             state.viewedSecret = null;
             applyWallet(result);
             const mnemonicHint = result.mnemonic ? `<br/><b>비밀 복구 구문 (안전한 곳에 보관하세요):</b><br/><span style="color:var(--danger);font-weight:bold">${result.mnemonic}</span>` : "";
-            const restoreHint = result.action === "RESTORE_WALLET"
+            const isRestoreAction = result.action === "RESTORE_WALLET" || result.action === "REQUEST_WALLET_RESTORE";
+            const restoreHint = isRestoreAction
               ? `<br/><b>복구 완료:</b> import 성공${result.holderDidSetRegistrationRequired ? ($("restoreAutoDidSet").checked ? "<br/><b>다음 작업:</b> Holder DIDSet 자동 재등록 중" : "<br/><b>다음 작업:</b> Holder DIDSet 등록") : ""}`
               : "";
             panel("walletResult", `<b>Holder Account:</b><br/>${result.account}<br/><b>DID:</b><br/>${result.did}${mnemonicHint}${restoreHint}`);
-            if (result.action === "CREATE_WALLET" || result.action === "RESTORE_WALLET") {
+            if (result.action === "CREATE_WALLET" || isRestoreAction) {
               listWallets();
             }
-            if (result.action === "RESTORE_WALLET" && $("restoreAutoDidSet").checked && result.holderDidSetRegistrationRequired) {
+            if (isRestoreAction && $("restoreAutoDidSet").checked && result.holderDidSetRegistrationRequired) {
               submitHolderDidSet();
             }
           } else {
@@ -2031,6 +2071,13 @@
             panel("walletResult", `<b>${typeLabel} 열람 실패:</b><br/>${result.error}`);
           }
         }
+        if (result.action === "REQUEST_MNEMONIC_BACKUP") {
+          $("walletStatus").textContent = result.ok ? "백업 확인 완료" : "백업 취소/실패";
+          $("walletStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          panel("walletResult", result.ok
+            ? "<b>네이티브 복구 문구 백업 완료:</b><br/>사용자가 앱 화면에서 복구 문구 기록을 확인했습니다."
+            : `<b>네이티브 복구 문구 백업 실패:</b><br/>${result.error || "사용자가 취소했습니다."}`);
+        }
         if (result.action === "LOGOUT") {
           $("walletStatus").textContent = result.ok ? "로그아웃 완료" : "로그아웃 실패";
           $("walletStatus").className = result.ok ? "mini-status" : "mini-status warn";
@@ -2106,6 +2153,27 @@
             ? `<b>저장된 VC 목록</b><br/>${items}`
             : `<b>VC 목록 조회 실패:</b><br/>${result.error}`);
         }
+        if (result.action === "GET_CREDENTIAL_SUMMARIES") {
+          $("vcStatus").textContent = result.ok ? "요약 확인" : "조회 실패";
+          $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
+          const summaries = result.ok && Array.isArray(result.credentials) ? result.credentials : [];
+          const items = summaries.length
+            ? summaries.map((credential) => `
+                <div style="padding:10px 0;border-top:1px solid #e5e7eb">
+                  <b>${credential.credentialKind || credential.credentialType}</b><br/>
+                  status: ${credential.statusLabel || credential.status}<br/>
+                  issuedAt: ${credential.issuedAt || "-"}<br/>
+                  expiresAt: ${credential.expiresAt || "-"}<br/>
+                  issuerDid: ${credential.issuerDid || "-"}<br/>
+                  holderDid: ${credential.holderDid || "-"}<br/>
+                  type: ${credential.credentialType || "-"}
+                </div>
+              `).join("")
+            : "<i>저장된 증명서가 없습니다.</i>";
+          panel("credentialListResult", result.ok
+            ? `<b>증명서 요약 목록</b><br/>${items}`
+            : `<b>증명서 요약 조회 실패:</b><br/>${result.error}`);
+        }
         if (result.action === "REFRESH_CREDENTIAL_STATUSES") {
           $("vcStatus").textContent = result.ok ? "상태 갱신 완료" : "갱신 실패";
           $("vcStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
@@ -2156,7 +2224,7 @@
             ? `<b>Verifier 응답:</b><br/>${JSON.stringify(result.response || result.details || {}, null, 2)}`
             : failureText(result, "Verifier 제출 실패"));
         }
-        if (result.action === "SCAN_QR_CODE") {
+        if (["SCAN_QR_CODE", "SCAN_ISSUE_QR_CODE", "SCAN_PRESENTATION_QR_CODE"].includes(result.action)) {
           $("qrStatus").textContent = result.ok ? (result.mode === "scanned" ? "스캔 완료" : "요청 수신") : "스캔 실패";
           $("qrStatus").className = result.ok ? "mini-status ok" : "mini-status warn";
           if (result.ok) applyQrResult(result);

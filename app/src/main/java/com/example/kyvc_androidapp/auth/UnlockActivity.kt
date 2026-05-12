@@ -168,31 +168,30 @@ private fun UnlockScreen(
     val pattern = remember { mutableStateListOf<Int>() }
     val pinScope = rememberCoroutineScope()
 
-    LaunchedEffect(method) {
-        if (method == "biometric") {
-            if (appLockStore.isEmailVerificationRequired()) {
-                onFailure("인증 5회 실패로 이메일 인증이 필요합니다.")
-                return@LaunchedEffect
-            }
-            if (!appLockStore.isBiometricEnabled()) {
-                onFailure("지문 로그인이 활성화되어 있지 않습니다.")
-            } else {
-                onBiometricAuth(
-                    "지문 로그인",
-                    "지문으로 인증을 완료합니다.",
-                    onSuccess,
-                    { message -> onFailure(message) }
-                )
-            }
-        }
-    }
-
     if (method == "biometric") {
-        Surface(modifier = Modifier.fillMaxSize()) {
-            Box(contentAlignment = Alignment.Center) {
-                Text("지문 인증을 요청하는 중입니다.")
-            }
-        }
+        BiometricAuthScreen(
+            onStartAuth = { setStatus ->
+                if (appLockStore.isEmailVerificationRequired()) {
+                    setStatus("인증 5회 실패로 이메일 인증이 필요합니다.", true)
+                    return@BiometricAuthScreen
+                }
+                if (!appLockStore.isBiometricEnabled()) {
+                    setStatus("지문 로그인이 활성화되어 있지 않습니다.", true)
+                } else {
+                    onBiometricAuth(
+                        "생체인증",
+                        "등록한 생체정보로 로그인합니다.",
+                        {
+                            setStatus("인증이 완료되었습니다", false)
+                            onSuccess()
+                        },
+                        { message -> setStatus(message, true) }
+                    )
+                }
+            },
+            onCancel = onCancel,
+            onPinLogin = onCancel
+        )
         return
     }
 

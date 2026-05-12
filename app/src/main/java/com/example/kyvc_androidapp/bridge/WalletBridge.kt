@@ -75,6 +75,9 @@ class WalletBridge(
     private val appLockStore: AppLockStore,
     private val launchQrScanner: (String) -> Unit,
     private val launchNativeAuth: (String, String) -> Unit,
+    private val launchPinReset: (String) -> Unit,
+    private val launchMnemonicBackup: (String, String) -> Unit,
+    private val launchWalletRestore: (String) -> Unit,
     private val onSessionStatusChanged: (Boolean) -> Unit = {}
 ) {
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
@@ -398,6 +401,102 @@ class WalletBridge(
     }
 
     @JavascriptInterface
+    fun requestPinReset(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            val requestId = request.text("requestId")
+            try {
+                requireTrustedBridgeOrigin("REQUEST_PIN_RESET")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("REQUEST_PIN_RESET"),
+                    ttlSeconds = 30
+                )
+                if (appLockStore.isEmailVerificationRequired()) {
+                    emitCallback("REQUEST_PIN_RESET", false) {
+                        requestId?.let { put("requestId", it) }
+                        put("reset", false)
+                        putAuthAttemptState()
+                        put("error", "인증 5회 실패로 이메일 인증이 필요합니다.")
+                    }
+                    return@launch
+                }
+                launchPinReset(jsonPayload)
+            } catch (e: Exception) {
+                Log.e(TAG, "requestPinReset failed", e)
+                emitCallback("REQUEST_PIN_RESET", false) {
+                    requestId?.let { put("requestId", it) }
+                    put("reset", false)
+                    putAuthAttemptState()
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun requestMnemonicBackup(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            val requestId = request.text("requestId")
+            try {
+                requireTrustedBridgeOrigin("REQUEST_MNEMONIC_BACKUP")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("REQUEST_MNEMONIC_BACKUP"),
+                    ttlSeconds = 30
+                )
+                require(!appLockStore.isEmailVerificationRequired()) {
+                    "이메일 인증이 필요한 상태에서는 비밀문구를 백업할 수 없습니다."
+                }
+                require(appLockStore.isSessionUnlocked()) {
+                    "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                }
+                withContext(Dispatchers.IO) {
+                    val mnemonicValue = walletStateStore.exportMnemonicValue()
+                    require(mnemonicValue.isNotBlank()) {
+                        "현재 지갑에 저장된 비밀문구가 없습니다. 시드(Seed)로 복구했거나 구형 지갑인 경우 비밀문구가 존재하지 않습니다."
+                    }
+                    withContext(Dispatchers.Main) {
+                        launchMnemonicBackup(jsonPayload, mnemonicValue)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "requestMnemonicBackup failed", e)
+                emitCallback("REQUEST_MNEMONIC_BACKUP", false) {
+                    requestId?.let { put("requestId", it) }
+                    putAuthAttemptState()
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun requestWalletRestore(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            val requestId = request.text("requestId")
+            try {
+                requireTrustedBridgeOrigin("REQUEST_WALLET_RESTORE")
+                validateBridgeRequest(
+                    request = request,
+                    allowedActions = setOf("REQUEST_WALLET_RESTORE"),
+                    ttlSeconds = 30
+                )
+                launchWalletRestore(jsonPayload)
+            } catch (e: Exception) {
+                Log.e(TAG, "requestWalletRestore failed", e)
+                emitCallback("REQUEST_WALLET_RESTORE", false) {
+                    requestId?.let { put("requestId", it) }
+                    put("restored", false)
+                    put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
     fun createWallet(jsonPayload: String) {
         scope.launch(Dispatchers.Main) {
             try {
@@ -459,8 +558,12 @@ class WalletBridge(
                     val walletState = walletStateStore.requireWalletState()
                     val result = xrplHelper.getAccountAssets(walletState.account)
                     withContext(Dispatchers.Main) {
-                        emitCallback("GET_WALLET_ASSETS", result.error == null) {
+                        val inactiveAccount = !result.accountActivated &&
+                            result.error?.let(::isInactiveXrplAccountMessage) == true
+                        emitCallback("GET_WALLET_ASSETS", result.error == null || inactiveAccount) {
                             put("account", result.account)
+                            put("accountActivated", result.accountActivated)
+                            put("depositRequired", inactiveAccount)
                             result.xrpBalanceDrops?.let { put("xrpBalanceDrops", it) }
                             result.xrpBalanceXrp?.let { put("xrpBalanceXrp", it) }
                             result.ownerCount?.let { put("ownerCount", it) }
@@ -481,6 +584,11 @@ class WalletBridge(
                                 )
                             )
                             put("checkedAtUtc", result.checkedAtUtc)
+                            if (inactiveAccount) {
+                                put("errorCode", "XRPL_ACCOUNT_NOT_ACTIVATED")
+                                put("errorTitle", "XRPL 계정 활성화 필요")
+                                put("errorHint", "이 주소로 XRP를 입금한 뒤 자산 조회를 다시 실행하세요.")
+                            }
                             result.error?.let { put("error", it) }
                         }
                     }
@@ -535,8 +643,11 @@ class WalletBridge(
                     val walletState = walletStateStore.requireWalletState()
                     val result = xrplHelper.getAccountTransactions(walletState.account, limit)
                     withContext(Dispatchers.Main) {
-                        emitCallback("GET_WALLET_TRANSACTIONS", result.error == null) {
+                        val inactiveAccount = result.error?.let(::isInactiveXrplAccountMessage) == true
+                        emitCallback("GET_WALLET_TRANSACTIONS", result.error == null || inactiveAccount) {
                             put("account", result.account)
+                            put("accountActivated", !inactiveAccount)
+                            put("depositRequired", inactiveAccount)
                             put("count", result.transactions.size)
                             put(
                                 "transactions",
@@ -562,6 +673,11 @@ class WalletBridge(
                                 )
                             )
                             put("checkedAtUtc", result.checkedAtUtc)
+                            if (inactiveAccount) {
+                                put("errorCode", "XRPL_ACCOUNT_NOT_ACTIVATED")
+                                put("errorTitle", "XRPL 계정 활성화 필요")
+                                put("errorHint", "이 주소로 XRP를 입금한 뒤 거래 내역을 다시 조회하세요.")
+                            }
                             result.error?.let { put("error", it) }
                         }
                     }
@@ -904,7 +1020,7 @@ class WalletBridge(
                     val walletState = walletStateStore.requireWalletState()
                     val accountPrecheck = xrplHelper.getAccountAssets(walletState.account)
                     require(accountPrecheck.error == null) {
-                        "holder account is not active on XRPL testnet. Fund this account first: ${walletState.account}"
+                        "holder account is not activated on XRPL testnet. Deposit XRP to this address first: ${walletState.account}"
                     }
                     val seed = walletStateStore.requireSeed()
                     currentSeed = seed
@@ -1291,6 +1407,35 @@ class WalletBridge(
                 Log.e(TAG, "listCredentials failed", e)
                 withContext(Dispatchers.Main) {
                     emitCallback("LIST_CREDENTIALS", false) {
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun getCredentialSummaries(jsonPayload: String) {
+        scope.launch(Dispatchers.IO) {
+            try {
+                val credentials = credentialRepository.getAllCredentialsOnce()
+                withContext(Dispatchers.Main) {
+                    emitCallback("GET_CREDENTIAL_SUMMARIES", true) {
+                        put("count", credentials.size)
+                        put(
+                            "credentials",
+                            JsonArray(
+                                credentials.map { credential ->
+                                    buildCredentialSummary(credential)
+                                }
+                            )
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "getCredentialSummaries failed", e)
+                withContext(Dispatchers.Main) {
+                    emitCallback("GET_CREDENTIAL_SUMMARIES", false) {
                         put("error", e.message ?: "Unknown error")
                     }
                 }
@@ -2185,9 +2330,48 @@ class WalletBridge(
 
     @JavascriptInterface
     fun scanQRCode(jsonPayload: String) {
+        scanQRCodeInternal(
+            jsonPayload = jsonPayload,
+            forcedActionType = null,
+            callbackAction = "SCAN_QR_CODE",
+            qrMode = null
+        )
+    }
+
+    @JavascriptInterface
+    fun scanIssueQrCode(jsonPayload: String) {
+        scanQRCodeInternal(
+            jsonPayload = jsonPayload,
+            forcedActionType = "VC_ISSUE",
+            callbackAction = "SCAN_ISSUE_QR_CODE",
+            qrMode = "issue"
+        )
+    }
+
+    @JavascriptInterface
+    fun scanPresentationQrCode(jsonPayload: String) {
+        scanQRCodeInternal(
+            jsonPayload = jsonPayload,
+            forcedActionType = "VP_REQUEST",
+            callbackAction = "SCAN_PRESENTATION_QR_CODE",
+            qrMode = "presentation"
+        )
+    }
+
+    private fun scanQRCodeInternal(
+        jsonPayload: String,
+        forcedActionType: String?,
+        callbackAction: String,
+        qrMode: String?
+    ) {
         scope.launch(Dispatchers.IO) {
             try {
-                val request = parseJsonObjectOrEmpty(jsonPayload)
+                val request = enrichQrScanRequest(
+                    request = parseJsonObjectOrEmpty(jsonPayload),
+                    forcedActionType = forcedActionType,
+                    callbackAction = callbackAction,
+                    qrMode = qrMode
+                )
                 val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
                 val qrData = request.text("qrData") ?: request.text("data") ?: request.text("text")
                 val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
@@ -2195,18 +2379,20 @@ class WalletBridge(
                 registerQrChallengeIfPresent(qrInfo)
 
                 withContext(Dispatchers.Main) {
-                    emitCallback("SCAN_QR_CODE", true) {
-                        put("mode", "request_received")
+                    emitCallback(callbackAction, true) {
+                        put("mode", if (qrData.isNullOrBlank()) "request_received" else "web_supplied")
                         put("requestId", requestId)
                         putQrRequestInfo(qrInfo)
                     }
-                    launchQrScanner(jsonPayload)
+                    if (qrData.isNullOrBlank()) {
+                        launchQrScanner(request.toString())
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "scanQRCode failed", e)
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "QR scan failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    emitCallback("SCAN_QR_CODE", false) {
+                    emitCallback(callbackAction, false) {
                         put("error", e.message ?: "Unknown error")
                     }
                 }
@@ -2217,21 +2403,22 @@ class WalletBridge(
     fun onQrScanResult(requestJson: String?, qrData: String?, errorMessage: String?) {
         scope.launch(Dispatchers.Main) {
             try {
+                val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
+                val callbackAction = request.text("_callbackAction") ?: "SCAN_QR_CODE"
                 if (!errorMessage.isNullOrBlank()) {
-                    emitCallback("SCAN_QR_CODE", false) {
+                    emitCallback(callbackAction, false) {
                         put("error", errorMessage)
                         requestJson?.let { put("request", it) }
                     }
                     return@launch
                 }
 
-                val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
                 val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
                 val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
                 val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
                 registerQrChallengeIfPresent(qrInfo)
 
-                emitCallback("SCAN_QR_CODE", true) {
+                emitCallback(callbackAction, true) {
                     put("mode", "scanned")
                     put("requestId", requestId)
                     putQrRequestInfo(qrInfo)
@@ -2241,6 +2428,22 @@ class WalletBridge(
                 emitCallback("SCAN_QR_CODE", false) {
                     put("error", e.message ?: "Unknown error")
                 }
+            }
+        }
+    }
+
+    private fun enrichQrScanRequest(
+        request: JsonObject,
+        forcedActionType: String?,
+        callbackAction: String,
+        qrMode: String?
+    ): JsonObject {
+        return buildJsonObject {
+            request.forEach { (key, value) -> put(key, value) }
+            put("_callbackAction", callbackAction)
+            qrMode?.let { put("_qrMode", it) }
+            if (forcedActionType != null && request.text("actionType").isNullOrBlank()) {
+                put("actionType", forcedActionType)
             }
         }
     }
@@ -2305,10 +2508,172 @@ class WalletBridge(
         }
     }
 
+    fun onPinResetResult(
+        requestJson: String?,
+        success: Boolean,
+        errorMessage: String?
+    ) {
+        val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
+        val requestId = request.text("requestId")
+
+        if (success) {
+            onSessionStatusChanged(true)
+        }
+
+        emitCallback("REQUEST_PIN_RESET", success) {
+            requestId?.let { put("requestId", it) }
+            request.text("reason")?.let { put("reason", it) }
+            put("reset", success)
+            putAuthAttemptState()
+            if (!success) {
+                put("error", errorMessage ?: "PIN reset cancelled")
+            }
+        }
+    }
+
+    fun onMnemonicBackupResult(
+        requestJson: String?,
+        confirmed: Boolean,
+        errorMessage: String?
+    ) {
+        val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
+        emitCallback("REQUEST_MNEMONIC_BACKUP", confirmed) {
+            request.text("requestId")?.let { put("requestId", it) }
+            put("confirmed", confirmed)
+            putAuthAttemptState()
+            if (!confirmed) {
+                put("error", errorMessage ?: "사용자가 복구 문구 백업을 취소했습니다.")
+            }
+        }
+    }
+
+    fun submitNativeWalletRestore(
+        requestJson: String?,
+        mnemonic: String
+    ) {
+        val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
+        scope.launch(Dispatchers.IO) {
+            try {
+                val normalizedMnemonic = mnemonic.trim().split(Regex("\\s+")).joinToString(" ")
+                require(normalizedMnemonic.isNotBlank()) { "mnemonic is required" }
+                val overwrite = request.text("overwrite")?.toBooleanStrictOrNull() ?: true
+                val autoRegisterDidSet = request.text("autoRegisterDidSet")?.toBooleanStrictOrNull() ?: false
+                val accountsBefore = walletStateStore.listWallets().map { it.account }.toSet()
+                val walletState = walletStateStore.restoreWalletWithMnemonic(
+                    mnemonicString = normalizedMnemonic,
+                    overwrite = overwrite
+                )
+                val reusedExistingAccount = !overwrite && walletState.account in accountsBefore
+                val holderDidSetRegistrationRequired = !reusedExistingAccount
+                currentSeed = walletStateStore.requireSeed()
+                withContext(Dispatchers.Main) {
+                    emitCallback("REQUEST_WALLET_RESTORE", true) {
+                        request.text("requestId")?.let { put("requestId", it) }
+                        put("restored", true)
+                        put("reusedExistingAccount", reusedExistingAccount)
+                        put("holderDidSetRegistrationRequired", holderDidSetRegistrationRequired)
+                        put("autoRegisterDidSet", autoRegisterDidSet)
+                        put("warning", if (reusedExistingAccount) {
+                            "Existing wallet entry reused. Holder DIDSet 재등록은 필요하지 않습니다."
+                        } else {
+                            "Holder auth key was regenerated. Re-register the holder DIDSet before verifier submission."
+                        })
+                        put("account", walletState.account)
+                        put("publicKey", walletState.publicKey)
+                        put("authPublicKey", walletState.authPublicKey)
+                        put("did", walletState.did)
+                        put("didDocument", buildHolderDidDocument(walletState))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "submitNativeWalletRestore failed", e)
+                withContext(Dispatchers.Main) {
+                    emitCallback("REQUEST_WALLET_RESTORE", false) {
+                        request.text("requestId")?.let { put("requestId", it) }
+                        put("restored", false)
+                        put("error", e.message ?: "Unknown error")
+                    }
+                }
+            }
+        }
+    }
+
+    fun onWalletRestoreCancelled(requestJson: String?) {
+        val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
+        emitCallback("REQUEST_WALLET_RESTORE", false) {
+            request.text("requestId")?.let { put("requestId", it) }
+            put("restored", false)
+            put("error", "사용자가 지갑 복구를 취소했습니다.")
+        }
+    }
+
     private fun JsonObject.text(name: String): String? {
         return (this[name] as? JsonPrimitive)
             ?.contentOrNull
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun buildCredentialSummary(credential: CredentialEntity): JsonObject {
+        val envelope = runCatching { parseCredentialEnvelope(credential.vcJson) }.getOrNull()
+        val payload = envelope?.payload ?: buildJsonObject { }
+        val status = credentialLocalStatus(credential)
+        val credentialKind = credentialKindLabel(payload, credential.credentialType)
+        return buildJsonObject {
+            put("credentialId", credential.credentialId)
+            put("status", status.code)
+            put("statusLabel", status.label)
+            put("issuedAt", credential.validFrom)
+            put("validFrom", credential.validFrom)
+            put("expiresAt", credential.validUntil)
+            put("validUntil", credential.validUntil)
+            put("issuerDid", credential.issuerDid)
+            put("issuerAccount", credential.issuerAccount)
+            put("holderDid", credential.holderDid)
+            put("holderAccount", credential.holderAccount)
+            put("credentialType", credential.credentialType)
+            put("credentialKind", credentialKind)
+            put("format", envelope?.format ?: payload.text("format") ?: "unknown")
+            payload.text("vct")?.let { put("vct", it) }
+            put("accepted", !credential.acceptedAt.isNullOrBlank())
+            credential.acceptedAt?.let { put("acceptedAt", it) }
+            credential.credentialAcceptHash?.let { put("credentialAcceptHash", it) }
+            credential.revokedOrInactiveAt?.let { put("revokedOrInactiveAt", it) }
+        }
+    }
+
+    private data class CredentialLocalStatus(
+        val code: String,
+        val label: String
+    )
+
+    private fun credentialLocalStatus(credential: CredentialEntity): CredentialLocalStatus {
+        val now = Instant.now()
+        val validFrom = parseInstantOrNull(credential.validFrom)
+        val validUntil = parseInstantOrNull(credential.validUntil)
+        return when {
+            !credential.revokedOrInactiveAt.isNullOrBlank() -> CredentialLocalStatus("inactive", "비활성")
+            validUntil != null && !now.isBefore(validUntil) -> CredentialLocalStatus("expired", "만료")
+            validFrom != null && now.isBefore(validFrom) -> CredentialLocalStatus("notYetValid", "시작 전")
+            !credential.acceptedAt.isNullOrBlank() -> CredentialLocalStatus("active", "활성")
+            else -> CredentialLocalStatus("issued", "발급됨")
+        }
+    }
+
+    private fun credentialKindLabel(payload: JsonObject, fallback: String): String {
+        payload.text("vct")?.let { return it }
+        val types = payload.array("type")
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?.filter { it.isNotBlank() }
+            .orEmpty()
+        return types.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: fallback
+    }
+
+    private fun isInactiveXrplAccountMessage(message: String): Boolean {
+        val normalized = message.lowercase(Locale.US)
+        return "actnotfound" in normalized ||
+            "account not found" in normalized ||
+            "not activated" in normalized ||
+            "not active on xrpl" in normalized
     }
 
     private fun xrpAmountToDrops(amountXrp: String): String {

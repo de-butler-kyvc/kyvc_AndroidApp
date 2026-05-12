@@ -383,6 +383,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         val validatedAddress = runCatching { requireClassicAddress("account", address) }.getOrElse {
             return AccountAssetsResult(
                 account = address,
+                accountActivated = false,
                 xrpBalanceDrops = null,
                 xrpBalanceXrp = null,
                 ownerCount = null,
@@ -420,6 +421,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         val accountInfoResult = accountInfoJson.optJSONObject("result")
             ?: return AccountAssetsResult(
                 account = validatedAddress,
+                accountActivated = false,
                 xrpBalanceDrops = null,
                 xrpBalanceXrp = null,
                 ownerCount = null,
@@ -429,21 +431,29 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
                 error = "account_info result missing"
             )
         if (accountInfoResult.optString("status") == "error" || accountInfoResult.has("error")) {
+            val errorCode = accountInfoResult.optString("error")
+            val errorMessage = accountInfoResult.optString("error_message", errorCode.ifBlank { "account_info failed" })
             return AccountAssetsResult(
                 account = validatedAddress,
+                accountActivated = false,
                 xrpBalanceDrops = null,
                 xrpBalanceXrp = null,
                 ownerCount = null,
                 sequence = null,
                 lines = emptyList(),
                 checkedAtUtc = checkedAt,
-                error = accountInfoResult.optString("error_message", accountInfoResult.optString("error", "account_info failed"))
+                error = if (errorCode == "actNotFound") {
+                    "XRPL account is not activated. Deposit XRP to this address first."
+                } else {
+                    errorMessage
+                }
             )
         }
 
         val accountData = accountInfoResult.optJSONObject("account_data")
             ?: return AccountAssetsResult(
                 account = validatedAddress,
+                accountActivated = false,
                 xrpBalanceDrops = null,
                 xrpBalanceXrp = null,
                 ownerCount = null,
@@ -500,6 +510,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         val balanceDrops = accountData.optString("Balance").takeIf { it.isNotBlank() }
         return AccountAssetsResult(
             account = validatedAddress,
+            accountActivated = true,
             xrpBalanceDrops = balanceDrops,
             xrpBalanceXrp = balanceDrops?.let(::dropsToXrpString),
             ownerCount = accountData.optLong("OwnerCount"),
@@ -618,6 +629,7 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
 
     data class AccountAssetsResult(
         val account: String,
+        val accountActivated: Boolean,
         val xrpBalanceDrops: String?,
         val xrpBalanceXrp: String?,
         val ownerCount: Long?,

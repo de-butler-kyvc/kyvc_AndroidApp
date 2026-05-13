@@ -19,6 +19,7 @@ import com.example.kyvc_androidapp.wallet.core.VpSigner
 import com.example.kyvc_androidapp.wallet.core.WalletStateStore
 import com.example.kyvc_androidapp.wallet.core.XrplClientHelper
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -64,6 +65,9 @@ import java.security.MessageDigest
 import java.security.Signature
 import android.util.Base64
 import java.io.File
+import java.time.LocalDateTime
+import java.time.OffsetDateTime
+import java.time.ZoneOffset
 import java.util.concurrent.TimeUnit
 
 class WalletBridge(
@@ -81,6 +85,8 @@ class WalletBridge(
     private val launchMnemonicBackup: (String, String) -> Unit,
     private val launchWalletRestore: (String) -> Unit,
     private val launchCredentialNativeScreen: (String, String) -> Unit,
+    private val launchVpLoginCredentialPicker: (String, List<Pair<String, String>>, (String?) -> Unit) -> Unit,
+    private val launchVpLoginCompletion: (String) -> Unit,
     private val onSessionStatusChanged: (Boolean) -> Unit = {}
 ) {
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
@@ -1567,7 +1573,12 @@ class WalletBridge(
             val requestId = request.text("requestId")
             try {
                 requireWalletOwnerAccess()
-                val metadata = request.obj("metadata") ?: buildJsonObject { }
+                val credentialPayload = request.obj("credentialPayload")
+                val metadata = request.obj("metadata")
+                    ?: credentialPayload?.obj("metadata")
+                    ?: buildJsonObject { }
+                val selectiveDisclosure = request.obj("selectiveDisclosure")
+                    ?: credentialPayload?.obj("selectiveDisclosure")
                 logBridgeFlow(
                     "vc.issue.saveVC.received",
                     mapOf(
@@ -1646,7 +1657,7 @@ class WalletBridge(
                     sdJwt = storedSdJwt,
                     vcJwt = storedVcJwt,
                     vcJson = storedVcJson,
-                    selectiveDisclosureJson = request.obj("selectiveDisclosure")?.toString(),
+                    selectiveDisclosureJson = selectiveDisclosure?.toString(),
                     issuerDid = issuerDid,
                     issuerAccount = firstText(metadata, "issuerAccount")
                         ?: firstText(request, "issuerAccount", "issuerAddress", "issuer_account")
@@ -3184,6 +3195,10 @@ class WalletBridge(
                 val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
                 val qrData = request.text("qrData") ?: request.text("data") ?: request.text("text")
                 val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
+                if (!qrData.isNullOrBlank() && isVpLoginQr(qrPayload)) {
+                    handleVpLoginQr(qrPayload)
+                    return@launch
+                }
                 val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
                 logBridgeFlow(
                     "vc.issue.qr.request",
@@ -3265,6 +3280,12 @@ class WalletBridge(
 
                 val requestId = request.text("requestId") ?: "qr-${System.currentTimeMillis()}"
                 val qrPayload = parseJsonObjectOrEmpty(qrData.orEmpty())
+                if (!qrData.isNullOrBlank() && isVpLoginQr(qrPayload)) {
+                    withContext(Dispatchers.IO) {
+                        handleVpLoginQr(qrPayload)
+                    }
+                    return@launch
+                }
                 val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
                 logBridgeFlow(
                     "vc.issue.qr.scanned",
@@ -3681,11 +3702,11 @@ class WalletBridge(
                 ?: payloadSubject?.text("id")
                 ?: walletState?.account
         )
-        val issuerDid = firstText(metadata, "issuerDid")
+        val issuerDid = issuerAccount?.let { "did:xrpl:1:$it" }
+            ?: firstText(metadata, "issuerDid")
             ?: firstText(request, "issuerDid")
             ?: payload.text("issuerDid")
             ?: xrplDidFromText(payload.text("issuer"))
-            ?: issuerAccount?.let { "did:xrpl:1:$it" }
         val holderDid = firstText(metadata, "holderDid")
             ?: firstText(request, "holderDid")
             ?: payload.text("holderDid")
@@ -3984,11 +4005,268 @@ class WalletBridge(
             normalized in setOf("VC_ISSUE", "ISSUE_VC", "CREDENTIAL_OFFER", "CREDENTIAL_ISSUE") -> "VC_ISSUE"
             normalized.contains("VC") && normalized.contains("ISSUE") -> "VC_ISSUE"
             normalized.contains("CREDENTIAL") && normalized.contains("OFFER") -> "VC_ISSUE"
+            normalized == "VP_LOGIN_REQUEST" -> "VP_LOGIN_REQUEST"
+            normalized.contains("VP") && normalized.contains("LOGIN") -> "VP_LOGIN_REQUEST"
             normalized in setOf("VP_REQUEST", "PRESENTATION_REQUEST", "VERIFY_REQUEST") -> "VP_REQUEST"
             normalized.contains("PRESENTATION") && normalized.contains("REQUEST") -> "VP_REQUEST"
             normalized.contains("VP") && normalized.contains("REQUEST") -> "VP_REQUEST"
             normalized in setOf("LOGIN", "LOGIN_REQUEST", "AUTH_REQUEST") -> "LOGIN_REQUEST"
             else -> "UNKNOWN"
+        }
+    }
+
+    private fun isVpLoginQr(qrPayload: JsonObject): Boolean {
+        return normalizeQrAction(qrPayload.text("type") ?: qrPayload.text("actionType")) == "VP_LOGIN_REQUEST"
+    }
+
+    private suspend fun handleVpLoginQr(qrPayload: JsonObject) {
+        val requestId = qrPayload.text("requestId")
+        val qrToken = qrPayload.text("qrToken")
+        try {
+            require(qrPayload.text("type") == "VP_LOGIN_REQUEST") { "유효하지 않은 VP 로그인 QR입니다." }
+            require(!requestId.isNullOrBlank()) { "유효하지 않은 VP 로그인 QR입니다." }
+            require(!qrToken.isNullOrBlank()) { "유효하지 않은 VP 로그인 QR입니다." }
+            requireWalletOwnerAccess()
+
+            val deviceId = getOrCreateDeviceId()
+            val resolveResponse = resolveVpLoginRequest(qrToken, deviceId)
+            val resolvedRequestId = resolveResponse.requestId.ifBlank { requestId }
+            val nonce = resolveResponse.nonce.ifBlank { resolveResponse.challenge }
+            val aud = resolveResponse.aud.ifBlank { resolveResponse.domain }
+            require(nonce.isNotBlank() && aud.isNotBlank()) {
+                "VP 로그인 요청을 확인할 수 없습니다.\nQR이 만료되었거나 잘못된 요청입니다."
+            }
+
+            storeVerifierChallenge(
+                challenge = nonce,
+                domain = aud,
+                issuedAt = nowUtcIso(),
+                expiresAt = Instant.now().plusSeconds(VP_LOGIN_LOCAL_CHALLENGE_TTL_SECONDS).toString(),
+                used = false
+            )
+
+            val credential = selectVpLoginCredential()
+            val presentationRequest = buildJsonObject {
+                put("credentialId", credential.credentialId)
+                put("challenge", resolveResponse.challenge.ifBlank { nonce })
+                put("nonce", nonce)
+                put("domain", aud)
+                put("aud", aud)
+                put("presentationDefinition", resolveResponse.presentationDefinition)
+            }
+            val presentationObject = buildVpLoginPresentationObject(presentationRequest)
+            submitVpLoginRequest(
+                requestId = resolvedRequestId,
+                qrToken = qrToken,
+                credentialId = credential.credentialId,
+                vp = presentationObject,
+                deviceId = deviceId
+            )
+
+            withContext(Dispatchers.Main) {
+                launchVpLoginCompletion("VP 제출이 완료되었습니다.\nPC 화면에서 로그인이 완료됩니다.")
+                emitCallback("VP_LOGIN_REQUEST", true) {
+                    put("requestId", resolvedRequestId)
+                    put("credentialId", credential.credentialId)
+                    put("status", "submitted")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "vp login flow failed", e)
+            withContext(Dispatchers.Main) {
+                val message = classifyVpLoginError(e)
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                emitCallback("VP_LOGIN_REQUEST", false) {
+                    requestId?.let { put("requestId", it) }
+                    put("error", message)
+                }
+            }
+        }
+    }
+
+    private fun resolveVpLoginRequest(qrToken: String, deviceId: String): VpLoginResolveData {
+        val body = JSONObject()
+            .put("qrToken", qrToken)
+            .put("deviceId", deviceId)
+            .toString()
+        val responseBody = postJson(
+            "$VP_LOGIN_BACKEND_BASE_URL/api/mobile/auth/vp-login-requests/resolve",
+            body,
+            "VP login resolve"
+        )
+        val response = JSONObject(responseBody)
+        require(response.optBoolean("success", false)) {
+            "VP 로그인 요청을 확인할 수 없습니다.\nQR이 만료되었거나 잘못된 요청입니다."
+        }
+        val data = response.optJSONObject("data")
+            ?: throw IllegalStateException("VP login resolve data missing")
+        val presentationDefinition = data.optJSONObject("presentationDefinition")
+            ?.let { Json.parseToJsonElement(it.toString()).jsonObject }
+            ?: defaultSdJwtPresentationDefinition()
+        return VpLoginResolveData(
+            requestId = data.optString("requestId"),
+            nonce = data.optString("nonce"),
+            challenge = data.optString("challenge"),
+            aud = data.optString("aud"),
+            domain = data.optString("domain"),
+            expiresAt = data.optString("expiresAt"),
+            presentationDefinition = presentationDefinition
+        )
+    }
+
+    private suspend fun selectVpLoginCredential(): CredentialEntity {
+        val walletState = walletStateStore.requireWalletState()
+        val credentials = credentialRepository.getCredentialsByHolderAccount(walletState.account)
+            .filter { credential ->
+                credential.sdJwt?.isNotBlank() == true &&
+                    credential.revokedOrInactiveAt.isNullOrBlank() &&
+                    credential.credentialId.toLongOrNull() != null
+            }
+        require(credentials.isNotEmpty()) { "제출 가능한 법인 KYC Credential이 없습니다." }
+        if (credentials.size == 1) return credentials.first()
+
+        val deferred = CompletableDeferred<String?>()
+        val options = credentials.map { credential ->
+            credential.credentialId to listOf(
+                credential.credentialType.takeIf { it.isNotBlank() },
+                credential.validUntil.takeIf { it.isNotBlank() }?.let { "만료 $it" }
+            ).filterNotNull().joinToString(" · ").ifBlank { "법인 KYC Credential" }
+        }
+        withContext(Dispatchers.Main) {
+            launchVpLoginCredentialPicker("Credential 선택", options) { selectedId ->
+                deferred.complete(selectedId)
+            }
+        }
+        val selectedId = deferred.await()
+            ?: throw IllegalArgumentException("Credential 선택이 취소되었습니다.")
+        return credentials.firstOrNull { it.credentialId == selectedId }
+            ?: throw IllegalArgumentException("선택한 Credential을 찾을 수 없습니다.")
+    }
+
+    private suspend fun buildVpLoginPresentationObject(request: JsonObject): JsonObject {
+        val challenge = request.text("challenge") ?: request.text("message") ?: request.text("nonce")
+        val domain = request.text("domain") ?: "kyvc.local"
+        require(!challenge.isNullOrBlank()) { "challenge or message is required" }
+        val nonce = request.text("nonce") ?: challenge
+
+        val walletState = walletStateStore.requireWalletState()
+        val authPrivateKey = walletStateStore.requireAuthPrivateKeyBytes()
+        val vcJson = resolveVcJson(request)
+        val vcObject = Json.parseToJsonElement(vcJson).jsonObject
+        val sdJwt = resolveSdJwt(request)
+        validateCredentialAgainstWallet(vcObject, walletState)
+        ensureVerifierChallengeUsable(nonce, domain)
+        require(sdJwt != null) { "제출 가능한 법인 KYC Credential이 없습니다." }
+
+        val sdCredential = parseSdJwtCredential(sdJwt)
+        val selectedDisclosures = selectedSdJwtDisclosures(request, sdCredential.disclosures)
+        val selectedSdJwt = buildSelectedSdJwt(sdCredential.issuerJwt, selectedDisclosures)
+        val selectedDocumentEvidence = extractDocumentEvidenceFromSelectedDisclosures(selectedDisclosures)
+        val attachmentPlan = resolveAttachmentPlan(
+            selectedDocumentEvidence = selectedDocumentEvidence,
+            forceDocumentTypes = request.obj("documentSubmissionPolicy")
+                ?.array("alwaysRequiredDocumentTypes")
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                ?.toSet()
+                ?: emptySet()
+        )
+        val attachmentManifest = JsonArray(
+            attachmentPlan.attachments.map { attachment ->
+                buildJsonObject {
+                    put("requirementId", attachment.requirementId)
+                    put("documentId", attachment.documentId)
+                    put("attachmentRef", attachment.attachmentRef)
+                    put("documentType", attachment.documentType)
+                    put("digestSRI", attachment.digestSRI)
+                    put("mediaType", attachment.mediaType)
+                    put("byteSize", attachment.byteSize)
+                }
+            }
+        )
+        val sdHash = base64UrlNoPadding(
+            MessageDigest.getInstance("SHA-256")
+                .digest(selectedSdJwt.toByteArray(Charsets.US_ASCII))
+        )
+        val kbHeader = buildJsonObject {
+            put("alg", "ES256K")
+            put("typ", "kb+jwt")
+            put("kid", "${walletState.did}#holder-key-1")
+        }
+        val kbPayload = buildJsonObject {
+            put("iat", Instant.now().epochSecond)
+            put("aud", domain)
+            put("nonce", nonce)
+            put("sd_hash", sdHash)
+        }
+        val kbJwt = vpSigner.signCompactJws(
+            privateKeyScalar = authPrivateKey,
+            protectedHeaderJson = kbHeader.toString(),
+            payloadJson = kbPayload.toString()
+        )
+        val sdJwtKb = "$selectedSdJwt~$kbJwt"
+        val definitionId = request.text("definitionId")
+            ?: request.obj("presentationDefinition")?.text("id")
+            ?: "kyvc-sd-jwt-presentation-v1"
+        return buildJsonObject {
+            put("format", "kyvc-sd-jwt-presentation-v1")
+            put("definitionId", definitionId)
+            put("aud", domain)
+            put("nonce", nonce)
+            put("sdJwtKb", sdJwtKb)
+            put("attachmentManifest", attachmentManifest)
+        }
+    }
+
+    private fun submitVpLoginRequest(
+        requestId: String,
+        qrToken: String,
+        credentialId: String,
+        vp: JsonObject,
+        deviceId: String
+    ) {
+        val backendCredentialId = credentialId.toLongOrNull()
+            ?: throw IllegalArgumentException("Backend credentialId must be numeric")
+        logBridgeFlow(
+            "vp.login.submit.request",
+            mapOf(
+                "requestId" to requestId,
+                "credentialId" to credentialId,
+                "hasVp" to true
+            )
+        )
+        val body = buildJsonObject {
+            put("qrToken", qrToken)
+            put("credentialId", backendCredentialId)
+            put("vp", vp)
+            put("deviceId", deviceId)
+        }.toString()
+        val responseBody = postJson(
+            "$VP_LOGIN_BACKEND_BASE_URL/api/mobile/auth/vp-login-requests/$requestId/submit",
+            body,
+            "VP login submit"
+        )
+        val response = JSONObject(responseBody)
+        require(response.optBoolean("success", false)) {
+            "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요."
+        }
+    }
+
+    private fun classifyVpLoginError(error: Exception): String {
+        val message = error.message.orEmpty()
+        return when {
+            message.contains("유효하지 않은 VP 로그인 QR") -> "유효하지 않은 VP 로그인 QR입니다."
+            message.contains("제출 가능한 법인 KYC Credential") -> "제출 가능한 법인 KYC Credential이 없습니다."
+            message.contains("VP challenge") ||
+                message.contains("Credential 또는 challenge") ||
+                message.contains("challenge") -> "VP 생성에 실패했습니다.\nCredential 또는 challenge 정보를 확인해주세요."
+            message.contains("resolve", ignoreCase = true) ||
+                message.contains("404") ||
+                message.contains("410") ||
+                message.contains("409") ||
+                message.contains("400") ||
+                message.contains("403") -> "VP 로그인 요청을 확인할 수 없습니다.\nQR이 만료되었거나 잘못된 요청입니다."
+            message.contains("submit", ignoreCase = true) -> "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요."
+            else -> message.ifBlank { "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요." }
         }
     }
 
@@ -4851,11 +5129,10 @@ class WalletBridge(
     }
 
     private fun parseInstantOrNull(value: String): Instant? {
-        return try {
-            Instant.parse(value)
-        } catch (_: DateTimeParseException) {
-            null
-        }
+        val trimmed = value.trim().takeIf { it.isNotBlank() } ?: return null
+        return runCatching { Instant.parse(trimmed) }.getOrNull()
+            ?: runCatching { OffsetDateTime.parse(trimmed).toInstant() }.getOrNull()
+            ?: runCatching { LocalDateTime.parse(trimmed).toInstant(ZoneOffset.UTC) }.getOrNull()
     }
 
     private fun accountFromDid(did: String): String {
@@ -5268,6 +5545,16 @@ class WalletBridge(
         val payload: JsonObject
     )
 
+    private data class VpLoginResolveData(
+        val requestId: String,
+        val nonce: String,
+        val challenge: String,
+        val aud: String,
+        val domain: String,
+        val expiresAt: String,
+        val presentationDefinition: JsonObject
+    )
+
     private fun nowUtcIso(): String {
         return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
             timeZone = TimeZone.getTimeZone("UTC")
@@ -5599,6 +5886,8 @@ class WalletBridge(
         private const val FORMAT_DC_SD_JWT = "dc+sd-jwt"
         private const val FORMAT_VC_JWT = "vc+jwt"
         private const val FORMAT_JSON = "json"
+        private const val VP_LOGIN_BACKEND_BASE_URL = "https://dev-api-kyvc.khuoo.synology.me"
+        private const val VP_LOGIN_LOCAL_CHALLENGE_TTL_SECONDS = 24L * 60L * 60L
         private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
             "dev-kyvc.khuoo.synology.me",

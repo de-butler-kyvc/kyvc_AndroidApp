@@ -2,11 +2,16 @@
 
 이 문서는 웹이 Android WebView 브리지를 호출할 때 사용하는 최신 호출 규격 문서다. 브리지 함수가 바뀌면 이 문서를 같이 갱신한다.
 
-- Spec Version: `1.6.0`
+- Spec Version: `1.6.1`
 - Last Updated: `2026-05-13`
 
 ## Changelog
 
+- `1.6.1` (2026-05-13)
+  - `saveVC`가 top-level `metadata`뿐 아니라 `credentialPayload.metadata`와 `credentialPayload.selectiveDisclosure`도 해석하도록 명시
+  - `issuerAccount`가 실제 XRPL classic address면 저장/검증용 `issuerDid`를 `did:xrpl:1:{issuerAccount}`로 보정하는 기준 명시
+  - 발급 확인 네이티브 화면 기준 시안을 `발급확인0.png`로 갱신하고 잔액/수수료 표시 필드 추가
+  - PC 웹 로그인용 `VP_LOGIN_REQUEST` QR을 Android Native가 인식해 backend resolve/submit으로 제출하는 흐름 추가
 - `1.6.0` (2026-05-13)
   - 웹 로그인 사용자와 로컬 지갑 owner 바인딩 브릿지 추가: `setCurrentWebUser`, `getWalletOwnerStatus`, `deleteLocalWalletData`, `logoutAndDeleteLocalWalletData`
   - 지갑/VC/XRPL 계열 브릿지는 현재 웹 사용자와 로컬 지갑 owner가 일치할 때만 지갑 정보를 반환
@@ -1002,7 +1007,7 @@ Response 주요 필드:
   "lines": [
     {
       "currency": "USD",
-      "issuer": "rIssuer...",
+      "issuer": "rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
       "balance": "10",
       "limit": "1000",
       "limitPeer": "0"
@@ -1511,10 +1516,19 @@ Method: `saveVC`
 backend prepare 응답의 `credentialPayload` wrapper를 그대로 넘길 수 있다. Android는 다음 alias를 순서대로 해석한다.
 
 - credential 원문: `sdJwt`, `credentialJwt`, `vcJwt`, `vcJson`, `credentialPayload`, `credential`
+- metadata: top-level `metadata` 우선, 없으면 `credentialPayload.metadata`
+- selective disclosure: top-level `selectiveDisclosure` 우선, 없으면 `credentialPayload.selectiveDisclosure`
 - credentialId: request `credentialId`, `metadata.credentialId`, credential `credentialId/id/jti`
 - issuer: `metadata.issuerDid`, `metadata.issuerAccount`, credential status
 - holder: `metadata.holderDid`, `metadata.holderXrplAddress`, active wallet
 - type/hash/date: `metadata.credentialType`, `metadata.vcHash`, `metadata.issuedAt`, `metadata.expiresAt`
+
+issuer 정규화 기준:
+
+- `metadata.issuerAccount` 또는 `credentialPayload.metadata.issuerAccount`가 실제 XRPL classic address면 Android는 저장/검증용 `issuerDid`를 `did:xrpl:1:{issuerAccount}`로 보정한다.
+- 이 보정은 SD-JWT issuer payload나 legacy `issuerDid`에 `did:xrpl:1:rIssuer` 같은 placeholder가 남아 있어도 backend prepare metadata의 실제 issuer account를 우선하기 위한 것이다.
+- `credentialStatus.issuer`, `issuerAccount`, `issuerDid`의 account 부분은 최종적으로 같은 실제 XRPL classic address여야 한다.
+- `issuerAccount` 예시에는 `rIssuer` 같은 placeholder를 쓰지 않는다.
 
 SD-JWT 예시:
 
@@ -1532,21 +1546,31 @@ backend prepare credentialPayload 예시:
   "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
   "issuedAt": "2026-05-12T00:00:00Z",
   "credentialId": "200",
-  "credential": "<sd-jwt string 또는 vc json object>",
-  "sdJwt": "<sd-jwt string>",
-  "vcJwt": "<jwt string>",
-  "vcJson": "{\"id\":\"200\"}",
-  "metadata": {
-    "credentialId": 200,
-    "credentialType": "KYC_CREDENTIAL",
-    "issuerDid": "did:xrpl:1:rIssuer...",
-    "issuerAccount": "rIssuer...",
-    "holderDid": "did:xrpl:1:rHolder...",
-    "holderXrplAddress": "rHolder...",
-    "vcHash": "...",
-    "issuedAt": "2026-05-12T16:00:00",
-    "expiresAt": "2027-05-12T16:00:00",
-    "format": "dc+sd-jwt"
+  "credentialPayload": {
+    "format": "dc+sd-jwt",
+    "sdJwt": "<compact-sd-jwt>",
+    "credentialJwt": "<legacy-alias-same-value>",
+    "credential": null,
+    "selectiveDisclosure": {
+      "disclosablePaths": [
+        "legalEntity.name",
+        "legalEntity.businessRegistrationNumber"
+      ]
+    },
+    "metadata": {
+      "credentialId": 200,
+      "credentialType": "KYC_CREDENTIAL",
+      "issuerDid": "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+      "issuerAccount": "rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+      "holderDid": "did:xrpl:1:rf7J73nExampleHolderAddress",
+      "holderXrplAddress": "rf7J73nExampleHolderAddress",
+      "vcHash": null,
+      "xrplTxHash": "...",
+      "credentialStatusId": null,
+      "issuedAt": null,
+      "expiresAt": null,
+      "format": "dc+sd-jwt"
+    }
   }
 }
 ```
@@ -1560,13 +1584,15 @@ Response:
   "source": "Android",
   "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
   "credentialId": "200",
-  "issuerDid": "did:xrpl:1:rIssuer...",
-  "issuerAccount": "rIssuer...",
-  "holderDid": "did:xrpl:1:rHolder...",
-  "holderAccount": "rHolder...",
+  "issuerDid": "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+  "issuerAccount": "rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+  "holderDid": "did:xrpl:1:rf7J73nExampleHolderAddress",
+  "holderAccount": "rf7J73nExampleHolderAddress",
   "credentialType": "KYC_CREDENTIAL",
   "saved": true,
-  "format": "dc+sd-jwt"
+  "format": "dc+sd-jwt",
+  "hasSdJwt": true,
+  "hasCredentialJwt": false
 }
 ```
 
@@ -1601,10 +1627,10 @@ Response 주요 필드:
       "statusLabel": "활성",
       "issuedAt": "2026-05-12T00:00:00Z",
       "expiresAt": "2026-06-12T00:00:00Z",
-      "issuerDid": "did:xrpl:1:rIssuer...",
-      "issuerAccount": "rIssuer...",
-      "holderDid": "did:xrpl:1:rHolder...",
-      "holderAccount": "rHolder...",
+      "issuerDid": "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+      "issuerAccount": "rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+      "holderDid": "did:xrpl:1:rf7J73nExampleHolderAddress",
+      "holderAccount": "rf7J73nExampleHolderAddress",
       "credentialType": "ABC123...",
       "credentialKind": "https://kyvc.example/vct/legal-entity-kyc-v1",
       "format": "dc+sd-jwt",
@@ -1638,8 +1664,8 @@ Request:
 ```json
 {
   "credentialId": "urn:uuid:...",
-  "issuerAccount": "rIssuer...",
-  "holderAccount": "rHolder...",
+  "issuerAccount": "rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+  "holderAccount": "rf7J73nExampleHolderAddress",
   "credentialType": "ABC123..."
 }
 ```
@@ -1659,8 +1685,8 @@ Response:
   "source": "Android",
   "requestId": "50fd0de3-6705-478f-9535-d48cbbcd090d",
   "credentialId": "200",
-  "issuerAccount": "rIssuer...",
-  "holderAccount": "rHolder...",
+  "issuerAccount": "rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+  "holderAccount": "rf7J73nExampleHolderAddress",
   "credentialType": "KYC_CREDENTIAL",
   "txHash": "ABCDEF...",
   "credentialAcceptHash": "ABCDEF...",
@@ -1690,8 +1716,8 @@ Request:
 ```json
 {
   "credentialId": "urn:uuid:...",
-  "issuerAccount": "rIssuer...",
-  "holderAccount": "rHolder...",
+  "issuerAccount": "rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+  "holderAccount": "rf7J73nExampleHolderAddress",
   "credentialType": "KYC_CREDENTIAL"
 }
 ```
@@ -1988,6 +2014,56 @@ Response:
 -> 웹이 반환값으로 challenge/signMessage/submitPresentationToVerifier 흐름 진행
 ```
 
+### 4. PC VP 로그인 QR
+
+PC 로그인 QR payload:
+
+```json
+{
+  "type": "VP_LOGIN_REQUEST",
+  "requestId": "vp-login-request-id",
+  "qrToken": "raw-qr-token"
+}
+```
+
+Android 처리:
+
+```text
+QR 스캔
+-> type=VP_LOGIN_REQUEST 확인
+-> POST /api/mobile/auth/vp-login-requests/resolve
+-> resolve.data.nonce / aud / expiresAt로 기존 verifier challenge 저장소 등록
+-> 사용자가 저장된 법인 KYC SD-JWT Credential 선택
+-> 기존 SD-JWT+KB presentationObject 생성 규칙으로 VP 생성
+-> POST /api/mobile/auth/vp-login-requests/{requestId}/submit
+-> 완료 화면 표시
+```
+
+Android submit body:
+
+```json
+{
+  "qrToken": "raw-qr-token",
+  "credentialId": 200,
+  "vp": {
+    "format": "kyvc-sd-jwt-presentation-v1",
+    "definitionId": "kyvc-corporate-web-vp-login-v1",
+    "aud": "kyvc-corporate-web-login",
+    "nonce": "core-issued-nonce",
+    "sdJwtKb": "ISSUER_JWT~DISCLOSURE~KB_JWT",
+    "attachmentManifest": []
+  },
+  "deviceId": "android-device-id"
+}
+```
+
+주의:
+
+- `WalletBridge.signMessage()` 내부 SD-JWT/KB-JWT 생성 로직과 presentation object 구조는 변경하지 않는다.
+- Android는 JWT Cookie, access token, refresh token, PC complete API를 처리하지 않는다.
+- `qrToken`, `vp`, `sdJwtKb`, SD-JWT 원문, disclosure 원문, JWT 원문은 로그에 남기지 않는다.
+- 디버깅 로그는 `requestId`, `credentialId`, API 성공/실패 여부, error code 수준만 허용한다.
+
 공통 주의:
 
 - 기존 `scanQRCode`는 계속 동작하지만, 운영 웹에서는 용도별 브릿지(`scanIssueQrCode`, `scanPresentationQrCode`)를 우선 사용한다.
@@ -2003,7 +2079,7 @@ Response:
 지원 화면:
 
 - `requestCredentialIssueComplete`: `발급완료.png`
-- `requestCredentialIssueConfirm`: 발급 확인 화면. `발급확인1.png`와 `발급확인2.png`는 같은 화면의 짧은/긴 캡처이므로 하나의 스크롤 화면으로 처리한다.
+- `requestCredentialIssueConfirm`: 발급 확인 화면. 현재 기준 시안은 `발급확인0.png`이며, 발급 상세 정보와 XRP 잔액/네트워크 수수료/등록 후 사용 가능 잔액을 표시한다.
 - `requestCredentialDetail`: `증명서 상세.png`
 - `requestCredentialSubmit`: `증명서 제출.png`
 
@@ -2023,11 +2099,19 @@ Response:
   "companyType": "주식회사",
   "establishedAt": "2020년 3월 15일",
   "representativeName": "홍길동",
+  "beneficialOwnerName": "이현수",
+  "agentName": "김계와",
   "address": "서울특별시 강남구 테헤란로 123",
   "did": "DID:kyvc:corp:240315",
+  "issuerDid": "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+  "holderDid": "did:xrpl:1:rf7J73nExampleHolderAddress",
   "issuedAtFull": "2026.05.07 14:32",
   "expiresAt": "2027.05.06",
-  "transactionHash": "0x7f3a92e1c4d28b1a..."
+  "transactionHash": "0x7f3a92e1c4d28b1a...",
+  "currentBalanceXrp": "0 XRP",
+  "networkFeeXrp": "0.000012 XRP",
+  "usableBalanceXrp": "0 XRP",
+  "balanceWarning": "* 잔액이 부족합니다"
 }
 ```
 
@@ -2035,6 +2119,15 @@ Response:
 
 - `action`, `requestId`, `issuedAt`은 공통 브리지 검증 대상이다.
 - 발급 확인과 증명서 제출 화면의 확인/거부 버튼은 스크롤과 독립된 하단 고정 영역에 표시한다.
+- 발급 확인 화면의 `confirm` 결과는 사용자가 확인 버튼을 눌렀다는 신호만 의미한다. Android는 이 버튼에서 backend prepare, `saveVC`, `submitToXRPL`, backend confirm을 직접 호출하지 않는다.
+- 발급 확인 화면의 현재 잔액/등록 후 사용 가능 잔액은 Android가 활성 지갑의 XRPL account balance를 조회해 표시한다. 웹 payload의 `currentBalanceXrp`, `balanceXrp`, `usableBalanceXrp`는 조회 실패 시 fallback으로만 사용한다.
+- 발급 확인 화면의 발급 상세 정보는 실제 offer/credential 응답값을 사용해야 한다. Android는 `corporateName/companyName/legalEntity.name`, `businessNumber/businessRegistrationNumber/legalEntity.registrationNumber`, `legalEntity.type`, `representative.name`, `beneficialOwners[].name`, `agent.name/authorizedAgent.name/delegate.name` alias를 함께 해석하며, 값이 없으면 테스트 값 대신 `-`로 표시한다.
+- 증명서 상세 화면 카드의 큰 제목은 `법인 kyc 증명서`로 고정 표시한다. 카드 좌측 상단에는 `issuerDid`, 좌측 하단에는 `holderDid`, 우측 하단에는 발급일/만료일을 2줄로 표시한다.
+- 증명서 상세 화면은 `credentialId`로 로컬 저장된 credential을 찾을 수 있으면 저장된 `sdJwt`, `vcJwt`, `vcJson`, `selectiveDisclosureJson`의 claim key/value를 우선 펼쳐 표시한다. 저장 원문을 찾지 못하면 화면 요청 payload의 요약 필드를 fallback으로 표시한다.
+- 저장 credential claim은 KYvC legal entity KYC claim 포맷 기준으로 정렬/라벨링한다. 공통 메타 claim(`iss`, `sub`, `vct`, `jti`, `iat`, `exp`, `cnf.kid`, `credentialStatus.*`) 뒤에 `kyc.*`, `legalEntity.*`, `representative.*`, `beneficialOwners[]`, `delegate.*`, `delegation.*`, `establishmentPurpose.*`, `extra.aiAssessmentRef.*`, `documentEvidence[]` 순서로 표시한다.
+- `legalEntity.type` 값은 코드 그대로가 아니라 `STOCK_COMPANY=주식회사`, `LIMITED_COMPANY=유한회사`, `LIMITED_PARTNERSHIP=유한합자회사 계열`, `GENERAL_PARTNERSHIP=합명회사 계열`, `INCORPORATED_ASSOCIATION=사단법인`, `FOUNDATION=재단법인`, `COOPERATIVE=협동조합`, `UNIQUE_NUMBER_ORGANIZATION=고유번호 단체`, `FOREIGN_COMPANY=외국회사`로 표시한다.
+- 저장된 credential에서 추출된 claim은 모두 표시한다. 한국어 라벨 매핑이 있는 claim은 한국어 라벨로 표시하고, 매핑이 없는 claim은 raw key를 그대로 표시한다.
+- 증명서 상세 화면의 `증명서 삭제` 버튼은 네이티브 확인 다이얼로그를 한 번 더 표시한 뒤, 확정 시 `result=delete`를 반환한다. 실제 credential 삭제 처리는 웹이 이 결과를 받은 뒤 삭제 브릿지/API 흐름으로 진행한다.
 - 기존 테스트 페이지 호환을 위해 `requestCredentialIssueConfirm1`, `requestCredentialIssueConfirm2`는 남겨두지만, 둘 다 동일한 발급 확인 화면을 연다. 신규 웹은 `requestCredentialIssueConfirm`을 사용한다.
 - 화면은 PNG 시안을 기준으로 네이티브 Compose에서 재현한다.
 - 민감한 raw SD-JWT, disclosure 원문, seed는 이 화면 요청 payload에 넣지 않는다.
@@ -2056,9 +2149,9 @@ Response:
 
 - 발급 완료: `viewCredential`, `home`
 - 발급 확인: `confirm`, `reject`
-- 증명서 상세: `showQr`
+- 증명서 상세: `showQr`, `delete`
 - 증명서 제출: `submit`, `reject`
-- `confirm`, `reject`, `submit`, `showQr`, `viewCredential`, `home`은 사용자가 정상적으로 선택한 결과이므로 `ok=true`로 반환한다.
+- `confirm`, `reject`, `submit`, `showQr`, `delete`, `viewCredential`, `home`은 사용자가 정상적으로 선택한 결과이므로 `ok=true`로 반환한다.
 - 뒤로가기/닫기: `ok=false`, `result=cancel`
 
 웹 처리 기준:

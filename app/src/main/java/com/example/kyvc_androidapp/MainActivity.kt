@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.net.http.SslError
+import android.util.Base64
 import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
@@ -43,6 +44,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -76,10 +78,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -96,8 +100,13 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import org.json.JSONArray
+import java.math.BigDecimal
+import java.math.RoundingMode
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -131,6 +140,18 @@ private data class CredentialNativeScreenRequest(
     val requestJson: String
 )
 
+private data class IssueConfirmBalanceSnapshot(
+    val currentBalanceXrp: String,
+    val usableBalanceXrp: String,
+    val balanceWarning: String
+)
+
+private data class VpLoginCredentialPickerRequest(
+    val title: String,
+    val options: List<Pair<String, String>>,
+    val onSelected: (String?) -> Unit
+)
+
 class MainActivity : FragmentActivity() {
     private val mainViewModel: MainViewModel by viewModels()
     private lateinit var bridge: WalletBridge
@@ -142,6 +163,8 @@ class MainActivity : FragmentActivity() {
     private val mnemonicBackupRequest = mutableStateOf<Pair<String, String>?>(null)
     private val walletRestoreRequestJson = mutableStateOf<String?>(null)
     private val credentialNativeScreenRequest = mutableStateOf<CredentialNativeScreenRequest?>(null)
+    private val vpLoginCredentialPickerRequest = mutableStateOf<VpLoginCredentialPickerRequest?>(null)
+    private val vpLoginCompletionMessage = mutableStateOf<String?>(null)
     private var pendingQrRequestJson: String? = null
     private val cameraPermissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -227,6 +250,12 @@ class MainActivity : FragmentActivity() {
                     screen = CredentialNativeScreen.from(screen),
                     requestJson = requestJson
                 )
+            },
+            launchVpLoginCredentialPicker = { title, options, onSelected ->
+                vpLoginCredentialPickerRequest.value = VpLoginCredentialPickerRequest(title, options, onSelected)
+            },
+            launchVpLoginCompletion = { message ->
+                vpLoginCompletionMessage.value = message
             },
             onSessionStatusChanged = { unlocked ->
                 isUnlocked.value = unlocked
@@ -472,8 +501,37 @@ class MainActivity : FragmentActivity() {
                             }
                             val nativeCredentialRequest = credentialNativeScreenRequest.value
                             if (nativeCredentialRequest != null) {
-                                val uiData = remember(nativeCredentialRequest.requestJson) {
+                                val baseUiData = remember(nativeCredentialRequest.requestJson) {
                                     CredentialUiData.from(nativeCredentialRequest.requestJson)
+                                }
+                                var issueConfirmBalance by remember(nativeCredentialRequest.requestJson) {
+                                    mutableStateOf<IssueConfirmBalanceSnapshot?>(null)
+                                }
+                                var storedClaimRows by remember(nativeCredentialRequest.requestJson) {
+                                    mutableStateOf<List<Triple<String, String, String>>>(emptyList())
+                                }
+                                LaunchedEffect(nativeCredentialRequest.screen, nativeCredentialRequest.requestJson) {
+                                    issueConfirmBalance = null
+                                    storedClaimRows = emptyList()
+                                    if (nativeCredentialRequest.screen == CredentialNativeScreen.IssueConfirm) {
+                                        issueConfirmBalance = loadIssueConfirmBalance(baseUiData)
+                                    }
+                                    if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail) {
+                                        storedClaimRows = loadStoredCredentialClaimRows(baseUiData)
+                                    }
+                                }
+                                var uiData = baseUiData
+                                if (nativeCredentialRequest.screen == CredentialNativeScreen.IssueConfirm) {
+                                    uiData = issueConfirmBalance?.let {
+                                        uiData.copy(
+                                            currentBalanceXrp = it.currentBalanceXrp,
+                                            usableBalanceXrp = it.usableBalanceXrp,
+                                            balanceWarning = it.balanceWarning
+                                        )
+                                    } ?: uiData.copy(balanceWarning = "잔액 조회 중")
+                                }
+                                if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail && storedClaimRows.isNotEmpty()) {
+                                    uiData = uiData.copy(storedClaimRows = storedClaimRows)
                                 }
                                 NativeCredentialFlowScreen(
                                     screen = nativeCredentialRequest.screen,
@@ -502,10 +560,79 @@ class MainActivity : FragmentActivity() {
                                     }
                                 )
                             }
+                            vpLoginCredentialPickerRequest.value?.let { pickerRequest ->
+                                VpLoginCredentialPickerDialog(
+                                    request = pickerRequest,
+                                    onClose = {
+                                        vpLoginCredentialPickerRequest.value = null
+                                        pickerRequest.onSelected(null)
+                                    },
+                                    onSelected = { credentialId ->
+                                        vpLoginCredentialPickerRequest.value = null
+                                        pickerRequest.onSelected(credentialId)
+                                    }
+                                )
+                            }
+                            vpLoginCompletionMessage.value?.let { message ->
+                                VpLoginCompletionDialog(
+                                    message = message,
+                                    onClose = { vpLoginCompletionMessage.value = null }
+                                )
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    private suspend fun loadIssueConfirmBalance(baseData: CredentialUiData): IssueConfirmBalanceSnapshot {
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val container = mainViewModel.appContainer
+                val walletState = container.walletStateStore.requireWalletState()
+                val assets = container.xrplHelper.getAccountAssets(walletState.account)
+                val currentBalance = assets.xrpBalanceXrp
+                val currentBalanceLabel = currentBalance?.let(::formatXrpLabel) ?: baseData.currentBalanceXrp
+                val usableBalanceLabel = currentBalance
+                    ?.let { calculateUsableXrp(it, baseData.networkFeeXrp) }
+                    ?.let(::formatXrpLabel)
+                    ?: baseData.usableBalanceXrp
+                val warning = when {
+                    !assets.accountActivated -> "* 계정 활성화가 필요합니다"
+                    assets.error != null -> "* 잔액 조회를 완료하지 못했습니다"
+                    currentBalance?.let { parseXrpAmount(it) <= BigDecimal.ZERO } == true -> "* 잔액이 부족합니다"
+                    currentBalance?.let { parseXrpAmount(it) <= parseXrpAmount(baseData.networkFeeXrp) } == true -> "* 네트워크 수수료보다 잔액이 부족합니다"
+                    else -> ""
+                }
+                IssueConfirmBalanceSnapshot(
+                    currentBalanceXrp = currentBalanceLabel,
+                    usableBalanceXrp = usableBalanceLabel,
+                    balanceWarning = warning
+                )
+            }.getOrElse {
+                IssueConfirmBalanceSnapshot(
+                    currentBalanceXrp = baseData.currentBalanceXrp,
+                    usableBalanceXrp = baseData.usableBalanceXrp,
+                    balanceWarning = "* 잔액 조회를 완료하지 못했습니다"
+                )
+            }
+        }
+    }
+
+    private suspend fun loadStoredCredentialClaimRows(baseData: CredentialUiData): List<Triple<String, String, String>> {
+        val credentialId = baseData.credentialId.takeIf { it.isNotBlank() } ?: return emptyList()
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val credential = mainViewModel.appContainer.credentialRepository.getCredentialById(credentialId)
+                    ?: return@withContext emptyList()
+                storedCredentialClaims(
+                    sdJwt = credential.sdJwt,
+                    vcJwt = credential.vcJwt,
+                    vcJson = credential.vcJson,
+                    selectiveDisclosureJson = credential.selectiveDisclosureJson
+                )
+            }.getOrDefault(emptyList())
         }
     }
 
@@ -1216,8 +1343,409 @@ private fun CredentialNativeScreen.fallbackAction(): String {
     }
 }
 
+private fun credentialDateOnly(value: String): String {
+    val date = value
+        .trim()
+        .substringBefore("T")
+        .substringBefore(" ")
+    return if (Regex("""\d{4}-\d{2}-\d{2}""").matches(date)) {
+        date.replace("-", ".")
+    } else {
+        date
+    }
+}
+
+private fun parseXrpAmount(value: String): BigDecimal {
+    val normalized = value
+        .replace("XRP", "", ignoreCase = true)
+        .trim()
+        .ifBlank { "0" }
+    return normalized.toBigDecimalOrNull() ?: BigDecimal.ZERO
+}
+
+private fun calculateUsableXrp(balanceXrp: String, feeXrp: String): String {
+    val usable = parseXrpAmount(balanceXrp).subtract(parseXrpAmount(feeXrp))
+    return if (usable < BigDecimal.ZERO) "0" else usable.stripTrailingZeros().toPlainString()
+}
+
+private fun formatXrpLabel(value: String): String {
+    val amount = parseXrpAmount(value).setScale(6, RoundingMode.DOWN).stripTrailingZeros().toPlainString()
+    return "$amount XRP"
+}
+
+private fun storedCredentialClaims(
+    sdJwt: String?,
+    vcJwt: String?,
+    vcJson: String?,
+    selectiveDisclosureJson: String?
+): List<Triple<String, String, String>> {
+    val claims = linkedMapOf<String, String>()
+    val disclosurePaths = selectiveDisclosureJson?.let(::extractDisclosablePaths).orEmpty()
+    vcJson?.let { addJsonCredentialClaims(claims, it) }
+    vcJwt?.let { addJwtCredentialClaims(claims, it) }
+    sdJwt?.let { addSdJwtCredentialClaims(claims, it, disclosurePaths) }
+    selectiveDisclosureJson?.let { addSelectiveDisclosureClaims(claims, it) }
+    val labelCounts = claims.keys
+        .map(::claimDisplayLabel)
+        .groupingBy { it }
+        .eachCount()
+    return claims.entries
+        .filter { (_, value) -> value.isNotBlank() }
+        .sortedWith(
+            compareBy<Map.Entry<String, String>> { claimOrder(it.key) }
+                .thenBy { it.key }
+        )
+        .mapIndexed { index, (key, value) ->
+            val label = claimDisplayLabel(key)
+            Triple(
+                claimIcon(index, key),
+                if ((labelCounts[label] ?: 0) > 1) "$label (${normalizeClaimKey(key)})" else label,
+                claimDisplayValue(key, value)
+            )
+        }
+}
+
+private fun addJsonCredentialClaims(claims: MutableMap<String, String>, rawJson: String) {
+    val json = runCatching { JSONObject(rawJson) }.getOrNull() ?: return
+    val subject = json.optJSONObject("credentialSubject") ?: json.optJSONObject("claims") ?: json
+    flattenJsonClaims(subject, "", claims)
+}
+
+private fun addJwtCredentialClaims(claims: MutableMap<String, String>, jwt: String) {
+    val payload = decodeJwtPayloadJson(jwt) ?: return
+    val subject = payload.optJSONObject("credentialSubject") ?: payload.optJSONObject("claims") ?: payload
+    flattenJsonClaims(subject, "", claims)
+}
+
+private fun addSdJwtCredentialClaims(
+    claims: MutableMap<String, String>,
+    sdJwt: String,
+    disclosurePaths: List<String>
+) {
+    val parts = sdJwt.split("~").filter { it.isNotBlank() }
+    parts.firstOrNull()?.let { issuerJwt -> addJwtCredentialClaims(claims, issuerJwt) }
+    val usedDisclosurePaths = mutableSetOf<String>()
+    parts.drop(1).forEachIndexed { index, disclosure ->
+        val array = decodeBase64JsonArray(disclosure) ?: return@forEachIndexed
+        if (array.length() >= 3) {
+            val leafKey = array.optString(1).takeIf { it.isNotBlank() } ?: return@forEachIndexed
+            val indexedPath = disclosurePaths.getOrNull(index)
+                ?.takeIf { path -> path.substringAfterLast(".") == leafKey || path.endsWith("[].$leafKey") }
+            val matchedPath = indexedPath ?: disclosurePaths.firstOrNull { path ->
+                path !in usedDisclosurePaths &&
+                    (path.substringAfterLast(".") == leafKey || path.endsWith("[].$leafKey"))
+            }
+            matchedPath?.let { usedDisclosurePaths += it }
+            val key = matchedPath ?: "disclosure[$index].$leafKey"
+            putClaimValue(claims, key, array.opt(2))
+        }
+    }
+}
+
+private fun extractDisclosablePaths(rawJson: String): List<String> {
+    val json = runCatching { JSONObject(rawJson) }.getOrNull() ?: return emptyList()
+    val paths = json.optJSONArray("disclosablePaths")
+        ?: json.optJSONArray("requiredDisclosures")
+        ?: json.optJSONArray("paths")
+        ?: return emptyList()
+    return buildList {
+        for (index in 0 until paths.length()) {
+            paths.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+        }
+    }
+}
+
+private fun addSelectiveDisclosureClaims(claims: MutableMap<String, String>, rawJson: String) {
+    val json = runCatching { JSONObject(rawJson) }.getOrNull() ?: return
+    listOf("claims", "disclosures", "values", "selectedClaims").forEach { key ->
+        json.optJSONObject(key)?.let { flattenJsonClaims(it, "", claims) }
+    }
+}
+
+private fun flattenJsonClaims(
+    json: JSONObject,
+    prefix: String,
+    claims: MutableMap<String, String>
+) {
+    json.keys().forEach { key ->
+        if (key.startsWith("_sd") || key in CLAIM_METADATA_KEYS) return@forEach
+        val path = if (prefix.isBlank()) key else "$prefix.$key"
+        putClaimValue(claims, path, json.opt(key))
+    }
+}
+
+private fun putClaimValue(claims: MutableMap<String, String>, key: String, value: Any?) {
+    when (value) {
+        null, JSONObject.NULL -> Unit
+        is JSONObject -> flattenJsonClaims(value, key, claims)
+        is JSONArray -> {
+            for (index in 0 until value.length()) {
+                val item = value.opt(index)
+                val itemKey = "$key[$index]"
+                when (item) {
+                    is JSONObject -> flattenJsonClaims(item, itemKey, claims)
+                    is JSONArray -> claims.putIfAbsent(itemKey, item.toString())
+                    null, JSONObject.NULL -> Unit
+                    else -> claims.putIfAbsent(itemKey, item.toString())
+                }
+            }
+        }
+        else -> claims.putIfAbsent(key, value.toString())
+    }
+}
+
+private fun decodeJwtPayloadJson(jwt: String): JSONObject? {
+    val payload = jwt.split(".").getOrNull(1) ?: return null
+    return runCatching { JSONObject(decodeBase64Url(payload)) }.getOrNull()
+}
+
+private fun decodeBase64JsonArray(value: String): JSONArray? {
+    return runCatching { JSONArray(decodeBase64Url(value)) }.getOrNull()
+}
+
+private fun decodeBase64Url(value: String): String {
+    val normalized = value.padEnd(value.length + (4 - value.length % 4) % 4, '=')
+    return String(Base64.decode(normalized, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
+}
+
+private fun claimIcon(index: Int, key: String): String {
+    return when {
+        key in COMMON_META_CLAIM_LABELS -> "M"
+        key.startsWith("kyc.", ignoreCase = true) -> "K"
+        key.contains("legalEntity", ignoreCase = true) -> "법"
+        key.contains("representative", ignoreCase = true) -> "대"
+        key.contains("beneficial", ignoreCase = true) -> "실"
+        key.contains("delegate", ignoreCase = true) || key.contains("delegation", ignoreCase = true) -> "위"
+        key.contains("establishmentPurpose", ignoreCase = true) -> "목"
+        key.contains("aiAssessment", ignoreCase = true) -> "AI"
+        key.contains("documentEvidence", ignoreCase = true) -> "문"
+        key.contains("address", ignoreCase = true) -> "주"
+        else -> (index + 1).toString()
+    }
+}
+
+private fun claimDisplayLabel(key: String): String {
+    val normalized = normalizeClaimKey(key)
+    return CLAIM_LABELS[normalized] ?: when {
+        normalized.startsWith("beneficialOwners[].") -> CLAIM_LABELS[normalized] ?: normalized
+        normalized.startsWith("documentEvidence[].") -> CLAIM_LABELS[normalized] ?: normalized
+        normalized == "name" -> "법인명"
+        normalized == "registrationNumber" || normalized == "businessRegistrationNumber" -> "법인등록번호"
+        normalized == "type" -> "법인 종류"
+        else -> normalized.substringAfterLast(".").substringBefore("[")
+    }
+}
+
+private fun claimDisplayValue(key: String, value: String): String {
+    val normalized = normalizeClaimKey(key)
+    return when (normalized) {
+        "legalEntity.type" -> LEGAL_ENTITY_TYPE_LABELS[value] ?: value
+        "legalEntity.nonProfit",
+        "legalEntity.purposeCheckRequired",
+        "delegation.kycApplication",
+        "delegation.documentSubmission",
+        "delegation.vcReceipt",
+        "establishmentPurpose.checked" -> booleanDisplayValue(value)
+        else -> value
+    }
+}
+
+private fun booleanDisplayValue(value: String): String {
+    return when (value.lowercase()) {
+        "true", "yes", "y", "1" -> "예"
+        "false", "no", "n", "0" -> "아니오"
+        else -> value
+    }
+}
+
+private fun normalizeClaimKey(key: String): String {
+    return key
+        .removePrefix("credentialSubject.")
+        .removePrefix("claims.")
+        .replace(Regex("""\[\d+]"""), "[]")
+}
+
+private fun claimOrder(key: String): Int {
+    val normalized = normalizeClaimKey(key)
+    return CLAIM_ORDER.indexOf(normalized).takeIf { it >= 0 } ?: Int.MAX_VALUE
+}
+
+private val COMMON_META_CLAIM_LABELS = setOf(
+    "iss",
+    "sub",
+    "vct",
+    "jti",
+    "iat",
+    "exp",
+    "cnf.kid",
+    "credentialStatus.type",
+    "credentialStatus.statusId",
+    "credentialStatus.credentialType"
+)
+
+private val CLAIM_METADATA_KEYS = setOf(
+    "proof",
+    "credentialStatus",
+    "disclosablePaths",
+    "requiredDisclosures",
+    "paths",
+    "selectiveDisclosure"
+)
+
+private val CLAIM_ORDER = listOf(
+    "iss",
+    "sub",
+    "vct",
+    "jti",
+    "iat",
+    "exp",
+    "cnf.kid",
+    "credentialStatus.type",
+    "credentialStatus.statusId",
+    "credentialStatus.credentialType",
+    "kyc.jurisdiction",
+    "kyc.assuranceLevel",
+    "kyc.verifiedAt",
+    "legalEntity.type",
+    "legalEntity.name",
+    "legalEntity.registrationNumber",
+    "legalEntity.nonProfit",
+    "legalEntity.purposeCheckRequired",
+    "representative.name",
+    "representative.birthDate",
+    "representative.nationality",
+    "representative.englishName",
+    "beneficialOwners[].name",
+    "beneficialOwners[].birthDate",
+    "beneficialOwners[].nationality",
+    "beneficialOwners[].englishName",
+    "beneficialOwners[].ownershipPercentage",
+    "delegate.name",
+    "delegate.address",
+    "delegate.contact",
+    "delegate.identityDigest",
+    "delegate.identityDigestAlgorithm",
+    "delegate.identityDigestVersion",
+    "delegation.kycApplication",
+    "delegation.documentSubmission",
+    "delegation.vcReceipt",
+    "delegation.validFrom",
+    "delegation.validUntil",
+    "delegation.targetCorporateName",
+    "establishmentPurpose.checked",
+    "establishmentPurpose.purposeText",
+    "extra.aiAssessmentRef.assessmentId",
+    "extra.aiAssessmentRef.applicationId",
+    "extra.aiAssessmentRef.status",
+    "documentEvidence[].documentId",
+    "documentEvidence[].documentType",
+    "documentEvidence[].documentClass",
+    "documentEvidence[].digestSRI",
+    "documentEvidence[].mediaType",
+    "documentEvidence[].byteSize",
+    "documentEvidence[].hashInput",
+    "documentEvidence[].evidenceFor"
+)
+
+private val CLAIM_LABELS = mapOf(
+    "iss" to "발급자 DID",
+    "sub" to "소지자 DID",
+    "vct" to "Credential 타입",
+    "jti" to "Credential ID",
+    "iat" to "발급 시각",
+    "exp" to "만료 시각",
+    "cnf.kid" to "Holder 키 ID",
+    "credentialStatus.type" to "상태 조회 방식",
+    "credentialStatus.statusId" to "상태 레코드 ID",
+    "credentialStatus.credentialType" to "XRPL Credential Type",
+    "kyc.jurisdiction" to "관할 국가",
+    "kyc.assuranceLevel" to "심사 보증 수준",
+    "kyc.verifiedAt" to "검증 완료 시각",
+    "legalEntity.type" to "법인 종류",
+    "legalEntity.name" to "법인명",
+    "legalEntity.registrationNumber" to "법인등록번호",
+    "legalEntity.businessRegistrationNumber" to "법인등록번호",
+    "legalEntity.nonProfit" to "비영리 여부",
+    "legalEntity.purposeCheckRequired" to "설립 목적 증빙 필요",
+    "representative.name" to "대표자 이름",
+    "representative.birthDate" to "대표자 생년월일",
+    "representative.nationality" to "대표자 국적",
+    "representative.englishName" to "대표자 영문명",
+    "beneficialOwners[].name" to "실소유자 이름",
+    "beneficialOwners[].birthDate" to "실소유자 생년월일",
+    "beneficialOwners[].nationality" to "실소유자 국적",
+    "beneficialOwners[].englishName" to "실소유자 영문명",
+    "beneficialOwners[].ownershipPercentage" to "지분율",
+    "delegate.name" to "대리인 이름",
+    "delegate.address" to "대리인 주소",
+    "delegate.contact" to "대리인 연락처",
+    "delegate.identityDigest" to "대리인 신원정보 해시",
+    "delegate.identityDigestAlgorithm" to "해시 알고리즘",
+    "delegate.identityDigestVersion" to "해시 포맷 버전",
+    "delegation.kycApplication" to "KYC 신청 권한",
+    "delegation.documentSubmission" to "서류 제출 권한",
+    "delegation.vcReceipt" to "VC 수령 권한",
+    "delegation.validFrom" to "위임 시작일",
+    "delegation.validUntil" to "위임 종료일",
+    "delegation.targetCorporateName" to "위임 대상 법인명",
+    "establishmentPurpose.checked" to "설립 목적 검증 충족",
+    "establishmentPurpose.purposeText" to "설립 목적",
+    "extra.aiAssessmentRef.assessmentId" to "AI 심사 ID",
+    "extra.aiAssessmentRef.applicationId" to "KYC 신청 ID",
+    "extra.aiAssessmentRef.status" to "AI 심사 상태",
+    "documentEvidence[].documentId" to "증빙 문서 ID",
+    "documentEvidence[].documentType" to "문서 종류 코드",
+    "documentEvidence[].documentClass" to "원본 문서 분류",
+    "documentEvidence[].digestSRI" to "문서 해시값",
+    "documentEvidence[].mediaType" to "MIME 타입",
+    "documentEvidence[].byteSize" to "문서 크기",
+    "documentEvidence[].hashInput" to "해시 입력 기준",
+    "documentEvidence[].evidenceFor" to "증빙 대상 Claim"
+)
+
+private val LEGAL_ENTITY_TYPE_LABELS = mapOf(
+    "STOCK_COMPANY" to "주식회사",
+    "LIMITED_COMPANY" to "유한회사",
+    "LIMITED_PARTNERSHIP" to "유한합자회사 계열",
+    "GENERAL_PARTNERSHIP" to "합명회사 계열",
+    "INCORPORATED_ASSOCIATION" to "사단법인",
+    "FOUNDATION" to "재단법인",
+    "COOPERATIVE" to "협동조합",
+    "UNIQUE_NUMBER_ORGANIZATION" to "고유번호 단체",
+    "FOREIGN_COMPANY" to "외국회사"
+)
+
+private fun JSONObject.childObject(pathPart: String): JSONObject? {
+    val arrayMarkerIndex = pathPart.indexOf('[')
+    if (arrayMarkerIndex < 0) {
+        return optJSONObject(pathPart)
+    }
+    val key = pathPart.substring(0, arrayMarkerIndex)
+    val array = optJSONArray(key) ?: return null
+    val explicitIndex = pathPart
+        .substringAfter('[', "")
+        .substringBefore(']', "")
+        .toIntOrNull()
+    return array.optJSONObject(explicitIndex ?: 0)
+}
+
+private fun JSONObject.childText(pathPart: String): String? {
+    val arrayMarkerIndex = pathPart.indexOf('[')
+    if (arrayMarkerIndex < 0) {
+        return optString(pathPart).takeIf { it.isNotBlank() }
+    }
+    val key = pathPart.substring(0, arrayMarkerIndex)
+    val array = optJSONArray(key) ?: return null
+    val explicitIndex = pathPart
+        .substringAfter('[', "")
+        .substringBefore(']', "")
+        .toIntOrNull()
+    return array.optString(explicitIndex ?: 0).takeIf { it.isNotBlank() }
+}
+
 private data class CredentialUiData(
     val issuerName: String = "법원행정처",
+    val credentialId: String = "",
     val requesterName: String = "신한은행",
     val credentialTitle: String = "법인등록증명서",
     val submitCredentialTitle: String = "법인 KYC 증명서",
@@ -1226,14 +1754,23 @@ private data class CredentialUiData(
     val companyType: String = "주식회사",
     val establishedAt: String = "2020년 3월 15일",
     val representativeName: String = "홍길동",
+    val beneficialOwnerName: String = "이현수",
+    val agentName: String = "김계와",
     val address: String = "서울특별시 강남구 테헤란로 123",
     val did: String = "DID:kyvc:corp:240315",
+    val issuerDid: String = "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+    val holderDid: String = "did:xrpl:1:rf7J73nExampleHolderAddress",
     val issuedAt: String = "2026.05.07",
     val issuedAtFull: String = "2026.05.07 14:32",
     val expiresAt: String = "2027.05.06",
     val transactionHash: String = "0x7f3a92e1c4d28b1a...",
+    val currentBalanceXrp: String = "0 XRP",
+    val networkFeeXrp: String = "0.000012 XRP",
+    val usableBalanceXrp: String = "0 XRP",
+    val balanceWarning: String = "* 잔액이 부족합니다",
     val statusText: String = "정상 · 검증 가능",
-    val didRegistrationLabel: String = "did 등록하기"
+    val didRegistrationLabel: String = "did 등록하기",
+    val storedClaimRows: List<Triple<String, String, String>> = emptyList()
 ) {
     companion object {
         fun from(requestJson: String): CredentialUiData {
@@ -1241,22 +1778,77 @@ private data class CredentialUiData(
             fun text(name: String, fallback: String): String {
                 return json?.optString(name)?.takeIf { it.isNotBlank() } ?: fallback
             }
+            fun pathText(path: String): String? {
+                val root = json ?: return null
+                val parts = path.split(".")
+                var current: JSONObject = root
+                parts.dropLast(1).forEach { part ->
+                    current = current.childObject(part) ?: return null
+                }
+                return current.childText(parts.last())
+            }
+            fun firstText(fallback: String, vararg names: String): String {
+                return names.firstNotNullOfOrNull { name ->
+                    if (name.contains(".")) {
+                        pathText(name)
+                    } else {
+                        json?.optString(name)?.takeIf { it.isNotBlank() }
+                    }
+                } ?: fallback
+            }
+            val fallbackHolderDid = text("holderDid", text("did", "did:xrpl:1:rHolder..."))
+            val rawIssuedAt = firstText(
+                "-",
+                "displayIssuedAt",
+                "issuedDate",
+                "credentialIssuedAt",
+                "validFrom",
+                "issuanceDate",
+                "issuedAtFull",
+                "issuedAt"
+            )
+            val rawIssuedAtFull = firstText(
+                rawIssuedAt,
+                "issuedAtFull",
+                "credentialIssuedAtFull",
+                "credentialIssuedAt",
+                "validFrom",
+                "issuanceDate",
+                "issuedAt"
+            )
+            val rawExpiresAt = firstText(
+                "-",
+                "displayExpiresAt",
+                "expiresDate",
+                "expirationDate",
+                "validUntil",
+                "expiresAt"
+            )
             return CredentialUiData(
-                issuerName = text("issuerName", "법원행정처"),
-                requesterName = text("requesterName", "신한은행"),
-                credentialTitle = text("credentialTitle", "법인등록증명서"),
+                issuerName = firstText("KYvC 인증기관", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
+                credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
+                requesterName = text("requesterName", "-"),
+                credentialTitle = text("credentialTitle", "법인 kyc 증명서"),
                 submitCredentialTitle = text("submitCredentialTitle", "법인 KYC 증명서"),
-                holderName = text("holderName", "주식회사 케이와이브이씨"),
-                registrationNumber = text("registrationNumber", "110111-1234567"),
-                companyType = text("companyType", "주식회사"),
-                establishedAt = text("establishedAt", "2020년 3월 15일"),
-                representativeName = text("representativeName", "홍길동"),
-                address = text("address", "서울특별시 강남구 테헤란로 123"),
-                did = text("holderDid", text("did", "did:xrpl:1:rHolder...")),
-                issuedAt = text("displayIssuedAt", text("issuedDate", "2026.05.07")),
-                issuedAtFull = text("issuedAtFull", "2026.05.07 14:32"),
-                expiresAt = text("expiresAt", "2027.05.06"),
+                holderName = firstText("-", "holderName", "corporateName", "companyName", "businessName", "legalEntity.name"),
+                registrationNumber = firstText("-", "registrationNumber", "businessNumber", "businessRegistrationNumber", "corporateRegistrationNumber", "legalEntity.registrationNumber", "legalEntity.businessRegistrationNumber"),
+                companyType = firstText("-", "companyType", "corporateType", "legalEntityType", "legalEntity.type", "claims.legalEntity.type", "credentialSubject.legalEntity.type", "legalEntity.companyType", "legalEntity.corporateType"),
+                establishedAt = firstText("-", "establishedAt", "establishmentDate", "foundedAt", "legalEntity.establishedAt", "claims.legalEntity.establishedAt", "credentialSubject.legalEntity.establishedAt", "legalEntity.establishmentDate", "legalEntity.foundedAt"),
+                representativeName = firstText("-", "representativeName", "ceoName", "legalRepresentativeName", "representative.name", "claims.representative.name", "credentialSubject.representative.name", "representative.fullName", "legalRepresentative.name"),
+                beneficialOwnerName = firstText("-", "beneficialOwnerName", "beneficialOwner", "ownerName", "beneficialOwner.name", "beneficialOwner.fullName", "beneficialOwners[].name", "beneficialOwners[0].name", "claims.beneficialOwners[].name", "claims.beneficialOwners[0].name", "credentialSubject.beneficialOwners[].name", "credentialSubject.beneficialOwners[0].name", "beneficialOwners[].fullName", "beneficialOwners[0].fullName"),
+                agentName = firstText("-", "agentName", "delegateName", "representativeAgentName", "agent.name", "agent.fullName", "delegate.name", "claims.delegate.name", "credentialSubject.delegate.name", "delegate.fullName", "authorizedAgent.name", "authorizedAgent.fullName", "proxy.name", "proxy.fullName"),
+                address = firstText("-", "address", "corporateAddress", "businessAddress", "legalEntity.address", "claims.legalEntity.address", "credentialSubject.legalEntity.address", "legalEntity.businessAddress", "legalEntity.headOfficeAddress"),
+                did = fallbackHolderDid,
+                issuerDid = text("issuerDid", "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc"),
+                holderDid = fallbackHolderDid,
+                issuedAt = credentialDateOnly(rawIssuedAt),
+                issuedAtFull = rawIssuedAtFull,
+                expiresAt = rawExpiresAt,
                 transactionHash = text("transactionHash", "0x7f3a92e1c4d28b1a..."),
+                currentBalanceXrp = text("currentBalanceXrp", text("balanceXrp", "0 XRP")),
+                networkFeeXrp = text("networkFeeXrp", text("feeXrp", "0.000012 XRP")),
+                usableBalanceXrp = text("usableBalanceXrp", text("availableBalanceXrp", "0 XRP")),
+                balanceWarning = text("balanceWarning", "* 잔액이 부족합니다"),
                 statusText = text("statusText", "정상 · 검증 가능"),
                 didRegistrationLabel = text("didRegistrationLabel", "did 등록하기")
             )
@@ -1421,40 +2013,110 @@ private fun IssueConfirmScreen(
     onBack: () -> Unit,
     onResult: (String) -> Unit
 ) {
-    CredentialNativeScaffold(
-        title = "발급 확인",
-        onBack = onBack,
-        bottomBar = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledActionButton("확인") { onResult("confirm") }
-                OutlinedActionButton("거부") { onResult("reject") }
-            }
-        }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.White)
+            .statusBarsPadding()
+            .navigationBarsPadding()
     ) {
-        IssuerRequestCard(data)
-        Spacer(modifier = Modifier.height(26.dp))
-        CredentialCard(data, title = "법인 KYC 증명서", issuer = "우리은행", showVerified = false)
-        Spacer(modifier = Modifier.height(26.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("발급될 VC 세부 내용", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-            Spacer(modifier = Modifier.size(10.dp))
-            Text("8개 항목", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 138.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 22.dp, vertical = 14.dp)
+        ) {
+            CredentialTopBar(title = "발급 확인", onBack = onBack)
+            Spacer(modifier = Modifier.height(34.dp))
+            Text("발급 확인", color = Color(0xFF0B1D40), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(12.dp))
+            Text("증명서 내용을 확인해주세요.", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+            Spacer(modifier = Modifier.height(20.dp))
+            Text("발급 상세 정보", color = Color(0xFF111827), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(10.dp))
+            IssueConfirmDetailCard(data)
+            Spacer(modifier = Modifier.height(12.dp))
+            IssueConfirmBalanceCard(data)
         }
-        Spacer(modifier = Modifier.height(14.dp))
-        CredentialDetailList(
-            items = listOf(
-                "법인명" to data.holderName,
-                "법인등록번호" to data.registrationNumber,
-                "법인 종류" to data.companyType,
-                "설립일" to data.establishedAt,
-                "대표자" to data.representativeName,
-                "본점 소재지" to data.address,
-                "DID" to data.did,
-                "유효기간" to "${data.issuedAt} ~ ${data.expiresAt}"
-            )
-        )
-        Spacer(modifier = Modifier.height(24.dp))
-        InfoNotice("확인 후 지갑에 저장됩니다", "거부 시 이 VC는 발급되지 않으며 기록이 남지 않습니다.")
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(Color.White)
+                .padding(horizontal = 22.dp, vertical = 10.dp)
+                .navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            FilledActionButton("발급 확인") { onResult("confirm") }
+            OutlinedActionButton("거부") { onResult("reject") }
+        }
+    }
+}
+
+@Composable
+private fun IssueConfirmDetailCard(data: CredentialUiData) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .border(1.dp, Color(0xFFE8E8E8), RoundedCornerShape(14.dp))
+            .background(Color.White)
+            .padding(horizontal = 20.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(13.dp)
+    ) {
+        IssueConfirmInfoRow("발급 기관", data.issuerName.ifBlank { "KYvC 인증기관" })
+        IssueConfirmInfoRow("법인유형", data.companyType)
+        IssueConfirmInfoRow("법인명", data.holderName)
+        IssueConfirmInfoRow("법인등록번호", data.registrationNumber)
+        IssueConfirmInfoRow("대표자", data.representativeName)
+        IssueConfirmInfoRow("실소유자", data.beneficialOwnerName)
+        IssueConfirmInfoRow("대리인", data.agentName)
+    }
+}
+
+@Composable
+private fun IssueConfirmInfoRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = label, color = Color(0xFFB0B5BE), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.widthIn(min = 82.dp))
+        Spacer(modifier = Modifier.size(10.dp))
+        Text(text = value, color = Color(0xFF111827), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun IssueConfirmBalanceCard(data: CredentialUiData) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .border(1.dp, Color(0xFFE8E8E8), RoundedCornerShape(16.dp))
+            .background(Color.White)
+            .padding(horizontal = 27.dp, vertical = 20.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("현재 잔액", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.size(4.dp))
+            Text(data.balanceWarning, color = Color(0xFFFF3B30), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+        }
+        Spacer(modifier = Modifier.height(7.dp))
+        Text(data.currentBalanceXrp, color = Color(0xFF0B2A55), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(17.dp))
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("네트워크 수수료", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(7.dp))
+        Text(data.networkFeeXrp, color = Color(0xFF0B2A55), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(17.dp))
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
+        Spacer(modifier = Modifier.height(16.dp))
+        Text("등록 후 사용 가능 잔액", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(7.dp))
+        Text(data.usableBalanceXrp, color = Color(0xFF2F7DFF), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
     }
 }
 
@@ -1464,19 +2126,64 @@ private fun CredentialDetailScreen(
     onBack: () -> Unit,
     onResult: (String) -> Unit
 ) {
+    var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+
     CredentialNativeScaffold(
         title = "증명서 상세",
         onBack = onBack,
-        bottomBar = { FilledActionButton("내 QR 보기") { onResult("showQr") } }
+        bottomBar = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                FilledActionButton("내 QR 보기") { onResult("showQr") }
+                DestructiveOutlinedActionButton("증명서 삭제") { showDeleteConfirm = true }
+            }
+        }
     ) {
-        CredentialCard(data, title = data.credentialTitle, issuer = data.issuerName, showVerified = true)
+        CredentialCard(data, showVerified = true)
         Spacer(modifier = Modifier.height(20.dp))
         InfoRowCard("발", "발급기관", data.issuerName)
         Spacer(modifier = Modifier.height(12.dp))
-        InfoRowCard("유", "유효기간", "${data.issuedAt} - ${data.expiresAt}")
+        InfoRowCard("유", "유효기간", "${data.issuedAt} - ${credentialDateOnly(data.expiresAt)}")
         Spacer(modifier = Modifier.height(12.dp))
         InfoRowCard("✓", "상태", data.statusText)
+        Spacer(modifier = Modifier.height(12.dp))
+        val claimRows = credentialDetailClaimRows(data)
+        claimRows.forEachIndexed { index, item ->
+            InfoRowCard(item.first, item.second, item.third)
+            if (index != claimRows.lastIndex) {
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+        }
     }
+
+    if (showDeleteConfirm) {
+        DeleteCredentialConfirmDialog(
+            onDismiss = { showDeleteConfirm = false },
+            onConfirm = {
+                showDeleteConfirm = false
+                onResult("delete")
+            }
+        )
+    }
+}
+
+private fun credentialDetailClaimRows(data: CredentialUiData): List<Triple<String, String, String>> {
+    if (data.storedClaimRows.isNotEmpty()) {
+        return data.storedClaimRows
+    }
+    return listOf(
+        Triple("증", "증명서명", "법인 kyc 증명서"),
+        Triple("법", "법인명", data.holderName),
+        Triple("번", "법인등록번호", data.registrationNumber),
+        Triple("유", "법인유형", data.companyType),
+        Triple("설", "설립일", data.establishedAt),
+        Triple("대", "대표자", data.representativeName),
+        Triple("실", "실소유자", data.beneficialOwnerName),
+        Triple("위", "대리인", data.agentName),
+        Triple("주", "주소", data.address),
+        Triple("I", "Issuer DID", data.issuerDid),
+        Triple("H", "Holder DID", data.holderDid),
+        Triple("Tx", "트랜잭션", data.transactionHash)
+    )
 }
 
 @Composable
@@ -1530,8 +2237,6 @@ private fun CredentialSubmitScreen(
 @Composable
 private fun CredentialCard(
     data: CredentialUiData,
-    title: String,
-    issuer: String,
     showVerified: Boolean
 ) {
     Box(
@@ -1542,10 +2247,21 @@ private fun CredentialCard(
             .background(Brush.linearGradient(listOf(Color(0xFF111827), Color(0xFF183B8F), Color(0xFF7C3AED))))
             .padding(18.dp)
     ) {
-        Column {
-            Text(issuer, color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(title, color = Color.White, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        Column(modifier = Modifier.align(Alignment.TopStart).padding(end = 86.dp)) {
+            Text(
+                "Issuer DID",
+                color = Color.White.copy(alpha = 0.58f),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                data.issuerDid,
+                color = Color.White.copy(alpha = 0.84f),
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
         if (showVerified) {
             Box(
@@ -1559,17 +2275,61 @@ private fun CredentialCard(
                 Text("검증됨", color = Color.White, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.ExtraBold)
             }
         }
-        Column(modifier = Modifier.align(Alignment.BottomStart)) {
-            Text("KYvC", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-            Text("Verifiable Credential", color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.labelSmall)
-        }
+        Text(
+            "법인 kyc 증명서",
+            modifier = Modifier.align(Alignment.CenterStart),
+            color = Color.White,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.ExtraBold
+        )
         Row(
             modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(data.did, color = Color.White.copy(alpha = 0.82f), style = MaterialTheme.typography.labelSmall)
-            Text(data.issuedAt, color = Color.White.copy(alpha = 0.82f), style = MaterialTheme.typography.labelSmall)
+            Column(modifier = Modifier.weight(1f).padding(end = 14.dp)) {
+                Text(
+                    "Holder DID",
+                    color = Color.White.copy(alpha = 0.58f),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    data.holderDid,
+                    color = Color.White.copy(alpha = 0.82f),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                CredentialCardDateRow("발급일", credentialDateOnly(data.issuedAt))
+                CredentialCardDateRow("만료일", credentialDateOnly(data.expiresAt))
+            }
         }
+    }
+}
+
+@Composable
+private fun CredentialCardDateRow(label: String, value: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label,
+            modifier = Modifier.widthIn(min = 30.dp),
+            color = Color.White.copy(alpha = 0.72f),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Start
+        )
+        Spacer(modifier = Modifier.size(3.dp))
+        Text(
+            value,
+            modifier = Modifier.widthIn(min = 58.dp),
+            color = Color.White.copy(alpha = 0.86f),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End
+        )
     }
 }
 
@@ -1633,7 +2393,12 @@ private fun CredentialDetailList(items: List<Pair<String, String>>) {
             Column(modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp)) {
                 Text(item.first, color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
-                Text(item.second, color = if (item.first == "DID") Color(0xFF2F7DFF) else Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+                Text(
+                    item.second,
+                    color = if (item.first.contains("DID") || item.first == "트랜잭션") Color(0xFF2F7DFF) else Color(0xFF0B1D40),
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.ExtraBold
+                )
             }
             if (index != items.lastIndex) {
                 Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
@@ -1647,19 +2412,25 @@ private fun InfoRowCard(letter: String, title: String, body: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(68.dp)
+            .heightIn(min = 68.dp)
             .clip(RoundedCornerShape(16.dp))
             .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(16.dp))
             .background(Color.White)
-            .padding(horizontal = 13.dp),
+            .padding(horizontal = 13.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         LetterIcon(letter, small = true)
         Spacer(modifier = Modifier.size(12.dp))
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
             Text(title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
             Spacer(modifier = Modifier.height(4.dp))
-            Text(body, color = Color(0xFF6B7280), style = MaterialTheme.typography.labelLarge)
+            Text(
+                body,
+                color = Color(0xFF6B7280),
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }
@@ -1863,6 +2634,160 @@ private fun OutlinedActionButton(text: String, onClick: () -> Unit) {
         contentAlignment = Alignment.Center
     ) {
         Text(text, color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+    }
+}
+
+@Composable
+private fun DestructiveOutlinedActionButton(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .border(1.dp, Color(0xFFFFD7D7), RoundedCornerShape(14.dp))
+            .background(Color.White)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = Color(0xFFD92D20), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+    }
+}
+
+@Composable
+private fun DeleteCredentialConfirmDialog(
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color.White)
+                .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+                .padding(horizontal = 22.dp, vertical = 20.dp)
+        ) {
+            Text(
+                "증명서 삭제",
+                color = Color(0xFF0B1D40),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                "이 증명서를 지갑에서 삭제하시겠습니까? 삭제된 증명서는 복구할 수 없으며, 다시 사용하려면 새로 발급받아야 합니다.",
+                color = Color(0xFF6B7280),
+                style = MaterialTheme.typography.bodyMedium,
+                lineHeight = MaterialTheme.typography.bodyMedium.lineHeight
+            )
+            Spacer(modifier = Modifier.height(18.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                DestructiveFilledActionButton("삭제하기", onConfirm)
+                OutlinedActionButton("취소", onDismiss)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VpLoginCredentialPickerDialog(
+    request: VpLoginCredentialPickerRequest,
+    onClose: () -> Unit,
+    onSelected: (String) -> Unit
+) {
+    Dialog(onDismissRequest = onClose) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color.White)
+                .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+                .padding(horizontal = 22.dp, vertical = 20.dp)
+        ) {
+            Text(
+                request.title,
+                color = Color(0xFF0B1D40),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.ExtraBold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "PC 로그인에 제출할 법인 KYC 증명서를 선택해주세요.",
+                color = Color(0xFF6B7280),
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            request.options.forEachIndexed { index, option ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(14.dp))
+                        .background(Color.White)
+                        .clickable { onSelected(option.first) }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                ) {
+                    Column {
+                        Text(
+                            option.second,
+                            color = Color(0xFF0B1D40),
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.ExtraBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Credential ID ${option.first}",
+                            color = Color(0xFF8A93A3),
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                    }
+                }
+                if (index != request.options.lastIndex) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            OutlinedActionButton("취소", onClose)
+        }
+    }
+}
+
+@Composable
+private fun VpLoginCompletionDialog(
+    message: String,
+    onClose: () -> Unit
+) {
+    Dialog(onDismissRequest = onClose) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color.White)
+                .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+                .padding(horizontal = 22.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("VP 제출 완료", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(message, color = Color(0xFF6B7280), style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
+            Spacer(modifier = Modifier.height(18.dp))
+            FilledActionButton("확인", onClose)
+        }
+    }
+}
+
+@Composable
+private fun DestructiveFilledActionButton(text: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(Color(0xFFD92D20))
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
     }
 }
 

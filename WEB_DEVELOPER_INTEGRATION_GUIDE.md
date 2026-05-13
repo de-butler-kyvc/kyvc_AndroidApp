@@ -120,9 +120,13 @@ listWallets
 ## 7) VC / SD-JWT 기본 흐름
 
 ```text
-requestIssuerCredential
--> saveVC
+QR resolve / offer 조회
+-> requestCredentialIssueConfirm
+-> result=confirm 수신
+-> backend prepare 1회 호출
+-> credentialPayload.sdJwt를 saveVC에 전달
 -> submitToXRPL (CredentialAccept)
+-> backend confirm
 -> checkCredentialStatus (active=true, accepted=true 확인)
 -> verifyCredentialWithServer
 ```
@@ -130,6 +134,10 @@ requestIssuerCredential
 판정 기준:
 - 로컬 임시 검증보다 `VERIFY_CREDENTIAL_WITH_SERVER` 결과를 우선한다.
 - 샘플 placeholder 데이터로 성공 판정을 내리지 않는다.
+- `REQUEST_CREDENTIAL_ISSUE_CONFIRM`의 `result=confirm`은 사용자가 확인을 눌렀다는 콜백이다. Android는 이 버튼에서 backend prepare, `saveVC`, `submitToXRPL`, backend confirm을 직접 호출하지 않는다.
+- backend prepare는 offer당 1회만 호출한다. 이미 prepare 응답을 받은 상태라면 같은 offerId로 재호출하지 말고 메모리에 보관 중인 `credentialPayload.sdJwt`를 즉시 `saveVC`에 전달한다.
+- `saveVC`는 top-level `metadata`와 `credentialPayload.metadata`를 모두 지원한다. `credentialPayload.metadata.issuerAccount`에는 실제 XRPL classic address를 넣고, `issuerDid`는 `did:xrpl:1:{issuerAccount}` 형태로 맞춘다.
+- `issuerAccount` 또는 `issuerDid`에 `rIssuer` 같은 placeholder를 넣으면 Android 저장/검증에서 차단된다.
 
 ## 8) SD-JWT+KB 제출 흐름
 

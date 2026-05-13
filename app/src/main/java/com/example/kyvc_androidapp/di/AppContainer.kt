@@ -19,7 +19,7 @@ class AppContainer(application: Application) {
         AppDatabase::class.java,
         DATABASE_NAME
     )
-        .fallbackToDestructiveMigration()
+        .addMigrations(AppDatabase.MIGRATION_2_3)
         .build()
     val credentialRepository: CredentialRepository = CredentialRepository(database.credentialDao())
     val holderDocumentRepository: HolderDocumentRepository = HolderDocumentRepository(database.holderDocumentDao())

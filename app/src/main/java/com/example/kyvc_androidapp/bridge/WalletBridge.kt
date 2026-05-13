@@ -1580,12 +1580,30 @@ class WalletBridge(
                         "hasVcJson" to !request.text("vcJson").isNullOrBlank(),
                         "hasCredentialText" to !request.text("credential").isNullOrBlank(),
                         "hasCredentialObject" to (request.obj("credential") != null),
-                        "hasCredentialPayload" to (!request.text("credentialPayload").isNullOrBlank() || request.obj("credentialPayload") != null),
-                        "payloadLen" to jsonPayload.length,
-                        "payloadHash" to shortSha256(jsonPayload)
+                        "hasCredentialPayload" to (!request.text("credentialPayload").isNullOrBlank() || request.obj("credentialPayload") != null)
                     )
                 )
                 val envelope = resolveSaveCredentialEnvelope(request, jsonPayload)
+                val credentialFormat = resolveCredentialFormat(request, metadata, envelope)
+                val storedSdJwt = if (credentialFormat == FORMAT_DC_SD_JWT) {
+                    envelope.sdJwt
+                        ?: envelope.rawCredential.takeIf { isSdJwt(it) }
+                        ?: throw IllegalArgumentException("dc+sd-jwt credential must include sdJwt")
+                } else {
+                    null
+                }
+                val storedVcJwt = if (credentialFormat == FORMAT_VC_JWT) {
+                    envelope.vcJwt
+                        ?: envelope.rawCredential.takeIf { isCompactJwt(it) && !isSdJwt(it) }
+                        ?: throw IllegalArgumentException("vc+jwt credential must include vcJwt")
+                } else {
+                    null
+                }
+                val storedVcJson = if (storedSdJwt == null && storedVcJwt == null && envelope.sdJwt == null && envelope.vcJwt == null) {
+                    envelope.rawCredential
+                } else {
+                    null
+                }
                 val normalizedCredential = normalizeCredentialPayloadForSave(
                     payload = envelope.payload,
                     request = request,
@@ -1596,9 +1614,7 @@ class WalletBridge(
                     "vc.issue.saveVC.normalized",
                     mapOf(
                         "requestId" to requestId,
-                        "format" to envelope.format,
-                        "rawCredentialLen" to envelope.rawCredential.length,
-                        "rawCredentialHash" to shortSha256(envelope.rawCredential),
+                        "format" to credentialFormat,
                         "credentialId" to (firstText(request, "credentialId")
                             ?: firstText(metadata, "credentialId")
                             ?: firstText(normalizedCredential, "credentialId", "id", "jti")),
@@ -1626,7 +1642,11 @@ class WalletBridge(
                         ?: firstText(metadata, "credentialId")
                         ?: firstText(normalizedCredential, "credentialId", "id", "jti")
                         ?: "",
-                    vcJson = envelope.rawCredential,
+                    format = credentialFormat,
+                    sdJwt = storedSdJwt,
+                    vcJwt = storedVcJwt,
+                    vcJson = storedVcJson,
+                    selectiveDisclosureJson = request.obj("selectiveDisclosure")?.toString(),
                     issuerDid = issuerDid,
                     issuerAccount = firstText(metadata, "issuerAccount")
                         ?: firstText(request, "issuerAccount", "issuerAddress", "issuer_account")
@@ -1671,7 +1691,10 @@ class WalletBridge(
                         "credentialType" to entity.credentialType,
                         "validFrom" to entity.validFrom,
                         "validUntil" to entity.validUntil,
-                        "format" to envelope.format
+                        "format" to entity.format,
+                        "hasSdJwt" to !entity.sdJwt.isNullOrBlank(),
+                        "hasCredentialJwt" to !entity.vcJwt.isNullOrBlank(),
+                        "hasSelectiveDisclosure" to !entity.selectiveDisclosureJson.isNullOrBlank()
                     )
                 )
                 scope.launch(Dispatchers.Main) {
@@ -1685,9 +1708,9 @@ class WalletBridge(
                         put("holderAccount", entity.holderAccount)
                         put("credentialType", entity.credentialType)
                         put("saved", true)
-                        envelope.vcJwt?.let { put("vcJwt", it) }
-                        envelope.sdJwt?.let { put("sdJwt", it) }
-                        put("format", envelope.format)
+                        put("format", entity.format)
+                        put("hasSdJwt", !entity.sdJwt.isNullOrBlank())
+                        put("hasCredentialJwt", !entity.vcJwt.isNullOrBlank())
                     }
                 }
             } catch (e: Exception) {
@@ -1797,9 +1820,7 @@ class WalletBridge(
                         "hasCredentialType" to !firstText(request, "credentialType", "credentialTypeHex", "credential_type").isNullOrBlank(),
                         "hasCredentialStatus" to (request.obj("credentialStatus") != null),
                         "hasVcJson" to !request.text("vcJson").isNullOrBlank(),
-                        "hasSdJwt" to !firstText(request, "sdJwt", "sd_jwt").isNullOrBlank(),
-                        "payloadLen" to jsonPayload.length,
-                        "payloadHash" to shortSha256(jsonPayload)
+                        "hasSdJwt" to !firstText(request, "sdJwt", "sd_jwt").isNullOrBlank()
                     )
                 )
                 val savedCredential = requestedCredentialId
@@ -2069,7 +2090,10 @@ class WalletBridge(
                                         put("acceptedAt", credential.acceptedAt ?: "")
                                         put("credentialAcceptHash", credential.credentialAcceptHash ?: "")
                                         put("revokedOrInactiveAt", credential.revokedOrInactiveAt ?: "")
-                                        put("vcJson", credential.vcJson)
+                                        put("format", credential.format)
+                                        put("hasSdJwt", !credential.sdJwt.isNullOrBlank())
+                                        put("hasCredentialJwt", !credential.vcJwt.isNullOrBlank())
+                                        put("hasVcJson", !credential.vcJson.isNullOrBlank())
                                     }
                                 }
                             )
@@ -2229,9 +2253,7 @@ class WalletBridge(
                         "hasHolderAccount" to !firstText(request, "holderAccount", "holderXrplAddress", "holder", "subject", "subjectAccount", "holder_account").isNullOrBlank(),
                         "hasCredentialType" to !firstText(request, "credentialType", "credentialTypeHex", "credential_type").isNullOrBlank(),
                         "hasCredentialStatus" to (request.obj("credentialStatus") != null),
-                        "hasDirectVc" to (request.obj("credential") != null || !request.text("vcJson").isNullOrBlank() || !request.text("sdJwt").isNullOrBlank()),
-                        "payloadLen" to jsonPayload.length,
-                        "payloadHash" to shortSha256(jsonPayload)
+                        "hasDirectVc" to (request.obj("credential") != null || !request.text("vcJson").isNullOrBlank() || !request.text("sdJwt").isNullOrBlank())
                     )
                 )
 
@@ -2734,9 +2756,10 @@ class WalletBridge(
         scope.launch(Dispatchers.IO) {
             try {
                 val request = Json.parseToJsonElement(jsonPayload).jsonObject
-                val challenge = request.text("challenge") ?: request.text("message")
+                val challenge = request.text("challenge") ?: request.text("message") ?: request.text("nonce")
                 val domain = request.text("domain") ?: "kyvc.local"
                 require(!challenge.isNullOrBlank()) { "challenge or message is required" }
+                val nonce = request.text("nonce") ?: challenge
 
                 requireWalletOwnerAccess()
                 val walletState = walletStateStore.requireWalletState()
@@ -2748,7 +2771,7 @@ class WalletBridge(
                 val vcJwt = resolveVcJwt(request)
                 val sdJwt = resolveSdJwt(request)
                 validateCredentialAgainstWallet(vcObject, walletState)
-                ensureVerifierChallengeUsable(challenge, domain)
+                ensureVerifierChallengeUsable(nonce, domain)
 
                 if (sdJwt != null) {
                     val sdCredential = parseSdJwtCredential(sdJwt)
@@ -2788,7 +2811,7 @@ class WalletBridge(
                     val kbPayload = buildJsonObject {
                         put("iat", Instant.now().epochSecond)
                         put("aud", domain)
-                        put("nonce", challenge)
+                        put("nonce", nonce)
                         put("sd_hash", sdHash)
                     }
                     val kbJwt = vpSigner.signCompactJws(
@@ -2804,7 +2827,7 @@ class WalletBridge(
                         put("format", "kyvc-sd-jwt-presentation-v1")
                         put("definitionId", definitionId)
                         put("aud", domain)
-                        put("nonce", challenge)
+                        put("nonce", nonce)
                         put("sdJwtKb", sdJwtKb)
                         put("attachmentManifest", attachmentManifest)
                     }
@@ -2816,15 +2839,13 @@ class WalletBridge(
                             put("format", "kyvc-sd-jwt-presentation-v1")
                             put("holder", walletState.did)
                             put("challenge", challenge)
-                            put("nonce", challenge)
+                            put("nonce", nonce)
                             put("domain", domain)
                             put("aud", domain)
-                            put("sdHash", sdHash)
+                            put("presentation", sdJwtKb)
                             put("sdJwtKb", sdJwtKb)
-                            put("presentation", presentation)
+                            put("presentationObject", presentation)
                             put("didDocument", Json.parseToJsonElement(didDocument))
-                            put("disclosureCount", sdCredential.disclosures.size)
-                            put("selectedDisclosureCount", selectedDisclosures.size)
                             put("attachmentManifest", attachmentManifest)
                             put("attachmentReady", attachmentPlan.blockers.isEmpty())
                             if (attachmentPlan.blockers.isNotEmpty()) {
@@ -3587,16 +3608,41 @@ class WalletBridge(
 
     private fun resolveSaveCredentialEnvelope(request: JsonObject, rawPayload: String): CredentialEnvelope {
         val rawCredential = firstText(request, "sdJwt", "sd_jwt")
+            ?: request.text("credential")
             ?: firstText(request, "credentialJwt", "credential_jwt")
             ?: firstText(request, "vcJwt", "vc_jwt")
             ?: request.text("vcJson")
             ?: request.text("credentialPayload")
-            ?: request.text("credential")
             ?: request.obj("credentialPayload")?.toString()
             ?: request.obj("credential")?.toString()
             ?: rawPayload.takeIf { isDirectCredentialPayload(request) }
             ?: throw IllegalArgumentException("credential, sdJwt, vcJwt, or vcJson is required")
-        return parseCredentialEnvelope(rawCredential)
+        val envelope = parseCredentialEnvelope(rawCredential)
+        val requestedFormat = normalizeCredentialFormat(request.text("format") ?: request.obj("metadata")?.text("format") ?: envelope.format)
+        if (requestedFormat == FORMAT_DC_SD_JWT) {
+            require(envelope.sdJwt != null || isSdJwt(envelope.rawCredential)) {
+                "dc+sd-jwt credential must include compact SD-JWT"
+            }
+        }
+        return envelope
+    }
+
+    private fun resolveCredentialFormat(
+        request: JsonObject,
+        metadata: JsonObject,
+        envelope: CredentialEnvelope
+    ): String {
+        return normalizeCredentialFormat(request.text("format") ?: metadata.text("format") ?: envelope.format)
+    }
+
+    private fun normalizeCredentialFormat(format: String?): String {
+        val normalized = format?.trim()?.takeIf { it.isNotBlank() } ?: FORMAT_JSON
+        return when {
+            normalized.equals(FORMAT_DC_SD_JWT, ignoreCase = true) -> FORMAT_DC_SD_JWT
+            normalized.equals(FORMAT_VC_JWT, ignoreCase = true) -> FORMAT_VC_JWT
+            normalized.equals(FORMAT_JSON, ignoreCase = true) -> FORMAT_JSON
+            else -> normalized
+        }
     }
 
     private fun isDirectCredentialPayload(request: JsonObject): Boolean {
@@ -3699,7 +3745,8 @@ class WalletBridge(
     }
 
     private fun buildCredentialSummary(credential: CredentialEntity): JsonObject {
-        val envelope = runCatching { parseCredentialEnvelope(credential.vcJson) }.getOrNull()
+        val raw = credential.sdJwt ?: credential.vcJwt ?: credential.vcJson
+        val envelope = raw?.let { runCatching { parseCredentialEnvelope(it) }.getOrNull() }
         val payload = envelope?.payload ?: buildJsonObject { }
         val status = credentialLocalStatus(credential)
         val credentialKind = credentialKindLabel(payload, credential.credentialType)
@@ -3717,7 +3764,7 @@ class WalletBridge(
             put("holderAccount", credential.holderAccount)
             put("credentialType", credential.credentialType)
             put("credentialKind", credentialKind)
-            put("format", envelope?.format ?: payload.text("format") ?: "unknown")
+            put("format", credential.format.ifBlank { envelope?.format ?: payload.text("format") ?: "unknown" })
             payload.text("vct")?.let { put("vct", it) }
             put("accepted", !credential.acceptedAt.isNullOrBlank())
             credential.acceptedAt?.let { put("acceptedAt", it) }
@@ -4858,8 +4905,16 @@ class WalletBridge(
         request.text("credentialId")
             ?.takeIf { it.isNotBlank() }
             ?.let { credentialId ->
-                credentialRepository.getCredentialById(credentialId)?.vcJson?.let {
-                    return parseCredentialEnvelope(it).payload.toString()
+                credentialRepository.getCredentialById(credentialId)?.let { credential ->
+                    credential.vcJson?.takeIf { it.isNotBlank() }?.let {
+                        return parseCredentialEnvelope(it).payload.toString()
+                    }
+                    credential.sdJwt?.takeIf { isSdJwt(it) }?.let {
+                        return parseCredentialEnvelope(it).payload.toString()
+                    }
+                    credential.vcJwt?.takeIf { isCompactJwt(it) && !isSdJwt(it) }?.let {
+                        return decodeJwtPayload(it).toString()
+                    }
                 }
             }
         throw IllegalArgumentException("vcJson, credential, or credentialId is required")
@@ -4874,8 +4929,13 @@ class WalletBridge(
         request.text("credentialId")
             ?.takeIf { it.isNotBlank() }
             ?.let { credentialId ->
-                credentialRepository.getCredentialById(credentialId)?.vcJson?.takeIf { isCompactJwt(it) }?.let {
-                    return it
+                credentialRepository.getCredentialById(credentialId)?.let { credential ->
+                    credential.vcJwt?.takeIf { isCompactJwt(it) && !isSdJwt(it) }?.let {
+                        return it
+                    }
+                    credential.vcJson?.takeIf { isCompactJwt(it) && !isSdJwt(it) }?.let {
+                        return it
+                    }
                 }
             }
         return null
@@ -4894,8 +4954,13 @@ class WalletBridge(
         request.text("credentialId")
             ?.takeIf { it.isNotBlank() }
             ?.let { credentialId ->
-                credentialRepository.getCredentialById(credentialId)?.vcJson?.takeIf { isSdJwt(it) }?.let {
-                    return it
+                credentialRepository.getCredentialById(credentialId)?.let { credential ->
+                    credential.sdJwt?.takeIf { isSdJwt(it) }?.let {
+                        return it
+                    }
+                    credential.vcJson?.takeIf { isSdJwt(it) }?.let {
+                        return it
+                    }
                 }
             }
         return null
@@ -5531,6 +5596,9 @@ class WalletBridge(
         private const val KEY_CURRENT_WEB_USER_HASH = "current_web_user_hash"
         private const val KEY_CURRENT_WEB_USER_DISPLAY_HINT = "current_web_user_display_hint"
         private const val KEY_CURRENT_WEB_USER_ENVIRONMENT = "current_web_user_environment"
+        private const val FORMAT_DC_SD_JWT = "dc+sd-jwt"
+        private const val FORMAT_VC_JWT = "vc+jwt"
+        private const val FORMAT_JSON = "json"
         private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
             "dev-kyvc.khuoo.synology.me",

@@ -6,7 +6,11 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "credentials")
 data class CredentialEntity(
     @PrimaryKey val credentialId: String,
-    val vcJson: String,
+    val format: String,
+    val sdJwt: String? = null,
+    val vcJwt: String? = null,
+    val vcJson: String? = null,
+    val selectiveDisclosureJson: String? = null,
     val issuerDid: String,
     val issuerAccount: String,
     val holderDid: String,

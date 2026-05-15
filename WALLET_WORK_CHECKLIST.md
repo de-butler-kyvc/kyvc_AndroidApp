@@ -42,6 +42,9 @@
 - [x] VP 제출 전 holder binding 진단 로그 추가(`vp.login.holder.binding`)
 - [x] 증명서 상세 화면 로컬 credential 삭제 처리
 - [x] 발급 확인 화면 XRP fee drops/XRP 단위 정규화
+- [x] VP 제출 전 별도 credential picker 제거, 증명서 제출 화면의 발급기관 선택으로 credential 선택 통합
+- [x] 같은 발급기관 credential 후보는 최신 1개만 제출 화면에 표시
+- [x] QR 스캔 화면을 프레임 내부 카메라/외부 남색 불투명 배경으로 정리
 - [x] WebView 테스트 UI를 SD-JWT/nonce/KB-JWT 용어로 갱신
 - [x] `Wallet Implimentation Guide.md`를 SD-JWT 기준으로 갱신
 
@@ -56,7 +59,8 @@
 | 5 | SD-JWT holder binding 확인 | `cnf.kid`, KB-JWT `kid`, DID Document key id 비교 | 모두 `did:xrpl:1:{holderAccount}#holder-key-1`로 일치 |
 | 6 | VP 로그인 QR 제출 | PC QR의 `VP_LOGIN_REQUEST`를 native가 resolve/submit | backend status가 VALID, PC polling 완료 |
 | 7 | verifier 정책 확인 | VC `vct`와 verifier `acceptedVct` 비교 | `vct is not accepted` 오류 없음 |
-| 8 | 실패 케이스 확인 | 같은 nonce 재사용, disclosure 변조, Accept 전 제출 | 각각 expected failure가 뜨는지 확인 |
+| 8 | 제출 화면 선택 확인 | 발급기관 드롭다운 선택값이 submit `credentialId`로 사용되는지 확인 | 별도 credential picker 없이 선택한 발급기관 credential로 VP submit |
+| 9 | 실패 케이스 확인 | 같은 nonce 재사용, disclosure 변조, Accept 전 제출 | 각각 expected failure가 뜨는지 확인 |
 
 ## 이후 고도화
 

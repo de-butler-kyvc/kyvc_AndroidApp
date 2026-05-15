@@ -2187,7 +2187,8 @@ Android submit body:
 - `legalEntity.type` 값은 코드 그대로가 아니라 `STOCK_COMPANY=주식회사`, `LIMITED_COMPANY=유한회사`, `LIMITED_PARTNERSHIP=유한합자회사 계열`, `GENERAL_PARTNERSHIP=합명회사 계열`, `INCORPORATED_ASSOCIATION=사단법인`, `FOUNDATION=재단법인`, `COOPERATIVE=협동조합`, `UNIQUE_NUMBER_ORGANIZATION=고유번호 단체`, `FOREIGN_COMPANY=외국회사`로 표시한다.
 - 저장된 credential에서 추출된 claim은 모두 표시한다. 한국어 라벨 매핑이 있는 claim은 한국어 라벨로 표시하고, 매핑이 없는 claim은 raw key를 그대로 표시한다.
 - 증명서 상세 화면의 `증명서 삭제` 버튼은 네이티브 확인 다이얼로그를 한 번 더 표시한 뒤, 확정 시 Android 로컬 `credentials` row와 같은 `credentialId`의 `holder_documents` row를 삭제하고 `result=delete`를 반환한다.
-- 증명서 제출 화면은 `issuerOptions` 또는 `issuers` 배열을 받아 발급기관 선택 UI로 표시한다. 같은 발급기관의 credential은 하나만 존재해야 하며, 새 회사명/새 VC가 발급되면 같은 발급기관의 기존 credential은 교체되어야 한다.
+- 증명서 제출 화면은 `issuerOptions` 또는 `issuers` 배열을 받아 발급기관 선택 UI로 표시한다. 발급기관 선택은 제출할 credential 선택과 같은 의미이며, 확정 응답의 `selectedCredentialId`가 VP submit에 사용된다.
+- 같은 발급기관의 credential은 하나만 존재해야 하며, 새 회사명/새 VC가 발급되면 같은 발급기관의 기존 credential은 교체되어야 한다. Native VP 로그인 제출 흐름에서는 같은 발급기관 후보가 여러 개면 `acceptedAt`, `validFrom`, `credentialId` 기준 최신 1개만 화면에 표시한다.
 - 증명서 제출 화면은 `submitDocuments`, `requiredDocuments`, `documents`, `attachmentDocuments` 중 하나의 배열을 받아 제출 문서 목록으로 표시한다. 문서를 누르면 원본 내용은 보여주지 않고 hash/digest 값만 표시한다.
 - 제출 문서 예시는 `주주명부`, `법인인감증명서`, `등기사항전부증명서`, `사업자등록증`, `법인 KYC 증명서`이다.
 - 제출 문서 원본은 API 또는 별도 브릿지로 수신한 뒤 Android 로컬 저장소에 저장해야 한다. 화면 payload에는 원본 bytes/base64를 넣지 않고 `documentId`, `documentType`, `digestSRI/hash`, `mediaType`, `byteSize` 같은 메타만 넣는다.
@@ -2243,6 +2244,8 @@ Android submit body:
 
 - 발급 확인/제출 화면에서 사용자가 거부를 누른 경우도 브릿지 호출 자체는 성공이다. 웹은 `ok`가 아니라 `result === "reject"`로 거부 흐름을 처리한다.
 - `ok=false`는 네이티브 화면을 닫았거나 브릿지 검증에 실패한 경우로만 본다.
+- VP 로그인 QR native 제출 흐름에서는 별도 credential picker를 띄우지 않는다. `REQUEST_CREDENTIAL_SUBMIT` 화면의 발급기관 드롭다운에서 선택된 `selectedCredentialId`로 presentation을 생성하고 backend submit을 호출한다.
+- QR 스캔 화면은 프레임 내부만 카메라 preview를 표시하고, 프레임 외부는 남색 불투명 배경으로 유지한다.
 
 ## 웹에서 꼭 처리해야 하는 상태값
 

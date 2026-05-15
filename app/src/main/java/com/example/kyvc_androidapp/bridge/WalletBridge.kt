@@ -94,6 +94,8 @@ class WalletBridge(
     private val webUserPrefs: SharedPreferences = context.getSharedPreferences("kyvc-web-user-session", Context.MODE_PRIVATE)
     private var currentSeed: Seed? = null
     private var webViewRef: WeakReference<WebView>? = null
+    private var pendingVpLoginSubmitReviewRequestId: String? = null
+    private var pendingVpLoginSubmitReview: CompletableDeferred<JsonObject?>? = null
     private val vpSigner = VpSigner()
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -3527,10 +3529,18 @@ class WalletBridge(
     ) {
         val request = parseJsonObjectOrEmpty(requestJson ?: "{}")
         val action = request.text("action") ?: fallbackAction
+        val resultJson = runCatching { Json.parseToJsonElement(result).jsonObject }.getOrNull()
+        if (action == "REQUEST_CREDENTIAL_SUBMIT" &&
+            request.text("requestId") == pendingVpLoginSubmitReviewRequestId
+        ) {
+            pendingVpLoginSubmitReviewRequestId = null
+            pendingVpLoginSubmitReview?.complete(if (ok) resultJson ?: buildJsonObject { put("result", result) } else null)
+            pendingVpLoginSubmitReview = null
+            return
+        }
         emitCallback(action, ok) {
             request.text("requestId")?.let { put("requestId", it) }
             put("screen", screen)
-            val resultJson = runCatching { Json.parseToJsonElement(result).jsonObject }.getOrNull()
             if (resultJson != null) {
                 resultJson.forEach { (key, value) -> put(key, value) }
                 put("result", resultJson.text("result") ?: result)
@@ -4059,7 +4069,17 @@ class WalletBridge(
                 used = false
             )
 
-            val credential = selectVpLoginCredential()
+            val credentialOptions = eligibleVpLoginCredentials()
+            val submitReview = requestVpLoginSubmitReview(
+                requestId = resolvedRequestId,
+                resolveResponse = resolveResponse,
+                credentials = credentialOptions
+            )
+            val selectedCredentialId = submitReview.text("selectedCredentialId")
+                ?: submitReview.text("selectedIssuerId")
+                ?: credentialOptions.first().credentialId
+            val credential = credentialOptions.firstOrNull { it.credentialId == selectedCredentialId }
+                ?: throw IllegalArgumentException("선택한 Credential을 찾을 수 없습니다.")
             logBridgeFlow(
                 "vp.login.credential.selected",
                 mapOf(
@@ -4072,6 +4092,15 @@ class WalletBridge(
                     "hasAcceptedAt" to !credential.acceptedAt.isNullOrBlank(),
                     "hasCredentialAcceptHash" to !credential.credentialAcceptHash.isNullOrBlank(),
                     "validUntil" to credential.validUntil
+                )
+            )
+            logBridgeFlow(
+                "vp.login.submit.review.confirmed",
+                mapOf(
+                    "requestId" to resolvedRequestId,
+                    "credentialId" to credential.credentialId,
+                    "selectedIssuerId" to submitReview.text("selectedIssuerId"),
+                    "selectedDocumentsCount" to ((submitReview["selectedDocuments"] as? JsonArray)?.size ?: 0)
                 )
             )
             val presentationRequest = buildJsonObject {
@@ -4147,7 +4176,7 @@ class WalletBridge(
         )
     }
 
-    private suspend fun selectVpLoginCredential(): CredentialEntity {
+    private suspend fun eligibleVpLoginCredentials(): List<CredentialEntity> {
         val walletState = walletStateStore.requireWalletState()
         val credentials = credentialRepository.getCredentialsByHolderAccount(walletState.account)
             .filter { credential ->
@@ -4158,26 +4187,98 @@ class WalletBridge(
                     !credential.credentialAcceptHash.isNullOrBlank() &&
                     credentialLocalStatus(credential).code == "active"
             }
+            .dedupeLatestByIssuer()
         require(credentials.isNotEmpty()) { "제출 가능한 법인 KYC Credential이 없습니다." }
-        if (credentials.size == 1) return credentials.first()
+        return credentials
+    }
 
-        val deferred = CompletableDeferred<String?>()
-        val options = credentials.map { credential ->
-            credential.credentialId to listOf(
-                credentialLocalStatus(credential).label,
-                credential.credentialType.takeIf { it.isNotBlank() },
-                credential.validUntil.takeIf { it.isNotBlank() }?.let { "만료 $it" }
-            ).filterNotNull().joinToString(" · ").ifBlank { "법인 KYC Credential" }
+    private suspend fun requestVpLoginSubmitReview(
+        requestId: String,
+        resolveResponse: VpLoginResolveData,
+        credentials: List<CredentialEntity>
+    ): JsonObject {
+        val reviewRequestId = "vp-submit-review-$requestId"
+        val deferred = CompletableDeferred<JsonObject?>()
+        pendingVpLoginSubmitReviewRequestId = reviewRequestId
+        pendingVpLoginSubmitReview = deferred
+        val selectedCredential = credentials.first()
+        val payload = buildJsonObject {
+            put("action", "REQUEST_CREDENTIAL_SUBMIT")
+            put("requestId", reviewRequestId)
+            put("issuedAt", nowUtcIso())
+            put("requesterName", resolveResponse.domain.ifBlank { "PC 로그인 요청" })
+            put("issuerName", selectedCredential.issuerDisplayName())
+            put("issuerDid", selectedCredential.issuerDid)
+            put("holderDid", selectedCredential.holderDid)
+            put("credentialId", selectedCredential.credentialId)
+            put("credentialTitle", "법인 kyc 증명서")
+            put("submitCredentialTitle", "법인 KYC 증명서")
+            put(
+                "issuerOptions",
+                JsonArray(
+                    credentials.mapIndexed { index, credential ->
+                        buildJsonObject {
+                            put("issuerId", credential.credentialId)
+                            put("issuerName", credential.issuerDisplayName())
+                            put("credentialId", credential.credentialId)
+                            put("selected", index == 0)
+                        }
+                    }
+                )
+            )
+            put("submitDocuments", defaultSubmitDocumentPayload())
         }
         withContext(Dispatchers.Main) {
-            launchVpLoginCredentialPicker("Credential 선택", options) { selectedId ->
-                deferred.complete(selectedId)
+            launchCredentialNativeScreen("credentialSubmit", payload.toString())
+        }
+        val result = deferred.await()
+            ?: throw IllegalArgumentException("증명서 제출이 취소되었습니다.")
+        require(result.text("result") == "submit") {
+            "증명서 제출이 취소되었습니다."
+        }
+        return result
+    }
+
+    private fun List<CredentialEntity>.dedupeLatestByIssuer(): List<CredentialEntity> {
+        return groupBy { credential ->
+            credential.issuerAccount.ifBlank { credential.issuerDid.ifBlank { credential.credentialType } }
+        }.values.map { sameIssuerCredentials ->
+            sameIssuerCredentials.maxWithOrNull(
+                compareBy<CredentialEntity> { it.acceptedAt.orEmpty() }
+                    .thenBy { it.validFrom }
+                    .thenBy { it.credentialId.toLongOrNull() ?: -1L }
+            ) ?: sameIssuerCredentials.first()
+        }.sortedBy { it.issuerDisplayName() }
+    }
+
+    private fun CredentialEntity.issuerDisplayName(): String {
+        return issuerDid.ifBlank {
+            issuerAccount.ifBlank {
+                "발급기관"
             }
         }
-        val selectedId = deferred.await()
-            ?: throw IllegalArgumentException("Credential 선택이 취소되었습니다.")
-        return credentials.firstOrNull { it.credentialId == selectedId }
-            ?: throw IllegalArgumentException("선택한 Credential을 찾을 수 없습니다.")
+    }
+
+    private fun defaultSubmitDocumentPayload(): JsonArray {
+        val documents = listOf(
+            Triple("shareholder-list", "SHAREHOLDER_LIST", "주주명부"),
+            Triple("corporate-seal-certificate", "CORPORATE_SEAL_CERTIFICATE", "법인인감증명서"),
+            Triple("registry-certificate", "CORPORATE_REGISTRY_CERTIFICATE", "등기사항전부증명서"),
+            Triple("business-registration", "BUSINESS_REGISTRATION_CERTIFICATE", "사업자등록증"),
+            Triple("kyc-credential", "LEGAL_ENTITY_KYC_CREDENTIAL", "법인 KYC 증명서")
+        )
+        return JsonArray(
+            documents.map { (documentId, documentType, title) ->
+                buildJsonObject {
+                    put("documentId", documentId)
+                    put("documentType", documentType)
+                    put("title", title)
+                    put("digestSRI", "-")
+                    put("required", true)
+                    put("selected", true)
+                }
+            }
+        )
     }
 
     private suspend fun buildVpLoginPresentationObject(request: JsonObject): VpLoginPresentationResult {

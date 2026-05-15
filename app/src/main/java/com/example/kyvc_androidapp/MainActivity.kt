@@ -55,6 +55,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -74,6 +76,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -1257,11 +1260,16 @@ private fun QrScannerOverlay(
             .statusBarsPadding()
             .navigationBarsPadding()
     ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xEE071227))
+        )
         Text(
-            text = "QR Scan",
+            text = "KYvC Scan",
             modifier = Modifier
                 .align(Alignment.TopCenter)
-                .padding(top = 20.dp),
+                .padding(top = 22.dp),
             color = Color.White,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.ExtraBold
@@ -1269,10 +1277,10 @@ private fun QrScannerOverlay(
         Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .padding(start = 24.dp, top = 12.dp)
-                .size(38.dp)
+                .padding(start = 22.dp, top = 14.dp)
+                .size(40.dp)
                 .clip(CircleShape)
-                .background(Color(0xFF374151))
+                .background(Color.Black.copy(alpha = 0.34f))
                 .clickable { onClose() },
             contentAlignment = Alignment.Center
         ) {
@@ -1287,57 +1295,100 @@ private fun QrScannerOverlay(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 28.dp),
+                .padding(horizontal = 26.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(188.dp))
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth(0.82f)
-                    .aspectRatio(1f)
-                    .clip(RoundedCornerShape(30.dp))
-                    .border(2.dp, Color(0xFF2F7DFF), RoundedCornerShape(30.dp))
-                    .background(Color(0xFFF7F7F7))
-                    .padding(18.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(8.dp))
-                ) {
-                    AndroidView(
-                        factory = { previewView },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(68.dp))
+            Spacer(modifier = Modifier.height(128.dp))
             Text(
                 text = title,
                 color = Color.White,
-                style = MaterialTheme.typography.headlineLarge,
+                style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.ExtraBold,
                 textAlign = TextAlign.Center
             )
-            Spacer(modifier = Modifier.height(18.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             Text(
                 text = subtitle,
-                color = Color(0xFFC6CBD6),
-                style = MaterialTheme.typography.titleMedium,
+                color = Color(0xFFE5E7EB),
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center
+            )
+            Spacer(modifier = Modifier.height(58.dp))
+            ScanFrame(previewView = previewView)
+            Spacer(modifier = Modifier.height(28.dp))
+            Text(
+                text = "화면 밝기를 높이고 QR 전체가 프레임 안에 들어오게 맞춰주세요.",
+                color = Color(0xFFD1D5DB),
+                style = MaterialTheme.typography.labelLarge,
                 textAlign = TextAlign.Center
             )
             if (!footer.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(86.dp))
+                Spacer(modifier = Modifier.height(28.dp))
                 Text(
                     text = footer,
                     color = Color(0xFFD5DAE3),
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ScanFrame(previewView: PreviewView) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth(0.76f)
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(28.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.36f), RoundedCornerShape(28.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        AndroidView(
+            factory = { previewView },
+            modifier = Modifier.fillMaxSize()
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.08f))
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth(0.82f)
+                .height(1.dp)
+                .background(Color(0xFF7AA7FF).copy(alpha = 0.72f))
+        )
+        ScanCorner(Modifier.align(Alignment.TopStart), top = true, start = true)
+        ScanCorner(Modifier.align(Alignment.TopEnd), top = true, start = false)
+        ScanCorner(Modifier.align(Alignment.BottomStart), top = false, start = true)
+        ScanCorner(Modifier.align(Alignment.BottomEnd), top = false, start = false)
+    }
+}
+
+@Composable
+private fun ScanCorner(modifier: Modifier, top: Boolean, start: Boolean) {
+    Box(
+        modifier = modifier
+            .size(58.dp)
+            .padding(8.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .align(if (top) Alignment.TopCenter else Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(Color(0xFF7AA7FF))
+        )
+        Box(
+            modifier = Modifier
+                .align(if (start) Alignment.CenterStart else Alignment.CenterEnd)
+                .size(width = 4.dp, height = 42.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(Color(0xFF7AA7FF))
+        )
     }
 }
 
@@ -2362,6 +2413,7 @@ private fun CredentialSubmitScreen(
     var selectedIssuerId by remember(data) {
         mutableStateOf(issuerOptions.firstOrNull { it.selected }?.issuerId ?: issuerOptions.first().issuerId)
     }
+    var issuerDropdownExpanded by remember(data) { mutableStateOf(false) }
     val selectedDocumentIds = remember(data) {
         mutableStateListOf<String>().apply {
             addAll(submitDocuments.filter { it.selected || it.required }.map { it.documentId })
@@ -2406,24 +2458,24 @@ private fun CredentialSubmitScreen(
         }
     ) {
         RequesterCard(data)
-        Spacer(modifier = Modifier.height(28.dp))
-        Text("${data.requesterName}이 요청한 필수 정보만 추렸어요.", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(26.dp))
-        Text("발급기관 선택", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-        Spacer(modifier = Modifier.height(14.dp))
-        issuerOptions.forEachIndexed { index, issuer ->
-            IssuerSelectRow(
-                issuer = issuer,
-                selected = issuer.issuerId == selectedIssuerId,
-                onClick = { selectedIssuerId = issuer.issuerId }
-            )
-            if (index != issuerOptions.lastIndex) {
-                Spacer(modifier = Modifier.height(10.dp))
+        Spacer(modifier = Modifier.height(22.dp))
+        Text("${data.requesterName}이 요청한 필수 정보만 추렸어요.", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(22.dp))
+        Text("발급기관 선택", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(10.dp))
+        IssuerDropdownSelect(
+            selectedIssuer = selectedIssuer,
+            issuerOptions = issuerOptions,
+            expanded = issuerDropdownExpanded,
+            onExpandedChange = { issuerDropdownExpanded = it },
+            onIssuerSelected = { issuer ->
+                selectedIssuerId = issuer.issuerId
+                issuerDropdownExpanded = false
             }
-        }
-        Spacer(modifier = Modifier.height(26.dp))
-        Text("제출할 증명서 (${selectedCount}건)", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-        Spacer(modifier = Modifier.height(14.dp))
+        )
+        Spacer(modifier = Modifier.height(22.dp))
+        Text("제출할 증명서 (${selectedCount}건)", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(10.dp))
         submitDocuments.forEachIndexed { index, document ->
             SubmitDocumentRow(
                 document = document,
@@ -2444,16 +2496,16 @@ private fun CredentialSubmitScreen(
                 }
             )
             if (index != submitDocuments.lastIndex) {
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(10.dp))
             }
         }
-        Spacer(modifier = Modifier.height(28.dp))
+        Spacer(modifier = Modifier.height(22.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("공개할 세부 정보", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+            Text("공개할 세부 정보", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
             Spacer(modifier = Modifier.size(8.dp))
-            Text("필수 10건 · 선택 7건", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+            Text("필수 10건 · 선택 7건", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
         }
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         DisclosureGroup("KYC 정보", listOf("KYC 관할 국가" to true, "KYC 보증 수준" to true))
         Spacer(modifier = Modifier.height(14.dp))
         DisclosureGroup("법인 정보", listOf("법인 유형" to true, "법인명" to true, "법인 등록번호" to true, "설립목적 확인 필요 여부" to false))
@@ -2593,18 +2645,18 @@ private fun RequesterCard(data: CredentialUiData) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(26.dp))
+            .clip(RoundedCornerShape(20.dp))
             .background(Color.White)
-            .padding(28.dp)
+            .padding(20.dp)
     ) {
-        Text("요청 기관", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
-        Spacer(modifier = Modifier.height(22.dp))
+        Text("요청 기관", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.height(14.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            LetterIcon("S")
-            Spacer(modifier = Modifier.size(18.dp))
+            LetterIcon("S", small = true)
+            Spacer(modifier = Modifier.size(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(data.requesterName, color = Color(0xFF0B1D40), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
-                Text("법인계좌 개설용 인증", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium)
+                Text(data.requesterName, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                Text("법인계좌 개설용 인증", color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodySmall)
             }
             VerifiedPill()
         }
@@ -2701,7 +2753,67 @@ private fun SelectBox(text: String) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(text, color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
-        Text("⌄", color = Color(0xFF8A93A3), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        DropdownChevron(color = Color(0xFF8A93A3))
+    }
+}
+
+@Composable
+private fun IssuerDropdownSelect(
+    selectedIssuer: SubmitIssuerOption,
+    issuerOptions: List<SubmitIssuerOption>,
+    expanded: Boolean,
+    onExpandedChange: (Boolean) -> Unit,
+    onIssuerSelected: (SubmitIssuerOption) -> Unit
+) {
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 56.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(14.dp))
+                .background(Color.White)
+                .clickable { onExpandedChange(!expanded) }
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LetterIcon(selectedIssuer.issuerName.take(1).ifBlank { "발" }, small = true)
+            Spacer(modifier = Modifier.size(10.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(selectedIssuer.issuerName, color = Color(0xFF0B1D40), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+                Text(
+                    selectedIssuer.credentialId.ifBlank { "발급기관별 1개 증명서" },
+                    color = Color(0xFF8A93A3),
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            DropdownChevron(color = Color(0xFF6B7280))
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { onExpandedChange(false) },
+            modifier = Modifier.fillMaxWidth(0.9f).background(Color.White)
+        ) {
+            issuerOptions.forEach { issuer ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(issuer.issuerName, color = Color(0xFF0B1D40), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+                            Text(
+                                issuer.credentialId.ifBlank { "발급기관별 1개 증명서" },
+                                color = Color(0xFF8A93A3),
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    },
+                    onClick = { onIssuerSelected(issuer) }
+                )
+            }
+        }
     }
 }
 
@@ -2760,48 +2872,48 @@ private fun SubmitDocumentRow(
             .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
             .background(Color.White)
             .clickable(onClick = onClick)
-            .padding(horizontal = 18.dp, vertical = 16.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(14.dp))
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
                     .background(if (selected) Color(0xFFA8B7FF) else Color(0xFFE5E7EB)),
                 contentAlignment = Alignment.Center
             ) {
-                Text("문", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                Text("문", color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
             }
-            Spacer(modifier = Modifier.size(18.dp))
+            Spacer(modifier = Modifier.size(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(document.title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                Text(document.title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
                 Text(
                     listOf(issuerName, if (document.required) "필수" else "선택").joinToString(" · "),
                     color = Color(0xFF8A93A3),
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.labelSmall
                 )
             }
             Box(
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(34.dp)
                     .clip(CircleShape)
                     .background(if (selected) Color(0xFF2F7DFF) else Color(0xFFF3F4F6))
                     .clickable(onClick = onToggle),
                 contentAlignment = Alignment.Center
             ) {
-                Text(if (selected) "✓" else "", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+                Text(if (selected) "✓" else "", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
             }
         }
         if (expanded) {
-            Spacer(modifier = Modifier.height(14.dp))
+            Spacer(modifier = Modifier.height(10.dp))
             Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
-            Spacer(modifier = Modifier.height(12.dp))
-            Text("문서 해시", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(10.dp))
+            Text("문서 해시", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold)
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 document.digest,
                 color = Color(0xFF2F7DFF),
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Bold
             )
         }
@@ -2848,8 +2960,8 @@ private fun DisclosureGroup(title: String, items: List<Pair<String, Boolean>>) {
                 .padding(horizontal = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(title, color = Color(0xFF8A93A3), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
-            Text("⌄", color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Text(title, color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+            DropdownChevron(color = Color(0xFF8A93A3))
         }
         items.forEachIndexed { index, item ->
             Row(
@@ -2870,7 +2982,7 @@ private fun DisclosureGroup(title: String, items: List<Pair<String, Boolean>>) {
                     if (item.second) Text("✓", color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
                 }
                 Spacer(modifier = Modifier.size(14.dp))
-                Text(item.first, color = Color(0xFF263445), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+                Text(item.first, color = Color(0xFF263445), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(999.dp))
@@ -2886,6 +2998,32 @@ private fun DisclosureGroup(title: String, items: List<Pair<String, Boolean>>) {
 }
 
 @Composable
+private fun DropdownChevron(color: Color, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.size(20.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(end = 7.dp)
+                .size(width = 10.dp, height = 2.dp)
+                .rotate(43f)
+                .clip(RoundedCornerShape(99.dp))
+                .background(color)
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(start = 7.dp)
+                .size(width = 10.dp, height = 2.dp)
+                .rotate(-43f)
+                .clip(RoundedCornerShape(99.dp))
+                .background(color)
+        )
+    }
+}
+
+@Composable
 private fun WarningSubmitNotice() {
     Row(
         modifier = Modifier
@@ -2895,13 +3033,45 @@ private fun WarningSubmitNotice() {
             .padding(20.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("▢", color = Color(0xFF0B1D40), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        SubmitLockIcon(color = Color(0xFFA34D00))
         Spacer(modifier = Modifier.size(16.dp))
         Column {
-            Text("제출 시 동의 사항", color = Color(0xFFA34D00), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Text("제출 시 동의 사항", color = Color(0xFFA34D00), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
             Spacer(modifier = Modifier.height(6.dp))
-            Text("선택한 증명서가 제출되며, 블록체인에 제출 기록이 남습니다.", color = Color(0xFFD97706), style = MaterialTheme.typography.bodyMedium)
+            Text("선택한 증명서가 제출되며, 블록체인에 제출 기록이 남습니다.", color = Color(0xFFD97706), style = MaterialTheme.typography.labelLarge)
         }
+    }
+}
+
+@Composable
+private fun SubmitLockIcon(color: Color) {
+    Box(
+        modifier = Modifier.size(25.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 2.dp)
+                .size(width = 13.dp, height = 13.dp)
+                .border(2.dp, color, RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp, bottomStart = 4.dp, bottomEnd = 4.dp))
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .size(width = 18.dp, height = 14.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(Color(0xFFFFF4CC))
+                .border(2.dp, color, RoundedCornerShape(4.dp))
+        )
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(top = 5.dp)
+                .size(width = 2.dp, height = 5.dp)
+                .clip(RoundedCornerShape(99.dp))
+                .background(color)
+        )
     }
 }
 

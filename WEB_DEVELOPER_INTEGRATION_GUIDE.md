@@ -147,7 +147,60 @@ requestVerifierChallenge (nonce/aud)
 -> submitPresentationToVerifier
 ```
 
-## 8-1) 실제 테스트 권장 순서 (Testnet E2E)
+Holder DID Document 기준:
+- `signMessage` 성공 응답의 `didDocument`를 backend/Core 제출 body에 그대로 전달한다.
+- 프론트에서 DID Document를 재생성하거나 key alias를 추가하지 않는다.
+- `didDocuments`/`did_documents` 맵이 필요한 API는 native 응답의 값을 그대로 사용한다.
+- `didDocumentHashMatches=false`이면 현재 DID Document와 XRPL DIDSet Data hash가 다른 상태이므로 `submitHolderDidSet`으로 재등록을 유도한다.
+- `SD-JWT payload.cnf.kid`, KB-JWT header `kid`, DID Document `verificationMethod[].id`, `authentication[]`는 모두 `did:xrpl:1:{holderAccount}#holder-key-1`이어야 한다.
+- `cnf.kid`가 `did#did#holder-key-1`처럼 중복된 VC는 발급 오류이며, 해당 VC 삭제 후 재발급이 필요하다.
+
+PC VP 로그인 QR:
+- Android Native가 `VP_LOGIN_REQUEST` QR을 직접 처리해 backend resolve/submit을 호출한다.
+- Android submit body에는 `vp`, `didDocument`, `didDocuments`, `did_documents`, `deviceId`가 포함된다.
+- PC 로그인 완료 처리는 Android가 하지 않고 PC Frontend polling/complete 흐름이 담당한다.
+
+## 8-1) 증명서 제출 화면 데이터 계약
+
+제출 QR 스캔 후 `requestCredentialSubmit`으로 네이티브 `증명서 제출.png` 화면을 띄운다.
+
+웹/API가 준비되면 아래 데이터를 화면 payload에 포함한다.
+
+```js
+window.Android.requestCredentialSubmit(JSON.stringify({
+  action: "REQUEST_CREDENTIAL_SUBMIT",
+  requestId,
+  requesterName: "신한은행",
+  issuerOptions: [
+    {
+      issuerId: "issuer-woori",
+      issuerName: "우리은행",
+      credentialId: "29",
+      selected: true
+    }
+  ],
+  submitDocuments: [
+    {
+      documentId: "shareholder-list-1",
+      documentType: "SHAREHOLDER_LIST",
+      title: "주주명부",
+      digestSRI: "sha256-...",
+      required: true,
+      selected: true
+    }
+  ]
+}));
+```
+
+처리 기준:
+- 발급기관 목록은 API에서 받아온다. 같은 발급기관에는 하나의 credential만 존재해야 한다.
+- 같은 발급기관에서 새 회사명/새 VC를 발급하면 기존 credential은 교체 대상으로 본다.
+- 제출 문서 원본은 화면 payload에 넣지 않는다. API/브릿지로 Android 로컬 저장소에 저장하고 화면에는 `documentId`, `documentType`, `digestSRI/hash`만 전달한다.
+- 문서 row를 누르면 네이티브는 원본이 아니라 hash만 보여준다.
+- 제출 확정 콜백에는 `selectedIssuerId`, `selectedCredentialId`, `selectedDocuments[]`가 포함된다.
+- 주요 문서 예시는 `주주명부`, `법인인감증명서`, `등기사항전부증명서`, `사업자등록증`, `법인 KYC 증명서`다.
+
+## 8-2) 실제 테스트 권장 순서 (Testnet E2E)
 
 ```text
 1. getAuthStatus / requestNativeAuth
@@ -171,6 +224,8 @@ requestVerifierChallenge (nonce/aud)
 - nonce 재사용 금지(실패 정상)
 - `aud`/`nonce` 불일치 시 실패 정상
 - `holderDidSetRegistrationRequired` 미처리 상태면 holder binding 실패 가능
+- `vct is not accepted by verifier policy`는 DIDSet 재등록으로 해결되지 않는다. 발급 VC의 `vct`와 verifier `acceptedVct` 정책을 맞춰야 한다.
+- `KB-JWT verificationMethod not found in holder DID Document`는 DIDSet hash 불일치, 잘못 발급된 `cnf.kid`, 또는 현재 지갑 auth key와 VC holder binding 불일치 중 하나를 우선 확인한다.
 
 ## 9) 송금 흐름
 
@@ -194,6 +249,8 @@ getAuthStatus
 - [ ] 민감정보 마스킹/비로그 정책 적용
 - [ ] `removeWallet` 호출 제거(현재 비활성화 정책)
 - [ ] 실패 응답 원문(`error`) 사용자/운영 로그에 남김(민감정보 제외)
+- [ ] DIDSet hash mismatch 시 `submitHolderDidSet` 재등록 UX 제공
+- [ ] VC 발급 후 `cnf.kid`와 `vct`가 정책에 맞지 않는 경우 재발급 안내
 
 ## 11) 빠른 디버깅 포인트
 
@@ -201,6 +258,10 @@ getAuthStatus
 - 복구 후 verifier 실패:
   - `holderDidSetRegistrationRequired` 처리 여부 확인
   - DIDSet 등록 성공 여부 확인
+- VP 로그인 제출 실패:
+  - Android Logcat `vp.login.credential.selected`, `vp.login.credential.payload`, `vp.login.holder.binding`, `vp.login.submit.request` 확인
+  - Core verify 실패 시 backend가 DID Document를 Core request에 실제 전달했는지 확인
+  - `cnf.kid`, `vct`, DIDSet hash mismatch를 분리해서 판단
 - DIDSet 실패 `actNotFound`:
   - 해당 holder account가 XRPL testnet에서 활성(펀딩)됐는지 확인
 

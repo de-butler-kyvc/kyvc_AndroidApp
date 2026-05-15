@@ -2,11 +2,18 @@
 
 이 문서는 웹이 Android WebView 브리지를 호출할 때 사용하는 최신 호출 규격 문서다. 브리지 함수가 바뀌면 이 문서를 같이 갱신한다.
 
-- Spec Version: `1.6.1`
+- Spec Version: `1.6.2`
 - Last Updated: `2026-05-13`
 
 ## Changelog
 
+- `1.6.2` (2026-05-13)
+  - PC VP 로그인 submit body에 holder DID Document를 포함하는 기준 명시: `didDocument`, `didDocuments`, `did_documents`
+  - VP 생성 전 holder binding 진단 로그 추가: `vp.login.holder.binding`
+  - SD-JWT `payload.cnf.kid`는 현재 holder DID Document의 `verificationMethod[].id` 및 `authentication[]`과 정확히 같아야 함을 명시
+  - DID Document는 VP 제출 시점마다 변형하지 않고 DIDSet 등록 hash와 같은 기본 문서 구조를 사용하도록 정리
+  - 증명서 상세 화면의 삭제 확인 후 로컬 Credential 및 연결 holder document 삭제 동작 명시
+  - 발급 확인 화면의 네트워크 수수료가 drops 단위로 전달될 때 `0.000001 XRP` 단위로 정규화되는 기준 추가
 - `1.6.1` (2026-05-13)
   - `saveVC`가 top-level `metadata`뿐 아니라 `credentialPayload.metadata`와 `credentialPayload.selectiveDisclosure`도 해석하도록 명시
   - `issuerAccount`가 실제 XRPL classic address면 저장/검증용 `issuerDid`를 `did:xrpl:1:{issuerAccount}`로 보정하는 기준 명시
@@ -56,7 +63,7 @@
 - 웹은 결과만 `window.onAndroidResult(result)` 콜백으로 받는다.
 - 웹 로그인 직후 지갑 관련 브릿지를 호출하기 전에 `setCurrentWebUser`로 현재 로그인 사용자를 Android에 알려야 한다.
 - 로컬 지갑은 최초 생성/복구 또는 명시적 기존 지갑 바인딩 시 웹 로그인 사용자에 묶인다.
-- 다른 웹 계정으로 로그인한 상태에서 기존 로컬 지갑 owner와 불일치하면 Android는 기존 로컬 앱 생성 지갑을 삭제하고 새 계정에서 새 지갑 생성/직접 복구 흐름으로 전환한다.
+- 다른 웹 계정으로 로그인한 상태에서 기존 로컬 지갑 owner와 불일치하면 Android는 자동 삭제하지 않고 `walletAccess=owner_mismatch`를 반환한다. 삭제는 사용자가 웹에서 명시적으로 삭제 브릿지를 호출할 때만 실행한다.
 - 앱 진입 시 네이티브 테스트 잠금 화면은 띄우지 않는다. 인증은 웹이 `requestNativeAuth`를 호출할 때만 네이티브로 표시한다.
 - PIN/패턴 원문은 웹에서 브리지로 보내지 않는다.
 - 지문/PIN/패턴 UI는 네이티브가 띄운다.
@@ -1846,9 +1853,28 @@ Response 주요 필드:
   "sdJwtKb": "<issuer-jwt>~<selected-disclosures>~<kb-jwt>",
   "didDocument": {
     "id": "did:xrpl:1:rHolder..."
+  },
+  "didDocuments": {
+    "did:xrpl:1:rHolder...": {
+      "id": "did:xrpl:1:rHolder..."
+    }
+  },
+  "did_documents": {
+    "did:xrpl:1:rHolder...": {
+      "id": "did:xrpl:1:rHolder..."
+    }
   }
 }
 ```
+
+Holder binding 규칙:
+
+- KB-JWT header `kid`는 `did:xrpl:1:{holderAccount}#holder-key-1` 형식이다.
+- SD-JWT issuer payload `cnf.kid`도 동일한 key id여야 한다.
+- DID Document의 `id`는 holder DID와 같아야 한다.
+- DID Document의 `verificationMethod[].id`와 `authentication[]`에는 같은 key id가 포함되어야 한다.
+- `cnf.kid`가 `did#did#holder-key-1`처럼 DID prefix를 중복 포함하면 Android는 제출 전에 차단한다. 이 경우 발급 쪽 `cnf.kid` 생성 로직 수정 후 VC 재발급이 필요하다.
+- DID Document는 DIDSet 등록 hash와 같은 기본 문서 구조를 사용한다. VP 제출 시점에 alias key를 임의 추가하면 ledger DIDSet Data hash와 달라져 Core 검증에 실패할 수 있다.
 
 ### 5. Verifier 제출
 
@@ -2053,6 +2079,19 @@ Android submit body:
     "sdJwtKb": "ISSUER_JWT~DISCLOSURE~KB_JWT",
     "attachmentManifest": []
   },
+  "didDocument": {
+    "id": "did:xrpl:1:rHolder..."
+  },
+  "didDocuments": {
+    "did:xrpl:1:rHolder...": {
+      "id": "did:xrpl:1:rHolder..."
+    }
+  },
+  "did_documents": {
+    "did:xrpl:1:rHolder...": {
+      "id": "did:xrpl:1:rHolder..."
+    }
+  },
   "deviceId": "android-device-id"
 }
 ```
@@ -2062,7 +2101,8 @@ Android submit body:
 - `WalletBridge.signMessage()` 내부 SD-JWT/KB-JWT 생성 로직과 presentation object 구조는 변경하지 않는다.
 - Android는 JWT Cookie, access token, refresh token, PC complete API를 처리하지 않는다.
 - `qrToken`, `vp`, `sdJwtKb`, SD-JWT 원문, disclosure 원문, JWT 원문은 로그에 남기지 않는다.
-- 디버깅 로그는 `requestId`, `credentialId`, API 성공/실패 여부, error code 수준만 허용한다.
+- 디버깅 로그는 `requestId`, `credentialId`, holder DID, holder binding key id, API 성공/실패 여부, error code 수준만 허용한다.
+- holder binding 진단은 `WalletBridge` 로그의 `vp.login.holder.binding` 이벤트에서 확인한다.
 
 공통 주의:
 
@@ -2081,7 +2121,7 @@ Android submit body:
 - `requestCredentialIssueComplete`: `발급완료.png`
 - `requestCredentialIssueConfirm`: 발급 확인 화면. 현재 기준 시안은 `발급확인0.png`이며, 발급 상세 정보와 XRP 잔액/네트워크 수수료/등록 후 사용 가능 잔액을 표시한다.
 - `requestCredentialDetail`: `증명서 상세.png`
-- `requestCredentialSubmit`: `증명서 제출.png`
+- `requestCredentialSubmit`: `증명서 제출.png`. 제출 QR 스캔 후 실제 제출 직전에 표시되는 화면이며, 발급기관 선택과 제출 문서 hash 확인/체크를 담당한다.
 
 공통 Request 예시:
 
@@ -2111,7 +2151,25 @@ Android submit body:
   "currentBalanceXrp": "0 XRP",
   "networkFeeXrp": "0.000012 XRP",
   "usableBalanceXrp": "0 XRP",
-  "balanceWarning": "* 잔액이 부족합니다"
+  "balanceWarning": "* 잔액이 부족합니다",
+  "issuerOptions": [
+    {
+      "issuerId": "issuer-woori",
+      "issuerName": "우리은행",
+      "credentialId": "29",
+      "selected": true
+    }
+  ],
+  "submitDocuments": [
+    {
+      "documentId": "shareholder-list-1",
+      "documentType": "SHAREHOLDER_LIST",
+      "title": "주주명부",
+      "digestSRI": "sha256-...",
+      "required": true,
+      "selected": true
+    }
+  ]
 }
 ```
 
@@ -2121,13 +2179,18 @@ Android submit body:
 - 발급 확인과 증명서 제출 화면의 확인/거부 버튼은 스크롤과 독립된 하단 고정 영역에 표시한다.
 - 발급 확인 화면의 `confirm` 결과는 사용자가 확인 버튼을 눌렀다는 신호만 의미한다. Android는 이 버튼에서 backend prepare, `saveVC`, `submitToXRPL`, backend confirm을 직접 호출하지 않는다.
 - 발급 확인 화면의 현재 잔액/등록 후 사용 가능 잔액은 Android가 활성 지갑의 XRPL account balance를 조회해 표시한다. 웹 payload의 `currentBalanceXrp`, `balanceXrp`, `usableBalanceXrp`는 조회 실패 시 fallback으로만 사용한다.
+- 발급 확인 화면의 `networkFeeXrp`/`feeXrp`가 `"0.000012 XRP"`처럼 XRP 단위면 그대로 사용하고, `"12"` 또는 `"12 drops"`처럼 drops 단위로 들어오면 `0.000012 XRP`로 정규화해 표시/계산한다.
 - 발급 확인 화면의 발급 상세 정보는 실제 offer/credential 응답값을 사용해야 한다. Android는 `corporateName/companyName/legalEntity.name`, `businessNumber/businessRegistrationNumber/legalEntity.registrationNumber`, `legalEntity.type`, `representative.name`, `beneficialOwners[].name`, `agent.name/authorizedAgent.name/delegate.name` alias를 함께 해석하며, 값이 없으면 테스트 값 대신 `-`로 표시한다.
 - 증명서 상세 화면 카드의 큰 제목은 `법인 kyc 증명서`로 고정 표시한다. 카드 좌측 상단에는 `issuerDid`, 좌측 하단에는 `holderDid`, 우측 하단에는 발급일/만료일을 2줄로 표시한다.
 - 증명서 상세 화면은 `credentialId`로 로컬 저장된 credential을 찾을 수 있으면 저장된 `sdJwt`, `vcJwt`, `vcJson`, `selectiveDisclosureJson`의 claim key/value를 우선 펼쳐 표시한다. 저장 원문을 찾지 못하면 화면 요청 payload의 요약 필드를 fallback으로 표시한다.
 - 저장 credential claim은 KYvC legal entity KYC claim 포맷 기준으로 정렬/라벨링한다. 공통 메타 claim(`iss`, `sub`, `vct`, `jti`, `iat`, `exp`, `cnf.kid`, `credentialStatus.*`) 뒤에 `kyc.*`, `legalEntity.*`, `representative.*`, `beneficialOwners[]`, `delegate.*`, `delegation.*`, `establishmentPurpose.*`, `extra.aiAssessmentRef.*`, `documentEvidence[]` 순서로 표시한다.
 - `legalEntity.type` 값은 코드 그대로가 아니라 `STOCK_COMPANY=주식회사`, `LIMITED_COMPANY=유한회사`, `LIMITED_PARTNERSHIP=유한합자회사 계열`, `GENERAL_PARTNERSHIP=합명회사 계열`, `INCORPORATED_ASSOCIATION=사단법인`, `FOUNDATION=재단법인`, `COOPERATIVE=협동조합`, `UNIQUE_NUMBER_ORGANIZATION=고유번호 단체`, `FOREIGN_COMPANY=외국회사`로 표시한다.
 - 저장된 credential에서 추출된 claim은 모두 표시한다. 한국어 라벨 매핑이 있는 claim은 한국어 라벨로 표시하고, 매핑이 없는 claim은 raw key를 그대로 표시한다.
-- 증명서 상세 화면의 `증명서 삭제` 버튼은 네이티브 확인 다이얼로그를 한 번 더 표시한 뒤, 확정 시 `result=delete`를 반환한다. 실제 credential 삭제 처리는 웹이 이 결과를 받은 뒤 삭제 브릿지/API 흐름으로 진행한다.
+- 증명서 상세 화면의 `증명서 삭제` 버튼은 네이티브 확인 다이얼로그를 한 번 더 표시한 뒤, 확정 시 Android 로컬 `credentials` row와 같은 `credentialId`의 `holder_documents` row를 삭제하고 `result=delete`를 반환한다.
+- 증명서 제출 화면은 `issuerOptions` 또는 `issuers` 배열을 받아 발급기관 선택 UI로 표시한다. 같은 발급기관의 credential은 하나만 존재해야 하며, 새 회사명/새 VC가 발급되면 같은 발급기관의 기존 credential은 교체되어야 한다.
+- 증명서 제출 화면은 `submitDocuments`, `requiredDocuments`, `documents`, `attachmentDocuments` 중 하나의 배열을 받아 제출 문서 목록으로 표시한다. 문서를 누르면 원본 내용은 보여주지 않고 hash/digest 값만 표시한다.
+- 제출 문서 예시는 `주주명부`, `법인인감증명서`, `등기사항전부증명서`, `사업자등록증`, `법인 KYC 증명서`이다.
+- 제출 문서 원본은 API 또는 별도 브릿지로 수신한 뒤 Android 로컬 저장소에 저장해야 한다. 화면 payload에는 원본 bytes/base64를 넣지 않고 `documentId`, `documentType`, `digestSRI/hash`, `mediaType`, `byteSize` 같은 메타만 넣는다.
 - 기존 테스트 페이지 호환을 위해 `requestCredentialIssueConfirm1`, `requestCredentialIssueConfirm2`는 남겨두지만, 둘 다 동일한 발급 확인 화면을 연다. 신규 웹은 `requestCredentialIssueConfirm`을 사용한다.
 - 화면은 PNG 시안을 기준으로 네이티브 Compose에서 재현한다.
 - 민감한 raw SD-JWT, disclosure 원문, seed는 이 화면 요청 payload에 넣지 않는다.
@@ -2142,6 +2205,28 @@ Android submit body:
   "screen": "CredentialDetail",
   "result": "showQr",
   "confirmed": true
+}
+```
+
+증명서 제출 화면에서 제출 확정 시 Response 추가 필드:
+
+```json
+{
+  "action": "REQUEST_CREDENTIAL_SUBMIT",
+  "ok": true,
+  "screen": "CredentialSubmit",
+  "result": "submit",
+  "selectedIssuerId": "issuer-woori",
+  "selectedIssuerName": "우리은행",
+  "selectedCredentialId": "29",
+  "selectedDocuments": [
+    {
+      "documentId": "shareholder-list-1",
+      "documentType": "SHAREHOLDER_LIST",
+      "title": "주주명부",
+      "digest": "sha256-..."
+    }
+  ]
 }
 ```
 

@@ -37,6 +37,11 @@
 - [x] KB-JWT `sd_hash`, `nonce`, `aud`, `iat` 생성 및 ES256K 서명
 - [x] verifier 제출 payload를 `kyvc-sd-jwt-presentation-v1` 포맷으로 분기
 - [x] holder DIDSet URI/Data hash 등록 브릿지 추가
+- [x] holder DID Document를 `signMessage`/VP 로그인 submit 응답에 포함
+- [x] VP 로그인 QR native resolve/submit 연결
+- [x] VP 제출 전 holder binding 진단 로그 추가(`vp.login.holder.binding`)
+- [x] 증명서 상세 화면 로컬 credential 삭제 처리
+- [x] 발급 확인 화면 XRP fee drops/XRP 단위 정규화
 - [x] WebView 테스트 UI를 SD-JWT/nonce/KB-JWT 용어로 갱신
 - [x] `Wallet Implimentation Guide.md`를 SD-JWT 기준으로 갱신
 
@@ -47,9 +52,11 @@
 | 1 | 실서버 SD-JWT 발급 확인 | `/issuer/credentials/kyc`에 `format: dc+sd-jwt`, `holder_key_id` 포함 요청 | `ISSUER_CREDENTIAL_RECEIVED -> ok: true`, `format: dc+sd-jwt`, `sdJwt` 존재 |
 | 2 | Accept 후 status 확인 | 발급된 SD-JWT의 `credentialStatus.credentialType`으로 `CredentialAccept` 제출 | `CHECK_CREDENTIAL_STATUS -> active: true`, `accepted: true` |
 | 3 | 서버 credential 검증 | `credential` 원문 SD-JWT를 `/verifier/credentials/verify`에 제출 | `VERIFY_CREDENTIAL_WITH_SERVER -> ok: true` |
-| 4 | Holder DIDSet 검증 | holder DID Document hash를 XRPL DIDSet에 등록 | holder binding에서 `DID ledger entry not found`가 사라짐 |
-| 5 | SD-JWT+KB 제출 | nonce/aud 발급 후 KB-JWT 생성 및 verifier 제출 | `SUBMIT_TO_VERIFIER -> ok: true` |
-| 6 | 실패 케이스 확인 | 같은 nonce 재사용, disclosure 변조, Accept 전 제출 | 각각 expected failure가 뜨는지 확인 |
+| 4 | Holder DIDSet 검증 | holder DID Document hash를 XRPL DIDSet에 등록/재등록 | `didDocumentHashMatches=true` |
+| 5 | SD-JWT holder binding 확인 | `cnf.kid`, KB-JWT `kid`, DID Document key id 비교 | 모두 `did:xrpl:1:{holderAccount}#holder-key-1`로 일치 |
+| 6 | VP 로그인 QR 제출 | PC QR의 `VP_LOGIN_REQUEST`를 native가 resolve/submit | backend status가 VALID, PC polling 완료 |
+| 7 | verifier 정책 확인 | VC `vct`와 verifier `acceptedVct` 비교 | `vct is not accepted` 오류 없음 |
+| 8 | 실패 케이스 확인 | 같은 nonce 재사용, disclosure 변조, Accept 전 제출 | 각각 expected failure가 뜨는지 확인 |
 
 ## 이후 고도화
 
@@ -58,6 +65,7 @@
 - multipart attachment 제출: documentEvidence 요구 시 원본 PDF/image digest 검증
 - SD-JWT/KB-JWT 고정 테스트 벡터 추가
 - 운영용 백업 UX, auth key 보관 정책, 원격 백업 금지 정책 확정
+- DIDSet 등록 문서와 VP 제출 DID Document의 canonical hash 일치 자동 검증 UX
 
 ## 성공 판단 기준
 
@@ -65,3 +73,5 @@
 - Android 로그에 holder seed, raw disclosure, 원본 문서 bytes를 남기지 않는다.
 - `credentialType` 문자열은 issuer JWT payload 값을 그대로 사용하고 대소문자를 바꾸지 않는다.
 - SD-JWT presentation은 `vp+jwt`가 아니라 `<issuer-jwt>~<selected-disclosures>~<kb-jwt>` 형식이다.
+- DID Document는 VP 제출 시점에 임의 alias를 추가하지 않는다. XRPL DIDSet Data hash와 같은 기본 문서를 제출한다.
+- `cnf.kid`가 DID prefix를 중복 포함하면 제출 대상 VC가 아니므로 발급 로직 수정 후 재발급한다.

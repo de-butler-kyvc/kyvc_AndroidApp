@@ -142,6 +142,7 @@ private data class CredentialNativeScreenRequest(
 
 private data class IssueConfirmBalanceSnapshot(
     val currentBalanceXrp: String,
+    val networkFeeXrp: String,
     val usableBalanceXrp: String,
     val balanceWarning: String
 )
@@ -199,6 +200,15 @@ class MainActivity : FragmentActivity() {
                 )
             }
         }
+
+    private suspend fun deleteStoredCredential(credentialId: String): Boolean = withContext(Dispatchers.IO) {
+        if (credentialId.isBlank()) return@withContext false
+        val credential = mainViewModel.appContainer.credentialRepository.getCredentialById(credentialId)
+            ?: return@withContext false
+        mainViewModel.appContainer.holderDocumentRepository.deleteByCredentialId(credentialId)
+        mainViewModel.appContainer.credentialRepository.deleteCredential(credential)
+        true
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -525,6 +535,7 @@ class MainActivity : FragmentActivity() {
                                     uiData = issueConfirmBalance?.let {
                                         uiData.copy(
                                             currentBalanceXrp = it.currentBalanceXrp,
+                                            networkFeeXrp = it.networkFeeXrp,
                                             usableBalanceXrp = it.usableBalanceXrp,
                                             balanceWarning = it.balanceWarning
                                         )
@@ -548,15 +559,40 @@ class MainActivity : FragmentActivity() {
                                         )
                                     },
                                     onResult = { result ->
-                                        credentialNativeScreenRequest.value = null
-                                        bridge.onCredentialNativeScreenResult(
-                                            requestJson = nativeCredentialRequest.requestJson,
-                                            fallbackAction = nativeCredentialRequest.screen.fallbackAction(),
-                                            screen = nativeCredentialRequest.screen.name,
-                                            ok = true,
-                                            result = result,
-                                            errorMessage = null
-                                        )
+                                        if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail &&
+                                            result == "delete"
+                                        ) {
+                                            lifecycleScope.launch {
+                                                val credentialId = baseUiData.credentialId
+                                                val deleted = runCatching {
+                                                    deleteStoredCredential(credentialId)
+                                                }.getOrDefault(false)
+                                                credentialNativeScreenRequest.value = null
+                                                bridge.onCredentialNativeScreenResult(
+                                                    requestJson = nativeCredentialRequest.requestJson,
+                                                    fallbackAction = nativeCredentialRequest.screen.fallbackAction(),
+                                                    screen = nativeCredentialRequest.screen.name,
+                                                    ok = deleted,
+                                                    result = result,
+                                                    errorMessage = if (deleted) null else "삭제할 증명서를 찾을 수 없습니다."
+                                                )
+                                                Toast.makeText(
+                                                    this@MainActivity,
+                                                    if (deleted) "증명서를 삭제했습니다." else "증명서 삭제에 실패했습니다.",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                        } else {
+                                            credentialNativeScreenRequest.value = null
+                                            bridge.onCredentialNativeScreenResult(
+                                                requestJson = nativeCredentialRequest.requestJson,
+                                                fallbackAction = nativeCredentialRequest.screen.fallbackAction(),
+                                                screen = nativeCredentialRequest.screen.name,
+                                                ok = true,
+                                                result = result,
+                                                errorMessage = null
+                                            )
+                                        }
                                     }
                                 )
                             }
@@ -594,25 +630,29 @@ class MainActivity : FragmentActivity() {
                 val assets = container.xrplHelper.getAccountAssets(walletState.account)
                 val currentBalance = assets.xrpBalanceXrp
                 val currentBalanceLabel = currentBalance?.let(::formatXrpLabel) ?: baseData.currentBalanceXrp
+                val networkFeeAmount = parseXrpFeeAmount(baseData.networkFeeXrp)
+                val networkFeeLabel = formatXrpAmountLabel(networkFeeAmount)
                 val usableBalanceLabel = currentBalance
-                    ?.let { calculateUsableXrp(it, baseData.networkFeeXrp) }
+                    ?.let { calculateUsableXrp(it, networkFeeAmount) }
                     ?.let(::formatXrpLabel)
                     ?: baseData.usableBalanceXrp
                 val warning = when {
                     !assets.accountActivated -> "* 계정 활성화가 필요합니다"
                     assets.error != null -> "* 잔액 조회를 완료하지 못했습니다"
                     currentBalance?.let { parseXrpAmount(it) <= BigDecimal.ZERO } == true -> "* 잔액이 부족합니다"
-                    currentBalance?.let { parseXrpAmount(it) <= parseXrpAmount(baseData.networkFeeXrp) } == true -> "* 네트워크 수수료보다 잔액이 부족합니다"
+                    currentBalance?.let { parseXrpAmount(it) <= networkFeeAmount } == true -> "* 네트워크 수수료보다 잔액이 부족합니다"
                     else -> ""
                 }
                 IssueConfirmBalanceSnapshot(
                     currentBalanceXrp = currentBalanceLabel,
+                    networkFeeXrp = networkFeeLabel,
                     usableBalanceXrp = usableBalanceLabel,
                     balanceWarning = warning
                 )
             }.getOrElse {
                 IssueConfirmBalanceSnapshot(
                     currentBalanceXrp = baseData.currentBalanceXrp,
+                    networkFeeXrp = formatXrpAmountLabel(parseXrpFeeAmount(baseData.networkFeeXrp)),
                     usableBalanceXrp = baseData.usableBalanceXrp,
                     balanceWarning = "* 잔액 조회를 완료하지 못했습니다"
                 )
@@ -1358,18 +1398,38 @@ private fun credentialDateOnly(value: String): String {
 private fun parseXrpAmount(value: String): BigDecimal {
     val normalized = value
         .replace("XRP", "", ignoreCase = true)
+        .replace(",", "")
         .trim()
         .ifBlank { "0" }
     return normalized.toBigDecimalOrNull() ?: BigDecimal.ZERO
 }
 
-private fun calculateUsableXrp(balanceXrp: String, feeXrp: String): String {
-    val usable = parseXrpAmount(balanceXrp).subtract(parseXrpAmount(feeXrp))
+private fun parseXrpFeeAmount(value: String): BigDecimal {
+    val trimmed = value.trim()
+    val normalized = trimmed
+        .replace("XRP", "", ignoreCase = true)
+        .replace("drops", "", ignoreCase = true)
+        .replace("drop", "", ignoreCase = true)
+        .replace(",", "")
+        .trim()
+        .ifBlank { "0" }
+    val amount = normalized.toBigDecimalOrNull() ?: return BigDecimal.ZERO
+    val looksLikeDrops = trimmed.contains("drop", ignoreCase = true) ||
+        (!trimmed.contains("XRP", ignoreCase = true) && !normalized.contains(".") && amount >= BigDecimal.ONE)
+    return if (looksLikeDrops) amount.movePointLeft(6) else amount
+}
+
+private fun calculateUsableXrp(balanceXrp: String, feeXrp: BigDecimal): String {
+    val usable = parseXrpAmount(balanceXrp).subtract(feeXrp)
     return if (usable < BigDecimal.ZERO) "0" else usable.stripTrailingZeros().toPlainString()
 }
 
 private fun formatXrpLabel(value: String): String {
-    val amount = parseXrpAmount(value).setScale(6, RoundingMode.DOWN).stripTrailingZeros().toPlainString()
+    return formatXrpAmountLabel(parseXrpAmount(value))
+}
+
+private fun formatXrpAmountLabel(value: BigDecimal): String {
+    val amount = value.setScale(6, RoundingMode.DOWN).stripTrailingZeros().toPlainString()
     return "$amount XRP"
 }
 
@@ -1743,6 +1803,22 @@ private fun JSONObject.childText(pathPart: String): String? {
     return array.optString(explicitIndex ?: 0).takeIf { it.isNotBlank() }
 }
 
+private data class SubmitIssuerOption(
+    val issuerId: String,
+    val issuerName: String,
+    val credentialId: String,
+    val selected: Boolean
+)
+
+private data class SubmitDocumentItem(
+    val documentId: String,
+    val title: String,
+    val documentType: String,
+    val digest: String,
+    val required: Boolean,
+    val selected: Boolean
+)
+
 private data class CredentialUiData(
     val issuerName: String = "법원행정처",
     val credentialId: String = "",
@@ -1770,6 +1846,8 @@ private data class CredentialUiData(
     val balanceWarning: String = "* 잔액이 부족합니다",
     val statusText: String = "정상 · 검증 가능",
     val didRegistrationLabel: String = "did 등록하기",
+    val submitIssuerOptions: List<SubmitIssuerOption> = emptyList(),
+    val submitDocuments: List<SubmitDocumentItem> = emptyList(),
     val storedClaimRows: List<Triple<String, String, String>> = emptyList()
 ) {
     companion object {
@@ -1795,6 +1873,77 @@ private data class CredentialUiData(
                         json?.optString(name)?.takeIf { it.isNotBlank() }
                     }
                 } ?: fallback
+            }
+            fun firstArray(vararg names: String): JSONArray? {
+                return names.firstNotNullOfOrNull { name ->
+                    json?.optJSONArray(name)
+                }
+            }
+            fun parseIssuerOptions(): List<SubmitIssuerOption> {
+                val issuers = firstArray("issuerOptions", "issuers", "credentialIssuers", "availableIssuers")
+                    ?: return listOf(
+                        SubmitIssuerOption(
+                            issuerId = firstText("default", "issuerId", "issuerAccount", "issuerDid"),
+                            issuerName = firstText("KYvC 인증기관", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
+                            credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
+                            selected = true
+                        )
+                    )
+                return buildList {
+                    for (index in 0 until issuers.length()) {
+                        val item = issuers.optJSONObject(index) ?: continue
+                        val issuerName = item.optString("issuerName")
+                            .ifBlank { item.optString("name") }
+                            .ifBlank { item.optString("displayName") }
+                            .ifBlank { "발급기관 ${index + 1}" }
+                        val issuerId = item.optString("issuerId")
+                            .ifBlank { item.optString("id") }
+                            .ifBlank { item.optString("issuerAccount") }
+                            .ifBlank { item.optString("issuerDid") }
+                            .ifBlank { issuerName }
+                        add(
+                            SubmitIssuerOption(
+                                issuerId = issuerId,
+                                issuerName = issuerName,
+                                credentialId = item.optString("credentialId").ifBlank { item.optString("id") },
+                                selected = item.optBoolean("selected", index == 0)
+                            )
+                        )
+                    }
+                }.ifEmpty {
+                    listOf(SubmitIssuerOption("default", "KYvC 인증기관", "", true))
+                }
+            }
+            fun parseSubmitDocuments(): List<SubmitDocumentItem> {
+                val documents = firstArray("submitDocuments", "requiredDocuments", "documents", "attachmentDocuments")
+                    ?: return defaultSubmitDocuments()
+                return buildList {
+                    for (index in 0 until documents.length()) {
+                        val item = documents.optJSONObject(index) ?: continue
+                        val title = item.optString("title")
+                            .ifBlank { item.optString("name") }
+                            .ifBlank { item.optString("documentName") }
+                            .ifBlank { "제출 문서 ${index + 1}" }
+                        val digest = item.optString("digestSRI")
+                            .ifBlank { item.optString("hash") }
+                            .ifBlank { item.optString("digest") }
+                            .ifBlank { item.optString("documentHash") }
+                        add(
+                            SubmitDocumentItem(
+                                documentId = item.optString("documentId")
+                                    .ifBlank { item.optString("id") }
+                                    .ifBlank { "document-${index + 1}" },
+                                title = title,
+                                documentType = item.optString("documentType")
+                                    .ifBlank { item.optString("type") }
+                                    .ifBlank { title },
+                                digest = digest.ifBlank { "-" },
+                                required = item.optBoolean("required", true),
+                                selected = item.optBoolean("selected", true)
+                            )
+                        )
+                    }
+                }.ifEmpty { defaultSubmitDocuments() }
             }
             val fallbackHolderDid = text("holderDid", text("did", "did:xrpl:1:rHolder..."))
             val rawIssuedAt = firstText(
@@ -1850,7 +1999,19 @@ private data class CredentialUiData(
                 usableBalanceXrp = text("usableBalanceXrp", text("availableBalanceXrp", "0 XRP")),
                 balanceWarning = text("balanceWarning", "* 잔액이 부족합니다"),
                 statusText = text("statusText", "정상 · 검증 가능"),
-                didRegistrationLabel = text("didRegistrationLabel", "did 등록하기")
+                didRegistrationLabel = text("didRegistrationLabel", "did 등록하기"),
+                submitIssuerOptions = parseIssuerOptions(),
+                submitDocuments = parseSubmitDocuments()
+            )
+        }
+
+        fun defaultSubmitDocuments(): List<SubmitDocumentItem> {
+            return listOf(
+                SubmitDocumentItem("shareholder-list", "주주명부", "SHAREHOLDER_LIST", "-", required = true, selected = true),
+                SubmitDocumentItem("corporate-seal-certificate", "법인인감증명서", "CORPORATE_SEAL_CERTIFICATE", "-", required = true, selected = true),
+                SubmitDocumentItem("registry-certificate", "등기사항전부증명서", "CORPORATE_REGISTRY_CERTIFICATE", "-", required = true, selected = true),
+                SubmitDocumentItem("business-registration", "사업자등록증", "BUSINESS_REGISTRATION_CERTIFICATE", "-", required = true, selected = true),
+                SubmitDocumentItem("kyc-credential", "법인 KYC 증명서", "LEGAL_ENTITY_KYC_CREDENTIAL", "-", required = true, selected = true)
             )
         }
     }
@@ -2192,12 +2353,54 @@ private fun CredentialSubmitScreen(
     onBack: () -> Unit,
     onResult: (String) -> Unit
 ) {
+    val issuerOptions = data.submitIssuerOptions.ifEmpty {
+        listOf(SubmitIssuerOption("default", data.issuerName, data.credentialId, true))
+    }
+    val submitDocuments = data.submitDocuments.ifEmpty {
+        CredentialUiData.defaultSubmitDocuments()
+    }
+    var selectedIssuerId by remember(data) {
+        mutableStateOf(issuerOptions.firstOrNull { it.selected }?.issuerId ?: issuerOptions.first().issuerId)
+    }
+    val selectedDocumentIds = remember(data) {
+        mutableStateListOf<String>().apply {
+            addAll(submitDocuments.filter { it.selected || it.required }.map { it.documentId })
+        }
+    }
+    var expandedDocumentId by remember(data) { mutableStateOf<String?>(null) }
+    val selectedIssuer = issuerOptions.firstOrNull { it.issuerId == selectedIssuerId } ?: issuerOptions.first()
+    val selectedCount = selectedDocumentIds.size
+
     CredentialNativeScaffold(
         title = "증명서 제출",
         onBack = onBack,
         bottomBar = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilledActionButton("증명서 제출하기") { onResult("submit") }
+                FilledActionButton("증명서 제출하기") {
+                    onResult(
+                        JSONObject().apply {
+                            put("result", "submit")
+                            put("selectedIssuerId", selectedIssuer.issuerId)
+                            put("selectedIssuerName", selectedIssuer.issuerName)
+                            put("selectedCredentialId", selectedIssuer.credentialId)
+                            put(
+                                "selectedDocuments",
+                                JSONArray(
+                                    submitDocuments
+                                        .filter { it.documentId in selectedDocumentIds }
+                                        .map { document ->
+                                            JSONObject().apply {
+                                                put("documentId", document.documentId)
+                                                put("documentType", document.documentType)
+                                                put("title", document.title)
+                                                put("digest", document.digest)
+                                            }
+                                        }
+                                )
+                            )
+                        }.toString()
+                    )
+                }
                 OutlinedActionButton("거부") { onResult("reject") }
             }
         }
@@ -2208,13 +2411,42 @@ private fun CredentialSubmitScreen(
         Spacer(modifier = Modifier.height(26.dp))
         Text("발급기관 선택", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
         Spacer(modifier = Modifier.height(14.dp))
-        SelectBox("우리은행")
+        issuerOptions.forEachIndexed { index, issuer ->
+            IssuerSelectRow(
+                issuer = issuer,
+                selected = issuer.issuerId == selectedIssuerId,
+                onClick = { selectedIssuerId = issuer.issuerId }
+            )
+            if (index != issuerOptions.lastIndex) {
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+        }
         Spacer(modifier = Modifier.height(26.dp))
-        Text("제출할 증명서 (2건)", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+        Text("제출할 증명서 (${selectedCount}건)", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
         Spacer(modifier = Modifier.height(14.dp))
-        SubmitCredentialRow("법인 KYC 증명서", "우리은행", Color(0xFFA8B7FF))
-        Spacer(modifier = Modifier.height(14.dp))
-        SubmitCredentialRow("검증된 사업자등록증", "우리은행", Color(0xFFD7A9FF))
+        submitDocuments.forEachIndexed { index, document ->
+            SubmitDocumentRow(
+                document = document,
+                issuerName = selectedIssuer.issuerName,
+                selected = document.documentId in selectedDocumentIds,
+                expanded = expandedDocumentId == document.documentId,
+                onClick = {
+                    expandedDocumentId = if (expandedDocumentId == document.documentId) null else document.documentId
+                },
+                onToggle = {
+                    if (!document.required) {
+                        if (document.documentId in selectedDocumentIds) {
+                            selectedDocumentIds.remove(document.documentId)
+                        } else {
+                            selectedDocumentIds.add(document.documentId)
+                        }
+                    }
+                }
+            )
+            if (index != submitDocuments.lastIndex) {
+                Spacer(modifier = Modifier.height(14.dp))
+            }
+        }
         Spacer(modifier = Modifier.height(28.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("공개할 세부 정보", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
@@ -2470,6 +2702,109 @@ private fun SelectBox(text: String) {
     ) {
         Text(text, color = Color(0xFF8A93A3), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
         Text("⌄", color = Color(0xFF8A93A3), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+    }
+}
+
+@Composable
+private fun IssuerSelectRow(
+    issuer: SubmitIssuerOption,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .border(
+                width = if (selected) 2.dp else 1.dp,
+                color = if (selected) Color(0xFF2F7DFF) else Color(0xFFE5E7EB),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .background(Color.White)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        LetterIcon(issuer.issuerName.take(1).ifBlank { "발" }, small = true)
+        Spacer(modifier = Modifier.size(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(issuer.issuerName, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            Text(
+                issuer.credentialId.ifBlank { "발급기관별 1개 증명서" },
+                color = Color(0xFF8A93A3),
+                style = MaterialTheme.typography.labelLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (selected) {
+            Text("✓", color = Color(0xFF2F7DFF), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+        }
+    }
+}
+
+@Composable
+private fun SubmitDocumentRow(
+    document: SubmitDocumentItem,
+    issuerName: String,
+    selected: Boolean,
+    expanded: Boolean,
+    onClick: () -> Unit,
+    onToggle: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 16.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (selected) Color(0xFFA8B7FF) else Color(0xFFE5E7EB)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("문", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+            }
+            Spacer(modifier = Modifier.size(18.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(document.title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+                Text(
+                    listOf(issuerName, if (document.required) "필수" else "선택").joinToString(" · "),
+                    color = Color(0xFF8A93A3),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(if (selected) Color(0xFF2F7DFF) else Color(0xFFF3F4F6))
+                    .clickable(onClick = onToggle),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(if (selected) "✓" else "", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+            }
+        }
+        if (expanded) {
+            Spacer(modifier = Modifier.height(14.dp))
+            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
+            Spacer(modifier = Modifier.height(12.dp))
+            Text("문서 해시", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                document.digest,
+                color = Color(0xFF2F7DFF),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold
+            )
+        }
     }
 }
 

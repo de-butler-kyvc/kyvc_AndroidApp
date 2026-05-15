@@ -16,4 +16,7 @@ class HolderDocumentRepository(
 
     suspend fun findAllByCredentialId(credentialId: String): List<HolderDocumentEntity> =
         holderDocumentDao.findAllByCredentialId(credentialId)
+
+    suspend fun deleteByCredentialId(credentialId: String) =
+        holderDocumentDao.deleteByCredentialId(credentialId)
 }

@@ -22,4 +22,7 @@ interface HolderDocumentDao {
 
     @Query("SELECT * FROM holder_documents WHERE credentialId = :credentialId ORDER BY importedAt DESC")
     suspend fun findAllByCredentialId(credentialId: String): List<HolderDocumentEntity>
+
+    @Query("DELETE FROM holder_documents WHERE credentialId = :credentialId")
+    suspend fun deleteByCredentialId(credentialId: String)
 }

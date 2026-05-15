@@ -2817,7 +2817,7 @@ class WalletBridge(
                     val kbHeader = buildJsonObject {
                         put("alg", "ES256K")
                         put("typ", "kb+jwt")
-                        put("kid", "${walletState.did}#holder-key-1")
+                        put("kid", holderKeyId(walletState))
                     }
                     val kbPayload = buildJsonObject {
                         put("iat", Instant.now().epochSecond)
@@ -2843,6 +2843,8 @@ class WalletBridge(
                         put("attachmentManifest", attachmentManifest)
                     }
                     val didDocument = buildHolderDidDocument(walletState)
+                    val didDocumentJson = Json.parseToJsonElement(didDocument).jsonObject
+                    val didDocuments = buildHolderDidDocuments(walletState.did, didDocumentJson)
 
                     withContext(Dispatchers.Main) {
                         Toast.makeText(context, "SD-JWT KB presentation signed", Toast.LENGTH_SHORT).show()
@@ -2856,7 +2858,9 @@ class WalletBridge(
                             put("presentation", sdJwtKb)
                             put("sdJwtKb", sdJwtKb)
                             put("presentationObject", presentation)
-                            put("didDocument", Json.parseToJsonElement(didDocument))
+                            put("didDocument", didDocumentJson)
+                            put("didDocuments", didDocuments)
+                            put("did_documents", didDocuments)
                             put("attachmentManifest", attachmentManifest)
                             put("attachmentReady", attachmentPlan.blockers.isEmpty())
                             if (attachmentPlan.blockers.isNotEmpty()) {
@@ -2923,6 +2927,8 @@ class WalletBridge(
                     put("proof", proof)
                 }
                 val didDocument = buildHolderDidDocument(walletState)
+                val didDocumentJson = Json.parseToJsonElement(didDocument).jsonObject
+                val didDocuments = buildHolderDidDocuments(walletState.did, didDocumentJson)
 
                 withContext(Dispatchers.Main) {
                     Toast.makeText(context, "VP signed", Toast.LENGTH_SHORT).show()
@@ -2934,7 +2940,9 @@ class WalletBridge(
                         put("presentation", presentation)
                         vpJwt?.let { put("presentationJwt", it) }
                         vcJwt?.let { put("vcJwt", it) }
-                        put("didDocument", Json.parseToJsonElement(didDocument))
+                        put("didDocument", didDocumentJson)
+                        put("didDocuments", didDocuments)
+                        put("did_documents", didDocuments)
                     }
                 }
             } catch (e: Exception) {
@@ -3522,7 +3530,13 @@ class WalletBridge(
         emitCallback(action, ok) {
             request.text("requestId")?.let { put("requestId", it) }
             put("screen", screen)
-            put("result", result)
+            val resultJson = runCatching { Json.parseToJsonElement(result).jsonObject }.getOrNull()
+            if (resultJson != null) {
+                resultJson.forEach { (key, value) -> put(key, value) }
+                put("result", resultJson.text("result") ?: result)
+            } else {
+                put("result", result)
+            }
             put("confirmed", ok)
             if (!ok) {
                 put("error", errorMessage ?: "사용자가 화면을 닫았습니다.")
@@ -4046,6 +4060,20 @@ class WalletBridge(
             )
 
             val credential = selectVpLoginCredential()
+            logBridgeFlow(
+                "vp.login.credential.selected",
+                mapOf(
+                    "requestId" to resolvedRequestId,
+                    "credentialId" to credential.credentialId,
+                    "credentialType" to credential.credentialType,
+                    "issuerAccount" to credential.issuerAccount,
+                    "holderAccount" to credential.holderAccount,
+                    "localStatus" to credentialLocalStatus(credential).code,
+                    "hasAcceptedAt" to !credential.acceptedAt.isNullOrBlank(),
+                    "hasCredentialAcceptHash" to !credential.credentialAcceptHash.isNullOrBlank(),
+                    "validUntil" to credential.validUntil
+                )
+            )
             val presentationRequest = buildJsonObject {
                 put("credentialId", credential.credentialId)
                 put("challenge", resolveResponse.challenge.ifBlank { nonce })
@@ -4054,12 +4082,17 @@ class WalletBridge(
                 put("aud", aud)
                 put("presentationDefinition", resolveResponse.presentationDefinition)
             }
-            val presentationObject = buildVpLoginPresentationObject(presentationRequest)
+            val presentationResult = buildVpLoginPresentationObject(presentationRequest)
+            logVpLoginCredentialPayloadMeta(
+                requestId = resolvedRequestId,
+                credential = credential
+            )
             submitVpLoginRequest(
                 requestId = resolvedRequestId,
                 qrToken = qrToken,
                 credentialId = credential.credentialId,
-                vp = presentationObject,
+                vp = presentationResult.presentation,
+                didDocument = presentationResult.didDocument,
                 deviceId = deviceId
             )
 
@@ -4120,7 +4153,10 @@ class WalletBridge(
             .filter { credential ->
                 credential.sdJwt?.isNotBlank() == true &&
                     credential.revokedOrInactiveAt.isNullOrBlank() &&
-                    credential.credentialId.toLongOrNull() != null
+                    credential.credentialId.toLongOrNull() != null &&
+                    !credential.acceptedAt.isNullOrBlank() &&
+                    !credential.credentialAcceptHash.isNullOrBlank() &&
+                    credentialLocalStatus(credential).code == "active"
             }
         require(credentials.isNotEmpty()) { "제출 가능한 법인 KYC Credential이 없습니다." }
         if (credentials.size == 1) return credentials.first()
@@ -4128,6 +4164,7 @@ class WalletBridge(
         val deferred = CompletableDeferred<String?>()
         val options = credentials.map { credential ->
             credential.credentialId to listOf(
+                credentialLocalStatus(credential).label,
                 credential.credentialType.takeIf { it.isNotBlank() },
                 credential.validUntil.takeIf { it.isNotBlank() }?.let { "만료 $it" }
             ).filterNotNull().joinToString(" · ").ifBlank { "법인 KYC Credential" }
@@ -4143,7 +4180,7 @@ class WalletBridge(
             ?: throw IllegalArgumentException("선택한 Credential을 찾을 수 없습니다.")
     }
 
-    private suspend fun buildVpLoginPresentationObject(request: JsonObject): JsonObject {
+    private suspend fun buildVpLoginPresentationObject(request: JsonObject): VpLoginPresentationResult {
         val challenge = request.text("challenge") ?: request.text("message") ?: request.text("nonce")
         val domain = request.text("domain") ?: "kyvc.local"
         require(!challenge.isNullOrBlank()) { "challenge or message is required" }
@@ -4190,7 +4227,7 @@ class WalletBridge(
         val kbHeader = buildJsonObject {
             put("alg", "ES256K")
             put("typ", "kb+jwt")
-            put("kid", "${walletState.did}#holder-key-1")
+            put("kid", holderKeyId(walletState))
         }
         val kbPayload = buildJsonObject {
             put("iat", Instant.now().epochSecond)
@@ -4207,7 +4244,7 @@ class WalletBridge(
         val definitionId = request.text("definitionId")
             ?: request.obj("presentationDefinition")?.text("id")
             ?: "kyvc-sd-jwt-presentation-v1"
-        return buildJsonObject {
+        val presentation = buildJsonObject {
             put("format", "kyvc-sd-jwt-presentation-v1")
             put("definitionId", definitionId)
             put("aud", domain)
@@ -4215,6 +4252,17 @@ class WalletBridge(
             put("sdJwtKb", sdJwtKb)
             put("attachmentManifest", attachmentManifest)
         }
+        val didDocument = Json.parseToJsonElement(buildHolderDidDocument(walletState)).jsonObject
+        validateAndLogVpHolderBinding(
+            walletState = walletState,
+            sdCredential = sdCredential,
+            kbHeader = kbHeader,
+            didDocument = didDocument
+        )
+        return VpLoginPresentationResult(
+            presentation = presentation,
+            didDocument = didDocument
+        )
     }
 
     private fun submitVpLoginRequest(
@@ -4222,22 +4270,32 @@ class WalletBridge(
         qrToken: String,
         credentialId: String,
         vp: JsonObject,
+        didDocument: JsonObject,
         deviceId: String
     ) {
         val backendCredentialId = credentialId.toLongOrNull()
             ?: throw IllegalArgumentException("Backend credentialId must be numeric")
+        val holderDid = didDocument.text("id").orEmpty()
         logBridgeFlow(
             "vp.login.submit.request",
             mapOf(
                 "requestId" to requestId,
                 "credentialId" to credentialId,
-                "hasVp" to true
+                "hasVp" to true,
+                "hasDidDocument" to true,
+                "holderDid" to holderDid
             )
         )
         val body = buildJsonObject {
             put("qrToken", qrToken)
             put("credentialId", backendCredentialId)
             put("vp", vp)
+            put("didDocument", didDocument)
+            if (holderDid.isNotBlank()) {
+                val didDocuments = buildHolderDidDocuments(holderDid, didDocument)
+                put("didDocuments", didDocuments)
+                put("did_documents", didDocuments)
+            }
             put("deviceId", deviceId)
         }.toString()
         val responseBody = postJson(
@@ -4251,11 +4309,112 @@ class WalletBridge(
         }
     }
 
+    private fun logVpLoginCredentialPayloadMeta(
+        requestId: String,
+        credential: CredentialEntity
+    ) {
+        val sdJwt = credential.sdJwt?.takeIf { isSdJwt(it) } ?: return
+        val parsed = runCatching { parseSdJwtCredential(sdJwt) }.getOrNull() ?: return
+        val payload = parsed.payload
+        val status = payload.obj("credentialStatus")
+        logBridgeFlow(
+            "vp.login.credential.payload",
+            mapOf(
+                "requestId" to requestId,
+                "entityCredentialId" to credential.credentialId,
+                "payloadJti" to payload.text("jti"),
+                "payloadVct" to payload.text("vct"),
+                "payloadIss" to payload.text("iss"),
+                "payloadSub" to payload.text("sub"),
+                "statusType" to status?.text("type"),
+                "statusId" to status?.text("statusId"),
+                "statusCredentialType" to status?.text("credentialType"),
+                "entityCredentialType" to credential.credentialType,
+                "entityIssuerAccount" to credential.issuerAccount,
+                "entityHolderAccount" to credential.holderAccount
+            )
+        )
+    }
+
+    private fun validateAndLogVpHolderBinding(
+        walletState: WalletStateStore.WalletState,
+        sdCredential: SdJwtCredential,
+        kbHeader: JsonObject,
+        didDocument: JsonObject
+    ) {
+        val issuerPayload = sdCredential.issuerPayload
+        val sdJwtSubject = issuerPayload.text("sub")
+        val cnfKid = issuerPayload.obj("cnf")?.text("kid")
+        val kbKid = kbHeader.text("kid")
+        val didDocumentId = didDocument.text("id")
+        val verificationMethodIds = didDocumentVerificationMethodIds(didDocument)
+        val authenticationIds = didDocumentAuthenticationIds(didDocument)
+        val vct = issuerPayload.text("vct") ?: sdCredential.payload.text("vct")
+
+        logBridgeFlow(
+            "vp.login.holder.binding",
+            mapOf(
+                "walletDid" to walletState.did,
+                "sdJwtSub" to sdJwtSubject,
+                "sdJwtCnfKid" to cnfKid,
+                "kbHeaderKid" to kbKid,
+                "didDocumentId" to didDocumentId,
+                "didDocumentVerificationMethodIds" to verificationMethodIds.joinToString(","),
+                "didDocumentAuthentication" to authenticationIds.joinToString(","),
+                "sdJwtVct" to vct
+            )
+        )
+
+        require(sdJwtSubject == walletState.did) {
+            "현재 지갑 DID와 다른 holder DID로 발급된 Credential입니다. Credential을 다시 발급받아주세요."
+        }
+        require(!cnfKid.isNullOrBlank()) {
+            "SD-JWT payload.cnf.kid가 없어 holder binding을 검증할 수 없습니다. Credential을 다시 발급받아주세요."
+        }
+        require(cnfKid == kbKid) {
+            "KB-JWT header.kid가 SD-JWT payload.cnf.kid와 일치하지 않습니다."
+        }
+        require(didDocumentId == walletState.did) {
+            "holder DID Document id가 현재 지갑 DID와 일치하지 않습니다."
+        }
+        require(verificationMethodIds.contains(cnfKid)) {
+            "SD-JWT payload.cnf.kid가 holder DID Document verificationMethod에 없습니다."
+        }
+        require(authenticationIds.contains(cnfKid)) {
+            "SD-JWT payload.cnf.kid가 holder DID Document authentication에 없습니다."
+        }
+    }
+
+    private fun holderKeyId(walletState: WalletStateStore.WalletState): String {
+        return "${walletState.did}#holder-key-1"
+    }
+
+    private fun didDocumentVerificationMethodIds(didDocument: JsonObject): List<String> {
+        val methods = didDocument["verificationMethod"] as? JsonArray ?: return emptyList()
+        return methods.mapNotNull { method ->
+            (method as? JsonObject)?.text("id")
+        }
+    }
+
+    private fun didDocumentAuthenticationIds(didDocument: JsonObject): List<String> {
+        val authentication = didDocument["authentication"] as? JsonArray ?: return emptyList()
+        return authentication.mapNotNull { item ->
+            when (item) {
+                is JsonPrimitive -> item.contentOrNull
+                is JsonObject -> item.text("id")
+                else -> null
+            }
+        }
+    }
+
     private fun classifyVpLoginError(error: Exception): String {
         val message = error.message.orEmpty()
         return when {
             message.contains("유효하지 않은 VP 로그인 QR") -> "유효하지 않은 VP 로그인 QR입니다."
             message.contains("제출 가능한 법인 KYC Credential") -> "제출 가능한 법인 KYC Credential이 없습니다."
+            message.contains("VP_LOGIN_CREDENTIAL_INVALID") ->
+                "VP 로그인에 사용할 수 없는 Credential입니다.\n새로 발급받은 법인 KYC 증명서로 다시 시도해주세요."
+            message.contains("submit", ignoreCase = true) -> "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요."
             message.contains("VP challenge") ||
                 message.contains("Credential 또는 challenge") ||
                 message.contains("challenge") -> "VP 생성에 실패했습니다.\nCredential 또는 challenge 정보를 확인해주세요."
@@ -4265,7 +4424,6 @@ class WalletBridge(
                 message.contains("409") ||
                 message.contains("400") ||
                 message.contains("403") -> "VP 로그인 요청을 확인할 수 없습니다.\nQR이 만료되었거나 잘못된 요청입니다."
-            message.contains("submit", ignoreCase = true) -> "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요."
             else -> message.ifBlank { "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요." }
         }
     }
@@ -5545,6 +5703,11 @@ class WalletBridge(
         val payload: JsonObject
     )
 
+    private data class VpLoginPresentationResult(
+        val presentation: JsonObject,
+        val didDocument: JsonObject
+    )
+
     private data class VpLoginResolveData(
         val requestId: String,
         val nonce: String,
@@ -5759,7 +5922,7 @@ class WalletBridge(
 
     private fun buildHolderDidDocument(walletState: WalletStateStore.WalletState): String {
         val publicKeyJwk = publicKeyJwk(walletState.authPublicKey)
-        val keyId = "${walletState.did}#holder-key-1"
+        val keyId = holderKeyId(walletState)
         return buildJsonObject {
             put(
                 "@context",
@@ -5786,6 +5949,12 @@ class WalletBridge(
             )
             put("authentication", JsonArray(listOf(JsonPrimitive(keyId))))
         }.toString()
+    }
+
+    private fun buildHolderDidDocuments(holderDid: String, didDocument: JsonObject): JsonObject {
+        return buildJsonObject {
+            put(holderDid, didDocument)
+        }
     }
 
     private fun didDocumentDataHash(didDocument: String): String {

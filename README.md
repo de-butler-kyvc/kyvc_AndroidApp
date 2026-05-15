@@ -43,6 +43,8 @@ KYvC Android App은 KYvC 모바일 사용자가 로컬 지갑을 생성하거나
 - QR 스캔 기반 VC 발급/제출 요청 처리
 - VC 저장, 목록, 상태 조회, 검증, 제출
 - `dc+sd-jwt` prepare 응답 저장, issuer account 기반 DID 보정, CredentialAccept 연동
+- PC VP 로그인 QR Native resolve/submit 및 holder DID Document 전달
+- holder DIDSet hash, `cnf.kid`, KB-JWT `kid`, verifier `vct` 정책 진단
 - XRPL 계정, DIDSet, CredentialAccept, 잔액/거래 조회, 송금
 - 복구 문구 백업, 지갑 복구, 증명서 관련 네이티브 화면
 
@@ -324,3 +326,36 @@ docs(-): Android 앱 README 구조 정리
 - 공동 작업 브랜치와 배포 브랜치에는 직접 push를 피하고 PR 기반 병합을 우선합니다.
 - 긴급 수정이나 사용자가 명시적으로 요청한 경우에만 현재 브랜치에 직접 커밋/푸쉬합니다.
 - 브릿지 요청/응답 형식이 바뀌면 코드와 문서를 같은 커밋에서 갱신합니다.
+
+## 10. 최근 작업 정리
+
+- PC VP 로그인 QR 흐름을 Android Native에서 직접 처리하도록 연결했습니다.
+- VP submit body에 `didDocument`, `didDocuments`, `did_documents`를 포함합니다.
+- holder binding 진단 로그 `vp.login.holder.binding`을 추가했습니다.
+- DID Document는 XRPL DIDSet에 등록된 기본 문서와 같은 구조로 유지하며, 제출 시점에 alias를 임의 추가하지 않습니다.
+- 잘못 발급된 `cnf.kid`(`did#did#holder-key-1`)는 제출 전 차단하고 VC 재발급 대상으로 분리합니다.
+- 증명서 상세 화면의 삭제 확인 후 로컬 credential과 연결 holder document를 실제 삭제합니다.
+- 발급 확인 화면의 네트워크 수수료가 drops 단위로 들어와도 XRP 단위로 정규화해 예상 사용 가능 잔액을 계산합니다.
+- 증명서 제출 화면은 웹/API가 전달한 발급기관 목록과 제출 문서 목록을 표시하고, 문서 원본 대신 hash만 확인한 뒤 선택 결과를 웹에 반환합니다.
+
+## 11. 제출/발급 디버깅 기준
+
+Logcat 필터:
+
+```text
+tag:WalletBridge vp.login
+```
+
+주요 이벤트:
+
+- `vp.login.credential.selected`: 제출 credential 선택 상태
+- `vp.login.credential.payload`: SD-JWT payload 주요 메타
+- `vp.login.holder.binding`: wallet DID, `cnf.kid`, KB-JWT `kid`, DID Document key id 비교
+- `vp.login.submit.request`: backend submit 직전 상태
+
+판단 기준:
+
+- `didDocumentHashMatches=false`: DIDSet 재등록 필요
+- `cnf.kid != did:xrpl:1:{holderAccount}#holder-key-1`: VC 발급 로직 수정 후 재발급 필요
+- `vct is not accepted`: verifier 정책 또는 VC `vct` 재발급 필요
+- `VP_LOGIN_CORE_VERIFY_FAILED`: backend가 Core verify에 전달한 DID Document와 Core 상세 로그 확인 필요

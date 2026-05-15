@@ -45,6 +45,8 @@
 - [x] VP 제출 전 별도 credential picker 제거, 증명서 제출 화면의 발급기관 선택으로 credential 선택 통합
 - [x] 같은 발급기관 credential 후보는 최신 1개만 제출 화면에 표시
 - [x] QR 스캔 화면을 프레임 내부 카메라/외부 남색 불투명 배경으로 정리
+- [x] VC 저장 시 `documentAttachments[].contentBase64`를 암호화 저장하고 manifest 메타를 credential과 연결
+- [x] multipart VP 제출 시 `attachmentManifest` part와 `attachmentRef` 파일 part 전송
 - [x] WebView 테스트 UI를 SD-JWT/nonce/KB-JWT 용어로 갱신
 - [x] `Wallet Implimentation Guide.md`를 SD-JWT 기준으로 갱신
 
@@ -60,7 +62,8 @@
 | 6 | VP 로그인 QR 제출 | PC QR의 `VP_LOGIN_REQUEST`를 native가 resolve/submit | backend status가 VALID, PC polling 완료 |
 | 7 | verifier 정책 확인 | VC `vct`와 verifier `acceptedVct` 비교 | `vct is not accepted` 오류 없음 |
 | 8 | 제출 화면 선택 확인 | 발급기관 드롭다운 선택값이 submit `credentialId`로 사용되는지 확인 | 별도 credential picker 없이 선택한 발급기관 credential로 VP submit |
-| 9 | 실패 케이스 확인 | 같은 nonce 재사용, disclosure 변조, Accept 전 제출 | 각각 expected failure가 뜨는지 확인 |
+| 9 | 원본 문서 첨부 제출 | prepare 응답의 `documentAttachments` 저장 후 `with-attachments` multipart 제출 | `presentation`, `attachmentManifest`, attachmentRef 파일 part가 backend에 도착 |
+| 10 | 실패 케이스 확인 | 같은 nonce 재사용, disclosure 변조, Accept 전 제출 | 각각 expected failure가 뜨는지 확인 |
 
 ## 이후 고도화
 

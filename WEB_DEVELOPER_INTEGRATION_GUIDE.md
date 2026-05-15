@@ -198,6 +198,8 @@ window.Android.requestCredentialSubmit(JSON.stringify({
 - 발급기관 선택은 제출할 credential 선택과 같은 의미다. Native VP 로그인 제출 흐름에서는 이 화면의 `selectedCredentialId`로 presentation을 생성한다.
 - 같은 발급기관 credential 후보가 여러 개면 Android는 최신 1개만 화면에 표시한다. 웹/API에서도 같은 기준으로 중복 발급기관 후보를 내려주지 않는 것이 좋다.
 - 제출 문서 원본은 화면 payload에 넣지 않는다. API/브릿지로 Android 로컬 저장소에 저장하고 화면에는 `documentId`, `documentType`, `digestSRI/hash`만 전달한다.
+- VC 발급 prepare 응답에 `documentAttachments`와 `documentAttachmentManifest`가 있으면, 웹은 `credentialPayload`와 함께 Android `saveVC` payload에 그대로 전달한다. `contentBase64`는 웹 storage나 console에 남기지 않는다.
+- 첨부 제출이 필요한 VP는 Android가 저장된 manifest의 `attachmentRef` 기준으로 multipart 제출한다. 웹은 manifest의 `attachmentRef`를 임의로 바꾸지 않는다.
 - 문서 row를 누르면 네이티브는 원본이 아니라 hash만 보여준다.
 - 제출 확정 콜백에는 `selectedIssuerId`, `selectedCredentialId`, `selectedDocuments[]`가 포함된다.
 - 주요 문서 예시는 `주주명부`, `법인인감증명서`, `등기사항전부증명서`, `사업자등록증`, `법인 KYC 증명서`다.

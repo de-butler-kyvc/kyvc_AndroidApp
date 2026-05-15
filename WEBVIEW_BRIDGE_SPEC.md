@@ -2192,6 +2192,9 @@ Android submit body:
 - 증명서 제출 화면은 `submitDocuments`, `requiredDocuments`, `documents`, `attachmentDocuments` 중 하나의 배열을 받아 제출 문서 목록으로 표시한다. 문서를 누르면 원본 내용은 보여주지 않고 hash/digest 값만 표시한다.
 - 제출 문서 예시는 `주주명부`, `법인인감증명서`, `등기사항전부증명서`, `사업자등록증`, `법인 KYC 증명서`이다.
 - 제출 문서 원본은 API 또는 별도 브릿지로 수신한 뒤 Android 로컬 저장소에 저장해야 한다. 화면 payload에는 원본 bytes/base64를 넣지 않고 `documentId`, `documentType`, `digestSRI/hash`, `mediaType`, `byteSize` 같은 메타만 넣는다.
+- VC 저장 브릿지는 prepare 응답에서 분리된 `documentAttachments`와 `documentAttachmentManifest`를 받을 수 있다. `credentialPayload`는 기존 VC 저장에 사용하고, `documentAttachments[].contentBase64`는 Android 내부 암호화 저장소에 저장한다.
+- Android는 문서 저장 시 `documentId`, `documentType`, `attachmentRef`, `requirementId`, `digestSRI`, `mediaType`, `byteSize`, `fileName`을 로컬 credential과 연결해 보관한다. 원본 bytes/base64는 로그와 화면 payload에 남기지 않는다.
+- VP multipart 제출 시 `attachmentManifest` part에는 prepare 때 받은 manifest를 그대로 보내고, 파일 part name은 반드시 manifest의 `attachmentRef` 값과 같아야 한다.
 - 기존 테스트 페이지 호환을 위해 `requestCredentialIssueConfirm1`, `requestCredentialIssueConfirm2`는 남겨두지만, 둘 다 동일한 발급 확인 화면을 연다. 신규 웹은 `requestCredentialIssueConfirm`을 사용한다.
 - 화면은 PNG 시안을 기준으로 네이티브 Compose에서 재현한다.
 - 민감한 raw SD-JWT, disclosure 원문, seed는 이 화면 요청 payload에 넣지 않는다.
@@ -2246,6 +2249,7 @@ Android submit body:
 - `ok=false`는 네이티브 화면을 닫았거나 브릿지 검증에 실패한 경우로만 본다.
 - VP 로그인 QR native 제출 흐름에서는 별도 credential picker를 띄우지 않는다. `REQUEST_CREDENTIAL_SUBMIT` 화면의 발급기관 드롭다운에서 선택된 `selectedCredentialId`로 presentation을 생성하고 backend submit을 호출한다.
 - QR 스캔 화면은 프레임 내부만 카메라 preview를 표시하고, 프레임 외부는 남색 불투명 배경으로 유지한다.
+- 원본 첨부가 필요한 VP 제출은 JSON API가 아니라 multipart API를 사용한다. Android multipart body는 `presentation`, `attachmentManifest`, `doc-101` 같은 attachmentRef 파일 part로 구성한다.
 
 ## 웹에서 꼭 처리해야 하는 상태값
 

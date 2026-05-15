@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
@@ -1694,6 +1695,11 @@ class WalletBridge(
                 require(entity.holderAccount.isNotBlank()) { "holderAccount is required" }
                 require(entity.credentialType.isNotBlank()) { "credentialType is required" }
                 credentialRepository.insertCredential(entity)
+                val savedDocuments = saveCredentialDocumentAttachments(
+                    request = request,
+                    credentialId = entity.credentialId,
+                    sdJwtJti = normalizedCredential.text("jti") ?: entity.credentialId
+                )
                 logBridgeFlow(
                     "vc.issue.saveVC.saved",
                     mapOf(
@@ -1707,7 +1713,8 @@ class WalletBridge(
                         "format" to entity.format,
                         "hasSdJwt" to !entity.sdJwt.isNullOrBlank(),
                         "hasCredentialJwt" to !entity.vcJwt.isNullOrBlank(),
-                        "hasSelectiveDisclosure" to !entity.selectiveDisclosureJson.isNullOrBlank()
+                        "hasSelectiveDisclosure" to !entity.selectiveDisclosureJson.isNullOrBlank(),
+                        "documentAttachmentsSaved" to savedDocuments
                     )
                 )
                 scope.launch(Dispatchers.Main) {
@@ -1724,6 +1731,7 @@ class WalletBridge(
                         put("format", entity.format)
                         put("hasSdJwt", !entity.sdJwt.isNullOrBlank())
                         put("hasCredentialJwt", !entity.vcJwt.isNullOrBlank())
+                        put("documentAttachmentsSaved", savedDocuments)
                     }
                 }
             } catch (e: Exception) {
@@ -1737,6 +1745,131 @@ class WalletBridge(
                 }
             }
         }
+    }
+
+    private suspend fun saveCredentialDocumentAttachments(
+        request: JsonObject,
+        credentialId: String,
+        sdJwtJti: String?
+    ): Int {
+        val attachments = request.array("documentAttachments")
+            ?: request.obj("data")?.array("documentAttachments")
+            ?: request.obj("prepareResponse")?.obj("data")?.array("documentAttachments")
+            ?: return 0
+        val manifest = request["documentAttachmentManifest"]
+            ?: request.obj("data")?.get("documentAttachmentManifest")
+            ?: request.obj("prepareResponse")?.obj("data")?.get("documentAttachmentManifest")
+        logBridgeFlow(
+            "VC_DOCUMENT_SAVE prepare response received",
+            mapOf(
+                "credentialId" to credentialId,
+                "documentAttachmentsCount" to attachments.size,
+                "manifestAttachmentsCount" to attachmentManifestItems(manifest).size,
+                "attachmentRefs" to attachments.mapNotNull { (it as? JsonObject)?.text("attachmentRef") }.joinToString(",")
+            )
+        )
+        var saved = 0
+        attachments.forEach { element ->
+            val item = element as? JsonObject ?: return@forEach
+            val documentId = item.text("documentId")
+                ?: throw IllegalArgumentException("documentAttachments[].documentId is required")
+            val documentType = item.text("documentType")
+                ?: item.text("documentTypeCode")
+                ?: throw IllegalArgumentException("documentAttachments[].documentType is required")
+            val digestSRI = item.text("digestSRI")
+                ?: throw IllegalArgumentException("documentAttachments[].digestSRI is required")
+            val mediaType = item.text("mediaType") ?: OCTET_STREAM.toString()
+            val contentBase64 = item.text("contentBase64")
+                ?: throw IllegalArgumentException("documentAttachments[].contentBase64 is required")
+            val contentEncoding = item.text("contentEncoding") ?: "base64"
+            require(contentEncoding.equals("base64", ignoreCase = true)) {
+                "documentAttachments[].contentEncoding must be base64"
+            }
+            val rawBytes = decodeBase64Document(contentBase64)
+            val expectedByteSize = item.long("byteSize")
+            val byteSizeMatched = expectedByteSize == null || rawBytes.size.toLong() == expectedByteSize
+            logBridgeFlow(
+                "VC_DOCUMENT_SAVE base64 decoded",
+                mapOf(
+                    "attachmentRef" to item.text("attachmentRef"),
+                    "documentId" to documentId,
+                    "decodedBytes" to rawBytes.size,
+                    "expectedByteSize" to expectedByteSize,
+                    "byteSizeMatched" to byteSizeMatched
+                )
+            )
+            item.long("byteSize")?.let { expectedSize ->
+                require(rawBytes.size.toLong() == expectedSize) {
+                    "document attachment byteSize mismatch: docId=$documentId expected=$expectedSize actual=${rawBytes.size}"
+                }
+            }
+            val recomputed = computeSha384SRI(rawBytes)
+            require(sriEquals(recomputed, digestSRI)) {
+                "document attachment digest mismatch: docId=$documentId"
+            }
+            val storedBlob = secureDocumentStore.encryptAndStore(rawBytes, item.text("fileName") ?: item.text("filename") ?: documentId)
+            logBridgeFlow(
+                "VC_DOCUMENT_SAVE secure store saved",
+                mapOf(
+                    "attachmentRef" to item.text("attachmentRef"),
+                    "documentId" to documentId,
+                    "stored" to true,
+                    "storageKeyExists" to storedBlob.blobPath.isNotBlank()
+                )
+            )
+            val readback = secureDocumentStore.loadDecrypted(storedBlob.blobPath)
+            require(readback.size == rawBytes.size && sriEquals(computeSha384SRI(readback), digestSRI)) {
+                "document attachment readback failed: docId=$documentId"
+            }
+            val metadata = buildJsonObject {
+                item.text("attachmentRef")?.let { put("attachmentRef", it) }
+                item.text("requirementId")?.let { put("requirementId", it) }
+                item.text("documentClass")?.let { put("documentClass", it) }
+                item.text("documentTypeCode")?.let { put("documentTypeCode", it) }
+                item.text("fileName")?.let { put("fileName", it) }
+                manifest?.let { put("documentAttachmentManifest", it) }
+            }
+            holderDocumentRepository.upsert(
+                HolderDocumentEntity(
+                    documentId = documentId,
+                    documentType = documentType,
+                    digestSRI = normalizeSri(digestSRI),
+                    mediaType = mediaType,
+                    byteSize = rawBytes.size.toLong(),
+                    hashInput = item.text("hashInput") ?: "original-file-bytes",
+                    encryptedBlobPath = storedBlob.blobPath,
+                    originalFilename = storedBlob.originalFilename,
+                    createdAt = nowUtcIso(),
+                    importedAt = nowUtcIso(),
+                    credentialId = credentialId,
+                    sdJwtJti = sdJwtJti,
+                    evidenceForJson = metadata.toString()
+                )
+            )
+            logBridgeFlow(
+                "VC_DOCUMENT_SAVE readback verified",
+                mapOf(
+                    "attachmentRef" to item.text("attachmentRef"),
+                    "documentId" to documentId,
+                    "readable" to true,
+                    "readBytes" to readback.size,
+                    "byteSizeMatched" to (readback.size == rawBytes.size)
+                )
+            )
+            saved += 1
+        }
+        val storedDocuments = holderDocumentRepository.findAllByCredentialId(credentialId)
+        logBridgeFlow(
+            "VC_DOCUMENT_SAVE local metadata saved",
+            mapOf(
+                "credentialId" to credentialId,
+                "documentCount" to storedDocuments.size,
+                "attachmentRefs" to storedDocuments.mapNotNull { it.attachmentRefFromMetadata() }.joinToString(","),
+                "allLinkedToCredential" to storedDocuments.all { it.credentialId == credentialId },
+                "manifestSaved" to (manifest != null)
+            )
+        )
+        return saved
     }
 
     @JavascriptInterface
@@ -3000,10 +3133,22 @@ class WalletBridge(
                     if (requireStatus) {
                         requireActiveCredentialStatus(vcObject, walletState)
                     }
-                    val attachmentManifestInput = presentation["attachmentManifest"] as? JsonArray ?: JsonArray(emptyList())
-                    val attachmentPlan = prepareAttachmentSubmission(attachmentManifestInput)
+                    val attachmentManifestInput = presentation["attachmentManifest"]
+                    val attachmentManifestArray = attachmentManifestItems(attachmentManifestInput)
+                    val attachmentPlan = prepareAttachmentSubmission(attachmentManifestArray, attachmentManifestInput)
                     if (attachmentPlan.blockers.isNotEmpty()) {
                         throw IllegalStateException("document attachment required but unavailable: ${attachmentPlan.blockers.joinToString("; ")}")
+                    }
+                    if (attachmentPlan.attachments.isNotEmpty()) {
+                        logBridgeFlow(
+                            "VP_ATTACH_SUBMIT multipart prepared",
+                            mapOf(
+                                "manifestLoaded" to (attachmentManifestInput != null),
+                                "filePartsCount" to attachmentPlan.attachments.size,
+                                "partNames" to attachmentPlan.attachments.joinToString(",") { it.attachmentRef },
+                                "allFilesReadable" to true
+                            )
+                        )
                     }
                     val requestBody = buildJsonObject {
                         put("format", "kyvc-sd-jwt-presentation-v1")
@@ -3038,6 +3183,7 @@ class WalletBridge(
                         postMultipart(
                             endpoint = endpoint,
                             presentationPayload = requestBody,
+                            attachmentManifestPayload = attachmentPlan.manifestPayload,
                             attachments = attachmentPlan.attachments
                         )
                     }
@@ -4110,6 +4256,7 @@ class WalletBridge(
                 put("domain", aud)
                 put("aud", aud)
                 put("presentationDefinition", resolveResponse.presentationDefinition)
+                put("requiredDisclosures", JsonArray(resolveResponse.requiredDisclosures.map { JsonPrimitive(it) }))
             }
             val presentationResult = buildVpLoginPresentationObject(presentationRequest)
             logVpLoginCredentialPayloadMeta(
@@ -4165,6 +4312,9 @@ class WalletBridge(
         val presentationDefinition = data.optJSONObject("presentationDefinition")
             ?.let { Json.parseToJsonElement(it.toString()).jsonObject }
             ?: defaultSdJwtPresentationDefinition()
+        val requiredDisclosures = data.optJSONArray("requiredDisclosures")?.toStringList()
+            ?: data.optJSONObject("presentationDefinition")?.optJSONArray("requiredDisclosures")?.toStringList()
+            ?: emptyList()
         return VpLoginResolveData(
             requestId = data.optString("requestId"),
             nonce = data.optString("nonce"),
@@ -4172,7 +4322,8 @@ class WalletBridge(
             aud = data.optString("aud"),
             domain = data.optString("domain"),
             expiresAt = data.optString("expiresAt"),
-            presentationDefinition = presentationDefinition
+            presentationDefinition = presentationDefinition,
+            requiredDisclosures = requiredDisclosures
         )
     }
 
@@ -4202,6 +4353,7 @@ class WalletBridge(
         pendingVpLoginSubmitReviewRequestId = reviewRequestId
         pendingVpLoginSubmitReview = deferred
         val selectedCredential = credentials.first()
+        val submitDocuments = credentialSubmitDocumentPayload(selectedCredential.credentialId)
         val payload = buildJsonObject {
             put("action", "REQUEST_CREDENTIAL_SUBMIT")
             put("requestId", reviewRequestId)
@@ -4226,7 +4378,7 @@ class WalletBridge(
                     }
                 )
             )
-            put("submitDocuments", defaultSubmitDocumentPayload())
+            put("submitDocuments", submitDocuments)
         }
         withContext(Dispatchers.Main) {
             launchCredentialNativeScreen("credentialSubmit", payload.toString())
@@ -4259,26 +4411,39 @@ class WalletBridge(
         }
     }
 
-    private fun defaultSubmitDocumentPayload(): JsonArray {
-        val documents = listOf(
-            Triple("shareholder-list", "SHAREHOLDER_LIST", "주주명부"),
-            Triple("corporate-seal-certificate", "CORPORATE_SEAL_CERTIFICATE", "법인인감증명서"),
-            Triple("registry-certificate", "CORPORATE_REGISTRY_CERTIFICATE", "등기사항전부증명서"),
-            Triple("business-registration", "BUSINESS_REGISTRATION_CERTIFICATE", "사업자등록증"),
-            Triple("kyc-credential", "LEGAL_ENTITY_KYC_CREDENTIAL", "법인 KYC 증명서")
-        )
+    private suspend fun credentialSubmitDocumentPayload(credentialId: String): JsonArray {
+        val documents = holderDocumentRepository.findAllByCredentialId(credentialId)
         return JsonArray(
-            documents.map { (documentId, documentType, title) ->
+            documents.map { document ->
                 buildJsonObject {
-                    put("documentId", documentId)
-                    put("documentType", documentType)
-                    put("title", title)
-                    put("digestSRI", "-")
+                    put("documentId", document.documentId)
+                    put("documentType", document.documentType)
+                    put("title", document.documentType.documentTypeLabel())
+                    put("digestSRI", document.digestSRI)
+                    put("mediaType", document.mediaType)
+                    put("byteSize", document.byteSize)
+                    put("fileName", document.originalFilename)
+                    document.attachmentRefFromMetadata()?.let { put("attachmentRef", it) }
+                    document.requirementIdFromMetadata()?.let { put("requirementId", it) }
                     put("required", true)
                     put("selected", true)
                 }
             }
         )
+    }
+
+    private fun String.documentTypeLabel(): String {
+        return when (this) {
+            "SHAREHOLDER_LIST" -> "주주명부"
+            "CORPORATE_SEAL_CERTIFICATE" -> "법인인감증명서"
+            "CORPORATE_REGISTRY_CERTIFICATE",
+            "KR_CORPORATE_REGISTER_FULL_CERTIFICATE",
+            "CORPORATE_REGISTER" -> "등기사항전부증명서"
+            "BUSINESS_REGISTRATION_CERTIFICATE" -> "사업자등록증"
+            "LEGAL_ENTITY_KYC_CREDENTIAL",
+            "KYC_CREDENTIAL" -> "법인 KYC 증명서"
+            else -> this
+        }
     }
 
     private suspend fun buildVpLoginPresentationObject(request: JsonObject): VpLoginPresentationResult {
@@ -4671,9 +4836,10 @@ class WalletBridge(
                 blockers.add("digest mismatch for ${evidence.documentId}")
                 return@forEachIndexed
             }
-            val ref = "doc-${UUID.randomUUID().toString().replace("-", "").take(12)}"
+            val ref = matched.attachmentRefFromMetadata()
+                ?: "doc-${UUID.randomUUID().toString().replace("-", "").take(12)}"
             attachments += AttachmentFileRef(
-                requirementId = requirementId,
+                requirementId = matched.requirementIdFromMetadata() ?: requirementId,
                 attachmentRef = ref,
                 documentId = evidence.documentId,
                 documentType = evidence.documentType,
@@ -4692,7 +4858,10 @@ class WalletBridge(
         return AttachmentPlan(attachments = attachments, blockers = blockers)
     }
 
-    private suspend fun prepareAttachmentSubmission(attachmentManifestInput: JsonArray): PreparedAttachmentSubmission {
+    private suspend fun prepareAttachmentSubmission(
+        attachmentManifestInput: JsonArray,
+        rawManifestPayload: JsonElement?
+    ): PreparedAttachmentSubmission {
         val blockers = mutableListOf<String>()
         val attachments = mutableListOf<AttachmentFileRef>()
         attachmentManifestInput.forEach { entry ->
@@ -4758,7 +4927,8 @@ class WalletBridge(
                         put("byteSize", attachment.byteSize)
                     }
                 }
-            )
+            ),
+            manifestPayload = rawManifestPayload ?: JsonArray(emptyList())
         )
     }
 
@@ -4783,6 +4953,31 @@ class WalletBridge(
             collectDocumentEvidence(value, output)
         }
         return output.distinctBy { "${it.documentId}|${it.documentType}|${normalizeSri(it.digestSRI)}" }
+    }
+
+    private fun attachmentManifestItems(manifest: JsonElement?): JsonArray {
+        return when (manifest) {
+            is JsonArray -> manifest
+            is JsonObject -> manifest.array("attachments") ?: JsonArray(emptyList())
+            else -> JsonArray(emptyList())
+        }
+    }
+
+    private fun HolderDocumentEntity.attachmentRefFromMetadata(): String? {
+        return holderDocumentMetadata().text("attachmentRef")
+    }
+
+    private fun HolderDocumentEntity.requirementIdFromMetadata(): String? {
+        return holderDocumentMetadata().text("requirementId")
+    }
+
+    private fun HolderDocumentEntity.holderDocumentMetadata(): JsonObject {
+        return runCatching { Json.parseToJsonElement(evidenceForJson).jsonObject }.getOrNull()
+            ?: buildJsonObject { }
+    }
+
+    private fun decodeBase64Document(value: String): ByteArray {
+        return Base64.decode(value, Base64.DEFAULT)
     }
 
     private fun collectDocumentEvidence(element: kotlinx.serialization.json.JsonElement, out: MutableList<DocumentEvidenceClaim>) {
@@ -4836,11 +5031,13 @@ class WalletBridge(
     private fun postMultipart(
         endpoint: String,
         presentationPayload: JsonObject,
+        attachmentManifestPayload: JsonElement,
         attachments: List<AttachmentFileRef>
     ): String {
         val url = endpoint.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid Verifier endpoint: $endpoint")
         val builder = MultipartBody.Builder().setType(MultipartBody.FORM)
         builder.addFormDataPart("presentation", presentationPayload.toString())
+        builder.addFormDataPart("attachmentManifest", attachmentManifestPayload.toString())
         attachments.forEach { attachment ->
             val decrypted = secureDocumentStore.loadDecrypted(attachment.sourceEntity.encryptedBlobPath)
             val tempFile = File.createTempFile("kyvc-upload-", ".bin", context.cacheDir).apply {
@@ -4901,6 +5098,14 @@ class WalletBridge(
 
     private fun JsonObject.array(name: String): JsonArray? {
         return this[name] as? JsonArray
+    }
+
+    private fun org.json.JSONArray.toStringList(): List<String> {
+        return buildList {
+            for (index in 0 until length()) {
+                optString(index).takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.putDidDocumentFromCore(
@@ -5755,9 +5960,70 @@ class WalletBridge(
     }
 
     private fun selectedSdJwtDisclosures(request: JsonObject, allDisclosures: List<String>): List<String> {
-        val selected = request["selectedDisclosures"] as? JsonArray ?: return allDisclosures
-        val values = selected.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
-        return if (values.isEmpty()) allDisclosures else values
+        val selectedValues = request.array("selectedDisclosures")
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
+            .orEmpty()
+        val requiredPaths = (
+            request.array("requiredDisclosures")
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
+                .orEmpty() +
+                request.obj("presentationDefinition")
+                    ?.array("requiredDisclosures")
+                    ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
+                    .orEmpty()
+            ).distinct()
+        val explicitDisclosures = selectedValues.filter { isSdJwtDisclosureString(it) }
+        val selectedPaths = (requiredPaths + selectedValues.filterNot { isSdJwtDisclosureString(it) }).distinct()
+        if (explicitDisclosures.isEmpty() && selectedPaths.isEmpty()) return allDisclosures
+
+        val byPath = if (selectedPaths.isEmpty()) {
+            emptyList()
+        } else {
+            allDisclosures.filter { disclosure ->
+                disclosureMatchesAnyPath(disclosure, selectedPaths)
+            }
+        }
+        val output = (explicitDisclosures + byPath).distinct()
+        val missing = selectedPaths.filterNot { path ->
+            output.any { disclosure -> disclosureMatchesAnyPath(disclosure, listOf(path)) }
+        }
+        if (missing.isNotEmpty()) {
+            logBridgeFlow(
+                "vp.login.requiredDisclosure.unmatched",
+                mapOf(
+                    "paths" to missing.joinToString(","),
+                    "availableDisclosureCount" to allDisclosures.size
+                )
+            )
+        }
+        logBridgeFlow(
+            "vp.login.requiredDisclosure.selected",
+            mapOf(
+                "requiredPaths" to requiredPaths.joinToString(","),
+                "selectedPathCount" to selectedPaths.size,
+                "selectedDisclosureCount" to output.size,
+                "legalEntityNameIncluded" to output.any { disclosureMatchesAnyPath(it, listOf("legalEntity.name")) },
+                "legalEntityRegistrationNumberIncluded" to output.any { disclosureMatchesAnyPath(it, listOf("legalEntity.registrationNumber")) }
+            )
+        )
+        return output.ifEmpty { allDisclosures }
+    }
+
+    private fun isSdJwtDisclosureString(value: String): Boolean {
+        return runCatching {
+            Json.parseToJsonElement(decodeBase64UrlToString(value)) is JsonArray
+        }.getOrDefault(false)
+    }
+
+    private fun disclosureMatchesAnyPath(disclosure: String, paths: List<String>): Boolean {
+        val decoded = runCatching { Json.parseToJsonElement(decodeBase64UrlToString(disclosure)) as? JsonArray }.getOrNull()
+            ?: return false
+        val key = (decoded.getOrNull(1) as? JsonPrimitive)?.contentOrNull ?: return false
+        return paths.any { path ->
+            val normalized = path.removePrefix("$.").replace("/", ".").replace("[]", "")
+            val parts = normalized.split(".").filter { it.isNotBlank() }
+            key == parts.lastOrNull() || key in parts.dropLast(1)
+        }
     }
 
     private fun buildSelectedSdJwt(issuerJwt: String, disclosures: List<String>): String {
@@ -5816,7 +6082,8 @@ class WalletBridge(
         val aud: String,
         val domain: String,
         val expiresAt: String,
-        val presentationDefinition: JsonObject
+        val presentationDefinition: JsonObject,
+        val requiredDisclosures: List<String>
     )
 
     private fun nowUtcIso(): String {
@@ -6113,7 +6380,8 @@ class WalletBridge(
     private data class PreparedAttachmentSubmission(
         val attachments: List<AttachmentFileRef>,
         val blockers: List<String>,
-        val manifestJson: JsonArray
+        val manifestJson: JsonArray,
+        val manifestPayload: JsonElement
     )
 
     private data class QrRequestInfo(

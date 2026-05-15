@@ -1916,12 +1916,105 @@ private data class CredentialUiData(
                 }
                 return current.childText(parts.last())
             }
+            fun deepPathText(path: String): String? {
+                val root = json ?: return null
+                val candidatePaths = buildList {
+                    add(path)
+                    add("data.$path")
+                    add("offer.$path")
+                    add("credentialOffer.$path")
+                    add("credentialPayload.$path")
+                    add("credentialPayload.metadata.$path")
+                    add("credentialPayload.credential.$path")
+                    add("credentialPayload.credential.claims.$path")
+                    add("credentialPayload.credential.credentialSubject.$path")
+                    add("credential.$path")
+                    add("credential.claims.$path")
+                    add("credential.credentialSubject.$path")
+                    add("claims.$path")
+                    add("credentialSubject.$path")
+                    add("metadata.$path")
+                }
+                return candidatePaths.firstNotNullOfOrNull { candidate ->
+                    val parts = candidate.split(".")
+                    var current: JSONObject = root
+                    parts.dropLast(1).forEach { part ->
+                        current = current.childObject(part) ?: return@firstNotNullOfOrNull null
+                    }
+                    current.childText(parts.last())
+                }
+            }
+            fun deepPathValue(path: String): Any? {
+                val root = json ?: return null
+                val candidatePaths = buildList {
+                    add(path)
+                    add("data.$path")
+                    add("offer.$path")
+                    add("credentialOffer.$path")
+                    add("credentialPayload.$path")
+                    add("credentialPayload.metadata.$path")
+                    add("credentialPayload.credential.$path")
+                    add("credentialPayload.credential.claims.$path")
+                    add("credentialPayload.credential.credentialSubject.$path")
+                    add("credential.$path")
+                    add("credential.claims.$path")
+                    add("credential.credentialSubject.$path")
+                    add("claims.$path")
+                    add("credentialSubject.$path")
+                    add("metadata.$path")
+                }
+                return candidatePaths.firstNotNullOfOrNull { candidate ->
+                    val parts = candidate.split(".")
+                    var current: JSONObject = root
+                    parts.dropLast(1).forEach { part ->
+                        current = current.childObject(part) ?: return@firstNotNullOfOrNull null
+                    }
+                    current.opt(parts.last())?.takeUnless { it == JSONObject.NULL }
+                }
+            }
+            fun deepObjectText(path: String): String? {
+                return when (val value = deepPathValue(path)) {
+                    is JSONObject -> value.toString()
+                    is JSONArray -> value.toString()
+                    is String -> value.takeIf { it.isNotBlank() }
+                    else -> value?.toString()?.takeIf { it.isNotBlank() }
+                }
+            }
+            val sdJwtClaimMap = linkedMapOf<String, String>().apply {
+                val sdJwt = listOf(
+                    "sdJwt",
+                    "sd_jwt",
+                    "credentialPayload.sdJwt",
+                    "credentialPayload.credentialJwt",
+                    "data.credentialPayload.sdJwt",
+                    "data.credentialPayload.credentialJwt",
+                    "credentialPayload.credential",
+                    "credential"
+                ).firstNotNullOfOrNull { path ->
+                    deepObjectText(path)?.takeIf { it.contains("~") }
+                }
+                val selectiveDisclosure = listOf(
+                    "selectiveDisclosure",
+                    "credentialPayload.selectiveDisclosure",
+                    "data.credentialPayload.selectiveDisclosure"
+                ).firstNotNullOfOrNull { path ->
+                    deepObjectText(path)
+                }
+                sdJwt?.let { addSdJwtCredentialClaims(this, it, selectiveDisclosure?.let(::extractDisclosablePaths).orEmpty()) }
+            }
+            fun claimText(vararg keys: String): String? {
+                return keys.firstNotNullOfOrNull { key ->
+                    sdJwtClaimMap[key]
+                        ?: sdJwtClaimMap["claims.$key"]
+                        ?: sdJwtClaimMap["credentialSubject.$key"]
+                }?.takeIf { it.isNotBlank() }
+            }
             fun firstText(fallback: String, vararg names: String): String {
                 return names.firstNotNullOfOrNull { name ->
                     if (name.contains(".")) {
-                        pathText(name)
+                        deepPathText(name) ?: claimText(name)
                     } else {
-                        json?.optString(name)?.takeIf { it.isNotBlank() }
+                        json?.optString(name)?.takeIf { it.isNotBlank() } ?: deepPathText(name) ?: claimText(name)
                     }
                 } ?: fallback
             }
@@ -1967,7 +2060,7 @@ private data class CredentialUiData(
             }
             fun parseSubmitDocuments(): List<SubmitDocumentItem> {
                 val documents = firstArray("submitDocuments", "requiredDocuments", "documents", "attachmentDocuments")
-                    ?: return defaultSubmitDocuments()
+                    ?: return emptyList()
                 return buildList {
                     for (index in 0 until documents.length()) {
                         val item = documents.optJSONObject(index) ?: continue
@@ -1994,7 +2087,7 @@ private data class CredentialUiData(
                             )
                         )
                     }
-                }.ifEmpty { defaultSubmitDocuments() }
+                }
             }
             val fallbackHolderDid = text("holderDid", text("did", "did:xrpl:1:rHolder..."))
             val rawIssuedAt = firstText(
@@ -2030,9 +2123,9 @@ private data class CredentialUiData(
                 requesterName = text("requesterName", "-"),
                 credentialTitle = text("credentialTitle", "법인 kyc 증명서"),
                 submitCredentialTitle = text("submitCredentialTitle", "법인 KYC 증명서"),
-                holderName = firstText("-", "holderName", "corporateName", "companyName", "businessName", "legalEntity.name"),
-                registrationNumber = firstText("-", "registrationNumber", "businessNumber", "businessRegistrationNumber", "corporateRegistrationNumber", "legalEntity.registrationNumber", "legalEntity.businessRegistrationNumber"),
-                companyType = firstText("-", "companyType", "corporateType", "legalEntityType", "legalEntity.type", "claims.legalEntity.type", "credentialSubject.legalEntity.type", "legalEntity.companyType", "legalEntity.corporateType"),
+                holderName = firstText("-", "legalEntity.name", "holderName", "corporateName", "companyName", "businessName", "legalEntity.corporateName"),
+                registrationNumber = firstText("-", "legalEntity.registrationNumber", "legalEntity.businessRegistrationNumber", "registrationNumber", "businessNumber", "businessRegistrationNumber", "corporateRegistrationNumber"),
+                companyType = claimDisplayValue("legalEntity.type", firstText("-", "companyType", "corporateType", "legalEntityType", "legalEntity.type", "claims.legalEntity.type", "credentialSubject.legalEntity.type", "legalEntity.companyType", "legalEntity.corporateType")),
                 establishedAt = firstText("-", "establishedAt", "establishmentDate", "foundedAt", "legalEntity.establishedAt", "claims.legalEntity.establishedAt", "credentialSubject.legalEntity.establishedAt", "legalEntity.establishmentDate", "legalEntity.foundedAt"),
                 representativeName = firstText("-", "representativeName", "ceoName", "legalRepresentativeName", "representative.name", "claims.representative.name", "credentialSubject.representative.name", "representative.fullName", "legalRepresentative.name"),
                 beneficialOwnerName = firstText("-", "beneficialOwnerName", "beneficialOwner", "ownerName", "beneficialOwner.name", "beneficialOwner.fullName", "beneficialOwners[].name", "beneficialOwners[0].name", "claims.beneficialOwners[].name", "claims.beneficialOwners[0].name", "credentialSubject.beneficialOwners[].name", "credentialSubject.beneficialOwners[0].name", "beneficialOwners[].fullName", "beneficialOwners[0].fullName"),
@@ -2057,13 +2150,7 @@ private data class CredentialUiData(
         }
 
         fun defaultSubmitDocuments(): List<SubmitDocumentItem> {
-            return listOf(
-                SubmitDocumentItem("shareholder-list", "주주명부", "SHAREHOLDER_LIST", "-", required = true, selected = true),
-                SubmitDocumentItem("corporate-seal-certificate", "법인인감증명서", "CORPORATE_SEAL_CERTIFICATE", "-", required = true, selected = true),
-                SubmitDocumentItem("registry-certificate", "등기사항전부증명서", "CORPORATE_REGISTRY_CERTIFICATE", "-", required = true, selected = true),
-                SubmitDocumentItem("business-registration", "사업자등록증", "BUSINESS_REGISTRATION_CERTIFICATE", "-", required = true, selected = true),
-                SubmitDocumentItem("kyc-credential", "법인 KYC 증명서", "LEGAL_ENTITY_KYC_CREDENTIAL", "-", required = true, selected = true)
-            )
+            return emptyList()
         }
     }
 }
@@ -2408,7 +2495,7 @@ private fun CredentialSubmitScreen(
         listOf(SubmitIssuerOption("default", data.issuerName, data.credentialId, true))
     }
     val submitDocuments = data.submitDocuments.ifEmpty {
-        CredentialUiData.defaultSubmitDocuments()
+        emptyList()
     }
     var selectedIssuerId by remember(data) {
         mutableStateOf(issuerOptions.firstOrNull { it.selected }?.issuerId ?: issuerOptions.first().issuerId)

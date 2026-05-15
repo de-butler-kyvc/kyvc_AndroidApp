@@ -340,6 +340,8 @@ docs(-): Android 앱 README 구조 정리
 - VP 로그인 QR 제출에서는 별도 Credential 선택 화면을 띄우지 않고, 증명서 제출 화면의 발급기관 드롭다운 선택값을 제출 credential로 사용합니다.
 - 같은 발급기관의 credential 후보가 여러 개면 Android는 제출 후보를 최신 1개로 정리해 표시합니다.
 - QR 스캔 화면은 스캔 프레임 내부만 카메라를 표시하고 나머지 영역은 KYvC 톤의 남색 불투명 배경으로 처리합니다.
+- VC 저장 시 prepare 응답의 `documentAttachments`를 base64 decode 후 암호화 저장하고, `documentAttachmentManifest`의 `attachmentRef`를 VP multipart 제출에 재사용합니다.
+- multipart VP 제출은 `presentation`, `attachmentManifest`, `attachmentRef` 이름의 파일 part를 전송합니다.
 
 ## 11. 제출/발급 디버깅 기준
 

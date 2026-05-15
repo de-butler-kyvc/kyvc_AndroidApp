@@ -98,6 +98,33 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL("DROP TABLE credentials")
                 db.execSQL("ALTER TABLE credentials_new RENAME TO credentials")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS holder_documents (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        documentId TEXT NOT NULL,
+                        documentType TEXT NOT NULL,
+                        digestSRI TEXT NOT NULL,
+                        mediaType TEXT NOT NULL,
+                        byteSize INTEGER NOT NULL,
+                        hashInput TEXT NOT NULL,
+                        encryptedBlobPath TEXT NOT NULL,
+                        originalFilename TEXT NOT NULL,
+                        createdAt TEXT NOT NULL,
+                        importedAt TEXT NOT NULL,
+                        credentialId TEXT,
+                        sdJwtJti TEXT,
+                        evidenceForJson TEXT NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_holder_documents_documentId ON holder_documents (documentId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_holder_documents_credentialId ON holder_documents (credentialId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_holder_documents_sdJwtJti ON holder_documents (sdJwtJti)")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_holder_documents_documentType_digestSRI " +
+                        "ON holder_documents (documentType, digestSRI)"
+                )
             }
         }
     }

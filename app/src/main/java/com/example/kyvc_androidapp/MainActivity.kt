@@ -1535,10 +1535,17 @@ private fun addSdJwtCredentialClaims(
 ) {
     val parts = sdJwt.split("~").filter { it.isNotBlank() }
     parts.firstOrNull()?.let { issuerJwt -> addJwtCredentialClaims(claims, issuerJwt) }
+    val issuerPayload = parts.firstOrNull()?.let(::decodeJwtPayloadJson)
+    val disclosuresByDigest = parts.drop(1)
+        .mapNotNull { disclosure -> decodeJsonDisclosure(disclosure) }
+        .associateBy { it.digest }
+    issuerPayload?.let { payload ->
+        collectSdJwtPayloadDisclosureClaims(payload, "", disclosuresByDigest, claims)
+    }
     val usedDisclosurePaths = mutableSetOf<String>()
     parts.drop(1).forEachIndexed { index, disclosure ->
         val array = decodeBase64JsonArray(disclosure) ?: return@forEachIndexed
-        if (array.length() >= 3) {
+        if (array.length() >= 3 && array.opt(1) is String) {
             val leafKey = array.optString(1).takeIf { it.isNotBlank() } ?: return@forEachIndexed
             val indexedPath = disclosurePaths.getOrNull(index)
                 ?.takeIf { path -> path.substringAfterLast(".") == leafKey || path.endsWith("[].$leafKey") }
@@ -1550,6 +1557,105 @@ private fun addSdJwtCredentialClaims(
             val key = matchedPath ?: "disclosure[$index].$leafKey"
             putClaimValue(claims, key, array.opt(2))
         }
+    }
+}
+
+private data class DecodedJsonDisclosure(
+    val digest: String,
+    val key: String?,
+    val value: Any?
+)
+
+private fun decodeJsonDisclosure(disclosure: String): DecodedJsonDisclosure? {
+    val array = decodeBase64JsonArray(disclosure) ?: return null
+    if (array.length() < 2) return null
+    val key = if (array.length() >= 3 && array.opt(1) is String) array.optString(1).takeIf { it.isNotBlank() } else null
+    val value = if (key == null) array.opt(1) else array.opt(2)
+    return DecodedJsonDisclosure(
+        digest = sdDisclosureDigest(disclosure),
+        key = key,
+        value = value
+    )
+}
+
+private fun collectSdJwtPayloadDisclosureClaims(
+    value: Any?,
+    prefix: String,
+    disclosuresByDigest: Map<String, DecodedJsonDisclosure>,
+    claims: MutableMap<String, String>
+) {
+    when (value) {
+        is JSONObject -> {
+            value.optJSONArray("_sd")?.let { sdArray ->
+                for (index in 0 until sdArray.length()) {
+                    val disclosure = disclosuresByDigest[sdArray.optString(index)] ?: continue
+                    val key = disclosure.key ?: continue
+                    val path = if (prefix.isBlank()) key else "$prefix.$key"
+                    collectSdJwtDisclosureValueClaims(disclosure.value, path, disclosuresByDigest, claims)
+                }
+            }
+            val arrayDisclosure = value.optString("...").takeIf { it.isNotBlank() }?.let(disclosuresByDigest::get)
+            if (arrayDisclosure != null && prefix.isNotBlank()) {
+                collectSdJwtDisclosureValueClaims(arrayDisclosure.value, prefix, disclosuresByDigest, claims)
+            }
+            value.keys().forEach { key ->
+                if (key == "_sd" || key == "_sd_alg" || key == "...") return@forEach
+                val path = if (prefix.isBlank()) key else "$prefix.$key"
+                collectSdJwtPayloadDisclosureClaims(value.opt(key), path, disclosuresByDigest, claims)
+            }
+        }
+        is JSONArray -> {
+            for (index in 0 until value.length()) {
+                val item = value.opt(index)
+                val path = when (item) {
+                    is JSONObject, is JSONArray -> "$prefix[$index]"
+                    else -> prefix
+                }
+                collectSdJwtPayloadDisclosureClaims(item, path, disclosuresByDigest, claims)
+            }
+        }
+    }
+}
+
+private fun collectSdJwtDisclosureValueClaims(
+    value: Any?,
+    path: String,
+    disclosuresByDigest: Map<String, DecodedJsonDisclosure>,
+    claims: MutableMap<String, String>
+) {
+    when (value) {
+        null, JSONObject.NULL -> Unit
+        is JSONObject -> {
+            value.optJSONArray("_sd")?.let { sdArray ->
+                for (index in 0 until sdArray.length()) {
+                    val disclosure = disclosuresByDigest[sdArray.optString(index)] ?: continue
+                    val key = disclosure.key ?: continue
+                    collectSdJwtDisclosureValueClaims(disclosure.value, "$path.$key", disclosuresByDigest, claims)
+                }
+            }
+            val arrayDisclosure = value.optString("...").takeIf { it.isNotBlank() }?.let(disclosuresByDigest::get)
+            if (arrayDisclosure != null) {
+                collectSdJwtDisclosureValueClaims(arrayDisclosure.value, path, disclosuresByDigest, claims)
+            }
+            value.keys().forEach { key ->
+                if (key == "_sd" || key == "_sd_alg" || key == "...") return@forEach
+                collectSdJwtDisclosureValueClaims(value.opt(key), "$path.$key", disclosuresByDigest, claims)
+            }
+        }
+        is JSONArray -> {
+            if (value.length() == 0) {
+                claims.putIfAbsent(path, "[]")
+            }
+            for (index in 0 until value.length()) {
+                val item = value.opt(index)
+                val itemPath = when (item) {
+                    is JSONObject, is JSONArray -> "$path[$index]"
+                    else -> path
+                }
+                collectSdJwtDisclosureValueClaims(item, itemPath, disclosuresByDigest, claims)
+            }
+        }
+        else -> claims.putIfAbsent(path, value.toString())
     }
 }
 
@@ -1579,7 +1685,7 @@ private fun flattenJsonClaims(
     claims: MutableMap<String, String>
 ) {
     json.keys().forEach { key ->
-        if (key.startsWith("_sd") || key in CLAIM_METADATA_KEYS) return@forEach
+        if (key == "..." || key.startsWith("_sd") || key in CLAIM_METADATA_KEYS) return@forEach
         val path = if (prefix.isBlank()) key else "$prefix.$key"
         putClaimValue(claims, path, json.opt(key))
     }
@@ -1619,6 +1725,12 @@ private fun decodeBase64Url(value: String): String {
     return String(Base64.decode(normalized, Base64.URL_SAFE or Base64.NO_WRAP), Charsets.UTF_8)
 }
 
+private fun sdDisclosureDigest(disclosure: String): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(disclosure.toByteArray(Charsets.US_ASCII))
+    return Base64.encodeToString(digest, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+}
+
 private fun claimIcon(index: Int, key: String): String {
     return when {
         key in COMMON_META_CLAIM_LABELS -> "M"
@@ -1647,10 +1759,28 @@ private fun claimDisplayLabel(key: String): String {
     }
 }
 
+private fun claimGroupLabel(key: String): String {
+    val normalized = normalizeClaimKey(key)
+    return when {
+        normalized.startsWith("kyc.") -> "KYC 정보"
+        normalized.startsWith("legalEntity.") -> "법인 정보"
+        normalized.startsWith("representative.") -> "대표자 정보"
+        normalized.startsWith("beneficialOwners") -> "실소유자 정보"
+        normalized.startsWith("delegate.") || normalized.startsWith("delegation.") -> "대리인/위임 정보"
+        normalized.startsWith("establishmentPurpose.") -> "설립목적 정보"
+        normalized.startsWith("documentEvidence") -> "문서 증빙 정보"
+        normalized.startsWith("extra.") -> "추가 심사 정보"
+        else -> "기타 정보"
+    }
+}
+
 private fun claimDisplayValue(key: String, value: String): String {
     val normalized = normalizeClaimKey(key)
     return when (normalized) {
         "legalEntity.type" -> LEGAL_ENTITY_TYPE_LABELS[value] ?: value
+        "kyc.assuranceLevel" -> ASSURANCE_LEVEL_LABELS[value] ?: value
+        "documentEvidence[].documentType" -> DOCUMENT_TYPE_LABELS[value] ?: value
+        "documentEvidence[].documentClass" -> DOCUMENT_CLASS_LABELS[value] ?: value
         "legalEntity.nonProfit",
         "legalEntity.purposeCheckRequired",
         "delegation.kycApplication",
@@ -1659,6 +1789,13 @@ private fun claimDisplayValue(key: String, value: String): String {
         "establishmentPurpose.checked" -> booleanDisplayValue(value)
         else -> value
     }
+}
+
+private fun documentDisplayTitle(rawTitle: String, documentType: String, index: Int): String {
+    val typeLabel = DOCUMENT_TYPE_LABELS[documentType]
+    val fallback = "제출 문서 ${index + 1}"
+    val title = rawTitle.ifBlank { typeLabel ?: documentType.ifBlank { fallback } }
+    return if (title == documentType && !typeLabel.isNullOrBlank()) typeLabel else title
 }
 
 private fun booleanDisplayValue(value: String): String {
@@ -1826,6 +1963,34 @@ private val LEGAL_ENTITY_TYPE_LABELS = mapOf(
     "FOREIGN_COMPANY" to "외국회사"
 )
 
+private val ASSURANCE_LEVEL_LABELS = mapOf(
+    "STANDARD" to "표준",
+    "ENHANCED" to "강화",
+    "HIGH" to "고수준"
+)
+
+private val DOCUMENT_CLASS_LABELS = mapOf(
+    "ORIGINAL" to "원본",
+    "SUPPORTING" to "증빙",
+    "SYSTEM_GENERATED" to "시스템 생성",
+    "EXTRACTED" to "추출 데이터"
+)
+
+private val DOCUMENT_TYPE_LABELS = mapOf(
+    "SHAREHOLDER_LIST" to "주주명부",
+    "KR_SHAREHOLDER_REGISTER" to "주주명부",
+    "CORPORATE_SEAL_CERTIFICATE" to "법인인감증명서",
+    "KR_CORPORATE_SEAL_CERTIFICATE" to "법인인감증명서",
+    "KR_SEAL_CERTIFICATE" to "법인인감증명서",
+    "CORPORATE_REGISTRY_CERTIFICATE" to "등기사항전부증명서",
+    "KR_CORPORATE_REGISTER_FULL_CERTIFICATE" to "등기사항전부증명서",
+    "CORPORATE_REGISTER" to "등기사항전부증명서",
+    "BUSINESS_REGISTRATION_CERTIFICATE" to "사업자등록증",
+    "KR_BUSINESS_REGISTRATION_CERTIFICATE" to "사업자등록증",
+    "LEGAL_ENTITY_KYC_CREDENTIAL" to "법인 KYC 증명서",
+    "KYC_CREDENTIAL" to "법인 KYC 증명서"
+)
+
 private fun JSONObject.childObject(pathPart: String): JSONObject? {
     val arrayMarkerIndex = pathPart.indexOf('[')
     if (arrayMarkerIndex < 0) {
@@ -1858,7 +2023,9 @@ private data class SubmitIssuerOption(
     val issuerId: String,
     val issuerName: String,
     val credentialId: String,
-    val selected: Boolean
+    val selected: Boolean,
+    val submitDocuments: List<SubmitDocumentItem> = emptyList(),
+    val submitDisclosures: List<SubmitDisclosureItem> = emptyList()
 )
 
 private data class SubmitDocumentItem(
@@ -1866,6 +2033,19 @@ private data class SubmitDocumentItem(
     val title: String,
     val documentType: String,
     val digest: String,
+    val fileName: String = "",
+    val attachmentRef: String = "",
+    val mediaType: String = "",
+    val byteSize: Long? = null,
+    val required: Boolean,
+    val selected: Boolean
+)
+
+private data class SubmitDisclosureItem(
+    val path: String,
+    val title: String,
+    val group: String,
+    val value: String,
     val required: Boolean,
     val selected: Boolean
 )
@@ -1899,6 +2079,7 @@ private data class CredentialUiData(
     val didRegistrationLabel: String = "did 등록하기",
     val submitIssuerOptions: List<SubmitIssuerOption> = emptyList(),
     val submitDocuments: List<SubmitDocumentItem> = emptyList(),
+    val submitDisclosures: List<SubmitDisclosureItem> = emptyList(),
     val storedClaimRows: List<Triple<String, String, String>> = emptyList()
 ) {
     companion object {
@@ -2023,14 +2204,91 @@ private data class CredentialUiData(
                     json?.optJSONArray(name)
                 }
             }
+            fun parseSubmitDocumentsArray(documents: JSONArray?): List<SubmitDocumentItem> {
+                if (documents == null) return emptyList()
+                return buildList {
+                    for (index in 0 until documents.length()) {
+                        val item = documents.optJSONObject(index) ?: continue
+                        val rawTitle = item.optString("title")
+                            .ifBlank { item.optString("name") }
+                            .ifBlank { item.optString("documentName") }
+                        val documentType = item.optString("documentType")
+                            .ifBlank { item.optString("type") }
+                            .ifBlank { rawTitle }
+                        val title = documentDisplayTitle(rawTitle, documentType, index)
+                        val digest = item.optString("digestSRI")
+                            .ifBlank { item.optString("hash") }
+                            .ifBlank { item.optString("digest") }
+                            .ifBlank { item.optString("documentHash") }
+                        val fileName = item.optString("fileName")
+                            .ifBlank { item.optString("filename") }
+                            .ifBlank { item.optString("originalFilename") }
+                        val byteSize = if (item.has("byteSize") && !item.isNull("byteSize")) {
+                            runCatching { item.getLong("byteSize") }.getOrNull()
+                        } else {
+                            null
+                        }
+                        add(
+                            SubmitDocumentItem(
+                                documentId = item.optString("documentId")
+                                    .ifBlank { item.optString("id") }
+                                    .ifBlank { "document-${index + 1}" },
+                                title = title,
+                                documentType = documentType.ifBlank { title },
+                                digest = digest.ifBlank { "-" },
+                                fileName = fileName,
+                                attachmentRef = item.optString("attachmentRef"),
+                                mediaType = item.optString("mediaType"),
+                                byteSize = byteSize,
+                                required = item.optBoolean("required", true),
+                                selected = item.optBoolean("selected", true)
+                            )
+                        )
+                    }
+                }
+            }
+            fun parseSubmitDisclosuresArray(disclosures: JSONArray?): List<SubmitDisclosureItem> {
+                if (disclosures == null) return emptyList()
+                return buildList {
+                    for (index in 0 until disclosures.length()) {
+                        val item = disclosures.optJSONObject(index) ?: continue
+                        val path = item.optString("path")
+                            .ifBlank { item.optString("claimPath") }
+                            .ifBlank { item.optString("id") }
+                        if (path.isBlank()) continue
+                        val normalizedPath = normalizeClaimKey(path)
+                        val title = item.optString("title")
+                            .ifBlank { item.optString("label") }
+                            .ifBlank { claimDisplayLabel(path) }
+                        val rawValue = item.optString("value")
+                            .ifBlank { item.optString("displayValue") }
+                            .ifBlank { "-" }
+                        add(
+                            SubmitDisclosureItem(
+                                path = path,
+                                title = title,
+                                group = item.optString("group")
+                                    .ifBlank { claimGroupLabel(normalizedPath) },
+                                value = claimDisplayValue(path, rawValue),
+                                required = item.optBoolean("required", false),
+                                selected = item.optBoolean("selected", item.optBoolean("required", false))
+                            )
+                        )
+                    }
+                }
+            }
             fun parseIssuerOptions(): List<SubmitIssuerOption> {
+                val defaultDocuments = parseSubmitDocumentsArray(firstArray("submitDocuments", "requiredDocuments", "documents", "attachmentDocuments"))
+                val defaultDisclosures = parseSubmitDisclosuresArray(firstArray("submitDisclosures", "disclosureClaims", "claimsToDisclose"))
                 val issuers = firstArray("issuerOptions", "issuers", "credentialIssuers", "availableIssuers")
                     ?: return listOf(
                         SubmitIssuerOption(
                             issuerId = firstText("default", "issuerId", "issuerAccount", "issuerDid"),
                             issuerName = firstText("KYvC 인증기관", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
                             credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
-                            selected = true
+                            selected = true,
+                            submitDocuments = defaultDocuments,
+                            submitDisclosures = defaultDisclosures
                         )
                     )
                 return buildList {
@@ -2050,7 +2308,18 @@ private data class CredentialUiData(
                                 issuerId = issuerId,
                                 issuerName = issuerName,
                                 credentialId = item.optString("credentialId").ifBlank { item.optString("id") },
-                                selected = item.optBoolean("selected", index == 0)
+                                selected = item.optBoolean("selected", index == 0),
+                                submitDocuments = parseSubmitDocumentsArray(
+                                    item.optJSONArray("submitDocuments")
+                                        ?: item.optJSONArray("requiredDocuments")
+                                        ?: item.optJSONArray("documents")
+                                        ?: item.optJSONArray("attachmentDocuments")
+                                ),
+                                submitDisclosures = parseSubmitDisclosuresArray(
+                                    item.optJSONArray("submitDisclosures")
+                                        ?: item.optJSONArray("disclosureClaims")
+                                        ?: item.optJSONArray("claimsToDisclose")
+                                )
                             )
                         )
                     }
@@ -2064,30 +2333,46 @@ private data class CredentialUiData(
                 return buildList {
                     for (index in 0 until documents.length()) {
                         val item = documents.optJSONObject(index) ?: continue
-                        val title = item.optString("title")
+                        val rawTitle = item.optString("title")
                             .ifBlank { item.optString("name") }
                             .ifBlank { item.optString("documentName") }
-                            .ifBlank { "제출 문서 ${index + 1}" }
+                        val documentType = item.optString("documentType")
+                            .ifBlank { item.optString("type") }
+                            .ifBlank { rawTitle }
+                        val title = documentDisplayTitle(rawTitle, documentType, index)
                         val digest = item.optString("digestSRI")
                             .ifBlank { item.optString("hash") }
                             .ifBlank { item.optString("digest") }
                             .ifBlank { item.optString("documentHash") }
+                        val fileName = item.optString("fileName")
+                            .ifBlank { item.optString("filename") }
+                            .ifBlank { item.optString("originalFilename") }
+                        val byteSize = if (item.has("byteSize") && !item.isNull("byteSize")) {
+                            runCatching { item.getLong("byteSize") }.getOrNull()
+                        } else {
+                            null
+                        }
                         add(
                             SubmitDocumentItem(
                                 documentId = item.optString("documentId")
                                     .ifBlank { item.optString("id") }
                                     .ifBlank { "document-${index + 1}" },
                                 title = title,
-                                documentType = item.optString("documentType")
-                                    .ifBlank { item.optString("type") }
-                                    .ifBlank { title },
+                                documentType = documentType.ifBlank { title },
                                 digest = digest.ifBlank { "-" },
+                                fileName = fileName,
+                                attachmentRef = item.optString("attachmentRef"),
+                                mediaType = item.optString("mediaType"),
+                                byteSize = byteSize,
                                 required = item.optBoolean("required", true),
                                 selected = item.optBoolean("selected", true)
                             )
                         )
                     }
                 }
+            }
+            fun parseSubmitDisclosures(): List<SubmitDisclosureItem> {
+                return parseSubmitDisclosuresArray(firstArray("submitDisclosures", "disclosureClaims", "claimsToDisclose"))
             }
             val fallbackHolderDid = text("holderDid", text("did", "did:xrpl:1:rHolder..."))
             val rawIssuedAt = firstText(
@@ -2145,7 +2430,8 @@ private data class CredentialUiData(
                 statusText = text("statusText", "정상 · 검증 가능"),
                 didRegistrationLabel = text("didRegistrationLabel", "did 등록하기"),
                 submitIssuerOptions = parseIssuerOptions(),
-                submitDocuments = parseSubmitDocuments()
+                submitDocuments = parseSubmitDocuments(),
+                submitDisclosures = parseSubmitDisclosures()
             )
         }
 
@@ -2494,21 +2780,32 @@ private fun CredentialSubmitScreen(
     val issuerOptions = data.submitIssuerOptions.ifEmpty {
         listOf(SubmitIssuerOption("default", data.issuerName, data.credentialId, true))
     }
-    val submitDocuments = data.submitDocuments.ifEmpty {
+    val baseSubmitDocuments = data.submitDocuments.ifEmpty {
         emptyList()
     }
+    val baseSubmitDisclosures = data.submitDisclosures
     var selectedIssuerId by remember(data) {
         mutableStateOf(issuerOptions.firstOrNull { it.selected }?.issuerId ?: issuerOptions.first().issuerId)
     }
     var issuerDropdownExpanded by remember(data) { mutableStateOf(false) }
-    val selectedDocumentIds = remember(data) {
+    val selectedIssuer = issuerOptions.firstOrNull { it.issuerId == selectedIssuerId } ?: issuerOptions.first()
+    val submitDocuments = selectedIssuer.submitDocuments.ifEmpty { baseSubmitDocuments }
+    val submitDisclosures = selectedIssuer.submitDisclosures.ifEmpty { baseSubmitDisclosures }
+    val selectedDocumentIds = remember(data, selectedIssuerId) {
         mutableStateListOf<String>().apply {
             addAll(submitDocuments.filter { it.selected || it.required }.map { it.documentId })
         }
     }
+    val selectedDisclosurePaths = remember(data, selectedIssuerId) {
+        mutableStateListOf<String>().apply {
+            addAll(submitDisclosures.filter { it.selected || it.required }.map { it.path })
+        }
+    }
     var expandedDocumentId by remember(data) { mutableStateOf<String?>(null) }
-    val selectedIssuer = issuerOptions.firstOrNull { it.issuerId == selectedIssuerId } ?: issuerOptions.first()
     val selectedCount = selectedDocumentIds.size
+    val requiredDisclosureCount = submitDisclosures.count { it.required }
+    val optionalDisclosureCount = submitDisclosures.count { !it.required }
+    val selectedOptionalDisclosureCount = submitDisclosures.count { !it.required && it.path in selectedDisclosurePaths }
 
     CredentialNativeScaffold(
         title = "증명서 제출",
@@ -2533,6 +2830,32 @@ private fun CredentialSubmitScreen(
                                                 put("documentType", document.documentType)
                                                 put("title", document.title)
                                                 put("digest", document.digest)
+                                                put("fileName", document.fileName)
+                                                put("attachmentRef", document.attachmentRef)
+                                                put("mediaType", document.mediaType)
+                                                document.byteSize?.let { put("byteSize", it) }
+                                            }
+                                        }
+                                )
+                            )
+                            put(
+                                "selectedDisclosures",
+                                JSONArray(
+                                    submitDisclosures
+                                        .filter { it.path in selectedDisclosurePaths || it.required }
+                                        .map { it.path }
+                                )
+                            )
+                            put(
+                                "selectedDisclosureClaims",
+                                JSONArray(
+                                    submitDisclosures
+                                        .filter { it.path in selectedDisclosurePaths || it.required }
+                                        .map { disclosure ->
+                                            JSONObject().apply {
+                                                put("path", disclosure.path)
+                                                put("title", disclosure.title)
+                                                put("required", disclosure.required)
                                             }
                                         }
                                 )
@@ -2590,16 +2913,39 @@ private fun CredentialSubmitScreen(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("공개할 세부 정보", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
             Spacer(modifier = Modifier.size(8.dp))
-            Text("필수 10건 · 선택 7건", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+            Text(
+                "필수 ${requiredDisclosureCount}건 · 선택 ${selectedOptionalDisclosureCount}/${optionalDisclosureCount}건",
+                color = Color(0xFF8A93A3),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold
+            )
         }
         Spacer(modifier = Modifier.height(12.dp))
-        DisclosureGroup("KYC 정보", listOf("KYC 관할 국가" to true, "KYC 보증 수준" to true))
-        Spacer(modifier = Modifier.height(14.dp))
-        DisclosureGroup("법인 정보", listOf("법인 유형" to true, "법인명" to true, "법인 등록번호" to true, "설립목적 확인 필요 여부" to false))
-        Spacer(modifier = Modifier.height(14.dp))
-        DisclosureGroup("대표자 정보", listOf("대표자 이름" to true, "대표자 생년월일" to true, "대표자 국적" to true, "대표자 영문명" to false))
-        Spacer(modifier = Modifier.height(14.dp))
-        DisclosureGroup("실소유자 정보", listOf("실소유자 이름" to true, "실소유자 생년월일" to false, "실소유자 국적" to false, "실소유자 영문명" to false, "지분율" to true))
+        if (submitDisclosures.isNotEmpty()) {
+            val disclosureGroups = submitDisclosures.groupBy { it.group }
+            disclosureGroups.entries.forEachIndexed { index, group ->
+                DisclosureGroup(
+                    title = group.key,
+                    items = group.value,
+                    selectedPaths = selectedDisclosurePaths,
+                    onToggle = { disclosure ->
+                        if (!disclosure.required) {
+                            if (disclosure.path in selectedDisclosurePaths) {
+                                selectedDisclosurePaths.remove(disclosure.path)
+                            } else {
+                                selectedDisclosurePaths.add(disclosure.path)
+                            }
+                        }
+                    }
+                )
+                if (index != disclosureGroups.size - 1) {
+                    Spacer(modifier = Modifier.height(14.dp))
+                }
+            }
+        }
+        if (submitDisclosures.isEmpty()) {
+            InfoNotice("공개할 세부 정보 없음", "제출 요청에서 선택 가능한 claim 정보를 찾지 못했습니다.")
+        }
         Spacer(modifier = Modifier.height(20.dp))
         WarningSubmitNotice()
     }
@@ -2952,6 +3298,8 @@ private fun SubmitDocumentRow(
     onClick: () -> Unit,
     onToggle: () -> Unit
 ) {
+    val requiredLabel = if (document.required) "필수" else "선택"
+    val fileName = document.fileName.ifBlank { "-" }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2973,11 +3321,27 @@ private fun SubmitDocumentRow(
             }
             Spacer(modifier = Modifier.size(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(document.title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
                 Text(
-                    listOf(issuerName, if (document.required) "필수" else "선택").joinToString(" · "),
+                    document.title,
+                    color = Color(0xFF0B1D40),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "제출 파일: $fileName",
+                    color = Color(0xFF5F6877),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    listOf(issuerName, requiredLabel).joinToString(" · "),
                     color = Color(0xFF8A93A3),
-                    style = MaterialTheme.typography.labelSmall
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             Box(
@@ -2995,16 +3359,37 @@ private fun SubmitDocumentRow(
             Spacer(modifier = Modifier.height(10.dp))
             Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
             Spacer(modifier = Modifier.height(10.dp))
-            Text("문서 해시", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold)
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                document.digest,
-                color = Color(0xFF2F7DFF),
-                style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.Bold
-            )
+            DocumentMetaLine("제출 문서", document.title)
+            DocumentMetaLine("실제 파일명", fileName)
+            if (document.attachmentRef.isNotBlank()) {
+                DocumentMetaLine("파일 part name", document.attachmentRef)
+            }
+            DocumentMetaLine("문서 유형", document.documentType)
+            DocumentMetaLine("문서 ID", document.documentId)
+            if (document.mediaType.isNotBlank()) {
+                DocumentMetaLine("MIME 타입", document.mediaType)
+            }
+            document.byteSize?.let {
+                DocumentMetaLine("파일 크기", "$it bytes")
+            }
+            DocumentMetaLine("문서 해시", document.digest)
         }
     }
+}
+
+@Composable
+private fun DocumentMetaLine(label: String, value: String) {
+    if (value.isBlank()) return
+    Spacer(modifier = Modifier.height(6.dp))
+    Text(label, color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.ExtraBold)
+    Text(
+        value,
+        color = Color(0xFF2F7DFF),
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.Bold,
+        maxLines = 3,
+        overflow = TextOverflow.Ellipsis
+    )
 }
 
 @Composable
@@ -3027,6 +3412,76 @@ private fun SubmitCredentialRow(title: String, issuer: String, color: Color) {
         }
         Box(modifier = Modifier.size(40.dp).clip(CircleShape).background(Color(0xFF2F7DFF)), contentAlignment = Alignment.Center) {
             Text("✓", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+        }
+    }
+}
+
+@Composable
+private fun DisclosureGroup(
+    title: String,
+    items: List<SubmitDisclosureItem>,
+    selectedPaths: List<String>,
+    onToggle: (SubmitDisclosureItem) -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .background(Color.White)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .background(Color(0xFFF6F6F5))
+                .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
+            Text("${items.count { it.required }} 필수", color = Color(0xFF2F7DFF), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.ExtraBold)
+        }
+        items.forEachIndexed { index, item ->
+            val selected = item.required || item.path in selectedPaths
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 62.dp)
+                    .clickable(enabled = !item.required) { onToggle(item) }
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(8.dp))
+                        .background(if (selected) Color(0xFF2F7DFF) else Color.White),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (selected) Text("✓", color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+                }
+                Spacer(modifier = Modifier.size(14.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(item.title, color = Color(0xFF263445), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        item.value,
+                        color = Color(0xFF6B7280),
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(if (item.required) Color(0xFFF1F6FF) else Color(0xFFF3F4F6))
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                ) {
+                    Text(if (item.required) "필수" else "선택", color = if (item.required) Color(0xFF2F7DFF) else Color(0xFF8A93A3), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.ExtraBold)
+                }
+            }
+            if (index != items.lastIndex) Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
         }
     }
 }

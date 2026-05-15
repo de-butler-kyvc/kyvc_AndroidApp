@@ -90,6 +90,17 @@ class WalletBridge(
     private val launchVpLoginCompletion: (String) -> Unit,
     private val onSessionStatusChanged: (Boolean) -> Unit = {}
 ) {
+    private val SUBMIT_DISCLOSURE_ROOT_KEYS = setOf(
+        "kyc",
+        "legalEntity",
+        "representative",
+        "beneficialOwners",
+        "delegate",
+        "delegation",
+        "establishmentPurpose",
+        "extra",
+        "documentEvidence"
+    )
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
     private val devicePrefs: SharedPreferences = context.getSharedPreferences("kyvc-device", Context.MODE_PRIVATE)
     private val webUserPrefs: SharedPreferences = context.getSharedPreferences("kyvc-web-user-session", Context.MODE_PRIVATE)
@@ -1788,6 +1799,8 @@ class WalletBridge(
             val rawBytes = decodeBase64Document(contentBase64)
             val expectedByteSize = item.long("byteSize")
             val byteSizeMatched = expectedByteSize == null || rawBytes.size.toLong() == expectedByteSize
+            val recomputed = computeSha384SRI(rawBytes)
+            val digestMatched = sriEquals(recomputed, digestSRI)
             logBridgeFlow(
                 "VC_DOCUMENT_SAVE base64 decoded",
                 mapOf(
@@ -1795,7 +1808,8 @@ class WalletBridge(
                     "documentId" to documentId,
                     "decodedBytes" to rawBytes.size,
                     "expectedByteSize" to expectedByteSize,
-                    "byteSizeMatched" to byteSizeMatched
+                    "byteSizeMatched" to byteSizeMatched,
+                    "digestMatched" to digestMatched
                 )
             )
             item.long("byteSize")?.let { expectedSize ->
@@ -1803,8 +1817,7 @@ class WalletBridge(
                     "document attachment byteSize mismatch: docId=$documentId expected=$expectedSize actual=${rawBytes.size}"
                 }
             }
-            val recomputed = computeSha384SRI(rawBytes)
-            require(sriEquals(recomputed, digestSRI)) {
+            require(digestMatched) {
                 "document attachment digest mismatch: docId=$documentId"
             }
             val storedBlob = secureDocumentStore.encryptAndStore(rawBytes, item.text("fileName") ?: item.text("filename") ?: documentId)
@@ -1818,7 +1831,8 @@ class WalletBridge(
                 )
             )
             val readback = secureDocumentStore.loadDecrypted(storedBlob.blobPath)
-            require(readback.size == rawBytes.size && sriEquals(computeSha384SRI(readback), digestSRI)) {
+            val readbackDigestMatched = sriEquals(computeSha384SRI(readback), digestSRI)
+            require(readback.size == rawBytes.size && readbackDigestMatched) {
                 "document attachment readback failed: docId=$documentId"
             }
             val metadata = buildJsonObject {
@@ -1853,7 +1867,8 @@ class WalletBridge(
                     "documentId" to documentId,
                     "readable" to true,
                     "readBytes" to readback.size,
-                    "byteSizeMatched" to (readback.size == rawBytes.size)
+                    "byteSizeMatched" to (readback.size == rawBytes.size),
+                    "digestMatched" to readbackDigestMatched
                 )
             )
             saved += 1
@@ -2921,7 +2936,11 @@ class WalletBridge(
 
                 if (sdJwt != null) {
                     val sdCredential = parseSdJwtCredential(sdJwt)
-                    val selectedDisclosures = selectedSdJwtDisclosures(request, sdCredential.disclosures)
+                    val selectedDisclosures = selectedSdJwtDisclosures(
+                        request = request,
+                        issuerPayload = sdCredential.issuerPayload,
+                        allDisclosures = sdCredential.disclosures
+                    )
                     val selectedSdJwt = buildSelectedSdJwt(sdCredential.issuerJwt, selectedDisclosures)
                     val selectedDocumentEvidence = extractDocumentEvidenceFromSelectedDisclosures(selectedDisclosures)
                     val attachmentPlan = resolveAttachmentPlan(
@@ -3146,6 +3165,9 @@ class WalletBridge(
                                 "manifestLoaded" to (attachmentManifestInput != null),
                                 "filePartsCount" to attachmentPlan.attachments.size,
                                 "partNames" to attachmentPlan.attachments.joinToString(",") { it.attachmentRef },
+                                "fileNames" to attachmentPlan.attachments.joinToString(",") { it.sourceEntity.originalFilename },
+                                "documentTypes" to attachmentPlan.attachments.joinToString(",") { it.documentType },
+                                "documentIds" to attachmentPlan.attachments.joinToString(",") { it.documentId },
                                 "allFilesReadable" to true
                             )
                         )
@@ -4246,7 +4268,8 @@ class WalletBridge(
                     "requestId" to resolvedRequestId,
                     "credentialId" to credential.credentialId,
                     "selectedIssuerId" to submitReview.text("selectedIssuerId"),
-                    "selectedDocumentsCount" to ((submitReview["selectedDocuments"] as? JsonArray)?.size ?: 0)
+                    "selectedDocumentsCount" to ((submitReview["selectedDocuments"] as? JsonArray)?.size ?: 0),
+                    "selectedDisclosureCount" to ((submitReview["selectedDisclosures"] as? JsonArray)?.size ?: 0)
                 )
             )
             val presentationRequest = buildJsonObject {
@@ -4257,6 +4280,8 @@ class WalletBridge(
                 put("aud", aud)
                 put("presentationDefinition", resolveResponse.presentationDefinition)
                 put("requiredDisclosures", JsonArray(resolveResponse.requiredDisclosures.map { JsonPrimitive(it) }))
+                (submitReview["selectedDocuments"] as? JsonArray)?.let { put("selectedDocuments", it) }
+                (submitReview["selectedDisclosures"] as? JsonArray)?.let { put("selectedDisclosures", it) }
             }
             val presentationResult = buildVpLoginPresentationObject(presentationRequest)
             logVpLoginCredentialPayloadMeta(
@@ -4353,7 +4378,14 @@ class WalletBridge(
         pendingVpLoginSubmitReviewRequestId = reviewRequestId
         pendingVpLoginSubmitReview = deferred
         val selectedCredential = credentials.first()
-        val submitDocuments = credentialSubmitDocumentPayload(selectedCredential.credentialId)
+        val submitDocumentsByCredential = credentials.associate { credential ->
+            credential.credentialId to credentialSubmitDocumentPayload(credential.credentialId)
+        }
+        val submitDisclosuresByCredential = credentials.associate { credential ->
+            credential.credentialId to credentialSubmitDisclosurePayload(credential, resolveResponse.requiredDisclosures)
+        }
+        val submitDocuments = submitDocumentsByCredential[selectedCredential.credentialId] ?: JsonArray(emptyList())
+        val submitDisclosures = submitDisclosuresByCredential[selectedCredential.credentialId] ?: JsonArray(emptyList())
         val payload = buildJsonObject {
             put("action", "REQUEST_CREDENTIAL_SUBMIT")
             put("requestId", reviewRequestId)
@@ -4374,11 +4406,14 @@ class WalletBridge(
                             put("issuerName", credential.issuerDisplayName())
                             put("credentialId", credential.credentialId)
                             put("selected", index == 0)
+                            put("submitDocuments", submitDocumentsByCredential[credential.credentialId] ?: JsonArray(emptyList()))
+                            put("submitDisclosures", submitDisclosuresByCredential[credential.credentialId] ?: JsonArray(emptyList()))
                         }
                     }
                 )
             )
             put("submitDocuments", submitDocuments)
+            put("submitDisclosures", submitDisclosures)
         }
         withContext(Dispatchers.Main) {
             launchCredentialNativeScreen("credentialSubmit", payload.toString())
@@ -4413,7 +4448,7 @@ class WalletBridge(
 
     private suspend fun credentialSubmitDocumentPayload(credentialId: String): JsonArray {
         val documents = holderDocumentRepository.findAllByCredentialId(credentialId)
-        return JsonArray(
+        val payload = JsonArray(
             documents.map { document ->
                 buildJsonObject {
                     put("documentId", document.documentId)
@@ -4423,6 +4458,7 @@ class WalletBridge(
                     put("mediaType", document.mediaType)
                     put("byteSize", document.byteSize)
                     put("fileName", document.originalFilename)
+                    put("originalFilename", document.originalFilename)
                     document.attachmentRefFromMetadata()?.let { put("attachmentRef", it) }
                     document.requirementIdFromMetadata()?.let { put("requirementId", it) }
                     put("required", true)
@@ -4430,16 +4466,234 @@ class WalletBridge(
                 }
             }
         )
+        logBridgeFlow(
+            "vp.login.submit.documents.prepared",
+            mapOf(
+                "credentialId" to credentialId,
+                "documentCount" to documents.size,
+                "fileNames" to documents.joinToString(",") { it.originalFilename },
+                "documentTypes" to documents.joinToString(",") { it.documentType },
+                "attachmentRefs" to documents.mapNotNull { it.attachmentRefFromMetadata() }.joinToString(","),
+                "allHaveFileName" to documents.all { it.originalFilename.isNotBlank() }
+            )
+        )
+        return payload
+    }
+
+    private fun credentialSubmitDisclosurePayload(
+        credential: CredentialEntity,
+        requiredDisclosures: List<String>
+    ): JsonArray {
+        val sdJwt = credential.sdJwt?.takeIf { isSdJwt(it) } ?: return JsonArray(emptyList())
+        val sdCredential = runCatching { parseSdJwtCredential(sdJwt) }.getOrNull()
+            ?: return JsonArray(emptyList())
+        val disclosuresByDigest = sdCredential.disclosures
+            .mapNotNull { decodeSdJwtDisclosure(it) }
+            .associateBy { it.digest }
+        val requiredKeys = requiredDisclosures.map { disclosurePathKey(it) }.toSet()
+        val claims = mutableListOf<DisclosureClaimForSubmit>()
+        collectDisclosureClaimsForSubmit(
+            element = sdCredential.issuerPayload,
+            prefix = "",
+            disclosuresByDigest = disclosuresByDigest,
+            out = claims
+        )
+        collectVisibleCredentialClaimsForSubmit(
+            element = sdCredential.issuerPayload,
+            prefix = "",
+            out = claims
+        )
+        val deduped = claims.distinctBy { it.path }
+            .sortedWith(compareBy<DisclosureClaimForSubmit> { if (disclosurePathKey(it.path) in requiredKeys) 0 else 1 }
+                .thenBy { it.path })
+        logBridgeFlow(
+            "vp.login.submit.disclosures.prepared",
+            mapOf(
+                "credentialId" to credential.credentialId,
+                "claimCount" to deduped.size,
+                "requiredCount" to requiredKeys.size,
+                "requiredMatchedCount" to deduped.count { disclosurePathKey(it.path) in requiredKeys }
+            )
+        )
+        return JsonArray(
+            deduped.map { claim ->
+                val required = disclosurePathKey(claim.path) in requiredKeys
+                buildJsonObject {
+                    put("path", claim.path)
+                    put("value", claim.value)
+                    put("required", required)
+                    put("selected", required)
+                }
+            }
+        )
+    }
+
+    private fun collectDisclosureClaimsForSubmit(
+        element: JsonElement?,
+        prefix: String,
+        disclosuresByDigest: Map<String, DecodedSdJwtDisclosure>,
+        out: MutableList<DisclosureClaimForSubmit>
+    ) {
+        when (element) {
+            is JsonObject -> {
+                sdDigestStrings(element).forEach { digest ->
+                    val disclosure = disclosuresByDigest[digest] ?: return@forEach
+                    val key = disclosure.key?.takeIf { it.isNotBlank() } ?: return@forEach
+                    val path = if (prefix.isBlank()) key else "$prefix.$key"
+                    collectDisclosureValueForSubmit(disclosure.value, path, disclosuresByDigest, out)
+                }
+                element.forEach { (key, value) ->
+                    if (key == "_sd" || key == "_sd_alg" || key == "...") return@forEach
+                    if (value.containsNestedDisclosure()) {
+                        val path = if (prefix.isBlank()) key else "$prefix.$key"
+                        collectDisclosureClaimsForSubmit(value, path, disclosuresByDigest, out)
+                    }
+                }
+            }
+            is JsonArray -> {
+                element.forEach { item ->
+                    if (item.containsNestedDisclosure()) {
+                        collectDisclosureClaimsForSubmit(item, "$prefix[]", disclosuresByDigest, out)
+                    }
+                }
+            }
+            else -> Unit
+        }
+    }
+
+    private fun collectVisibleCredentialClaimsForSubmit(
+        element: JsonElement?,
+        prefix: String,
+        out: MutableList<DisclosureClaimForSubmit>
+    ) {
+        when (element) {
+            is JsonObject -> {
+                element.forEach { (key, value) ->
+                    if (key == "_sd" || key == "_sd_alg" || key == "...") return@forEach
+                    if (prefix.isBlank() && key !in SUBMIT_DISCLOSURE_ROOT_KEYS) return@forEach
+                    val path = if (prefix.isBlank()) key else "$prefix.$key"
+                    collectVisibleCredentialClaimsForSubmit(value, path, out)
+                }
+            }
+            is JsonArray -> {
+                if (element.isEmpty()) {
+                    out += DisclosureClaimForSubmit(prefix, "[]")
+                } else {
+                    element.forEachIndexed { index, item ->
+                        val path = when (item) {
+                            is JsonObject, is JsonArray -> "$prefix[$index]"
+                            else -> prefix
+                        }
+                        collectVisibleCredentialClaimsForSubmit(item, path, out)
+                    }
+                }
+            }
+            else -> {
+                if (prefix.isNotBlank()) {
+                    out += DisclosureClaimForSubmit(prefix, jsonElementDisplayValue(element))
+                }
+            }
+        }
+    }
+
+    private fun collectDisclosureValueForSubmit(
+        value: JsonElement?,
+        path: String,
+        disclosuresByDigest: Map<String, DecodedSdJwtDisclosure>,
+        out: MutableList<DisclosureClaimForSubmit>
+    ) {
+        when (value) {
+            is JsonObject -> {
+                var emittedChild = false
+                sdArrayElementDigest(value)?.let { digest ->
+                    disclosuresByDigest[digest]?.let { disclosure ->
+                        collectDisclosureValueForSubmit(
+                            value = disclosure.value,
+                            path = path,
+                            disclosuresByDigest = disclosuresByDigest,
+                            out = out
+                        )
+                        emittedChild = true
+                    }
+                }
+                sdDigestStrings(value).forEach { digest ->
+                    val disclosure = disclosuresByDigest[digest] ?: return@forEach
+                    val key = disclosure.key?.takeIf { it.isNotBlank() } ?: return@forEach
+                    collectDisclosureValueForSubmit(
+                        value = disclosure.value,
+                        path = "$path.$key",
+                        disclosuresByDigest = disclosuresByDigest,
+                        out = out
+                    )
+                    emittedChild = true
+                }
+                value.forEach { (key, child) ->
+                    if (key == "_sd" || key == "_sd_alg" || key == "...") return@forEach
+                    collectDisclosureValueForSubmit(
+                        value = child,
+                        path = "$path.$key",
+                        disclosuresByDigest = disclosuresByDigest,
+                        out = out
+                    )
+                    emittedChild = true
+                }
+                if (!emittedChild) {
+                    out += DisclosureClaimForSubmit(path, jsonElementDisplayValue(value))
+                }
+            }
+            is JsonArray -> {
+                if (value.isEmpty()) {
+                    out += DisclosureClaimForSubmit(path, "[]")
+                } else {
+                    value.forEachIndexed { index, item ->
+                        val itemPath = when (item) {
+                            is JsonObject, is JsonArray -> "$path[$index]"
+                            else -> path
+                        }
+                        collectDisclosureValueForSubmit(item, itemPath, disclosuresByDigest, out)
+                    }
+                }
+            }
+            else -> out += DisclosureClaimForSubmit(path, jsonElementDisplayValue(value))
+        }
+    }
+
+    private fun JsonElement?.containsNestedDisclosure(): Boolean {
+        return when (this) {
+            is JsonObject -> sdArrayElementDigest(this) != null || sdDigestStrings(this).isNotEmpty() || values.any { it.containsNestedDisclosure() }
+            is JsonArray -> any { it.containsNestedDisclosure() }
+            else -> false
+        }
+    }
+
+    private fun sdArrayElementDigest(element: JsonObject): String? {
+        return element.text("...")?.takeIf { it.isNotBlank() }
+    }
+
+    private fun jsonElementDisplayValue(value: JsonElement?): String {
+        return when (value) {
+            null -> "-"
+            is JsonPrimitive -> value.contentOrNull ?: value.toString()
+            else -> value.toString()
+        }.ifBlank { "-" }
+    }
+
+    private fun disclosurePathKey(path: String): String {
+        return normalizedDisclosurePathParts(path).joinToString(".")
     }
 
     private fun String.documentTypeLabel(): String {
         return when (this) {
-            "SHAREHOLDER_LIST" -> "주주명부"
-            "CORPORATE_SEAL_CERTIFICATE" -> "법인인감증명서"
+            "SHAREHOLDER_LIST",
+            "KR_SHAREHOLDER_REGISTER" -> "주주명부"
+            "CORPORATE_SEAL_CERTIFICATE",
+            "KR_CORPORATE_SEAL_CERTIFICATE",
+            "KR_SEAL_CERTIFICATE" -> "법인인감증명서"
             "CORPORATE_REGISTRY_CERTIFICATE",
             "KR_CORPORATE_REGISTER_FULL_CERTIFICATE",
             "CORPORATE_REGISTER" -> "등기사항전부증명서"
-            "BUSINESS_REGISTRATION_CERTIFICATE" -> "사업자등록증"
+            "BUSINESS_REGISTRATION_CERTIFICATE",
+            "KR_BUSINESS_REGISTRATION_CERTIFICATE" -> "사업자등록증"
             "LEGAL_ENTITY_KYC_CREDENTIAL",
             "KYC_CREDENTIAL" -> "법인 KYC 증명서"
             else -> this
@@ -4462,9 +4716,16 @@ class WalletBridge(
         require(sdJwt != null) { "제출 가능한 법인 KYC Credential이 없습니다." }
 
         val sdCredential = parseSdJwtCredential(sdJwt)
-        val selectedDisclosures = selectedSdJwtDisclosures(request, sdCredential.disclosures)
+        val selectedDisclosures = selectedSdJwtDisclosures(
+            request = request,
+            issuerPayload = sdCredential.issuerPayload,
+            allDisclosures = sdCredential.disclosures
+        )
         val selectedSdJwt = buildSelectedSdJwt(sdCredential.issuerJwt, selectedDisclosures)
-        val selectedDocumentEvidence = extractDocumentEvidenceFromSelectedDisclosures(selectedDisclosures)
+        val selectedDocumentEvidence = (
+            extractDocumentEvidenceFromSelectedDisclosures(selectedDisclosures) +
+                extractDocumentEvidenceFromSelectedDocuments(request.array("selectedDocuments"))
+            ).distinctBy { "${it.documentId}|${it.documentType}|${normalizeSri(it.digestSRI)}" }
         val attachmentPlan = resolveAttachmentPlan(
             selectedDocumentEvidence = selectedDocumentEvidence,
             forceDocumentTypes = request.obj("documentSubmissionPolicy")
@@ -4472,6 +4733,17 @@ class WalletBridge(
                 ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
                 ?.toSet()
                 ?: emptySet()
+        )
+        logBridgeFlow(
+            "vp.login.attachments.prepared",
+            mapOf(
+                "selectedEvidenceCount" to selectedDocumentEvidence.size,
+                "manifestAttachmentCount" to attachmentPlan.attachments.size,
+                "blockerCount" to attachmentPlan.blockers.size,
+                "attachmentRefs" to attachmentPlan.attachments.joinToString(",") { it.attachmentRef },
+                "fileNames" to attachmentPlan.attachments.joinToString(",") { it.sourceEntity.originalFilename },
+                "submitMode" to "json_manifest_only"
+            )
         )
         val attachmentManifest = JsonArray(
             attachmentPlan.attachments.map { attachment ->
@@ -4953,6 +5225,31 @@ class WalletBridge(
             collectDocumentEvidence(value, output)
         }
         return output.distinctBy { "${it.documentId}|${it.documentType}|${normalizeSri(it.digestSRI)}" }
+    }
+
+    private fun extractDocumentEvidenceFromSelectedDocuments(selectedDocuments: JsonArray?): List<DocumentEvidenceClaim> {
+        if (selectedDocuments == null) return emptyList()
+        return selectedDocuments.mapNotNull { item ->
+            val document = item as? JsonObject ?: return@mapNotNull null
+            val documentId = document.text("documentId")
+            val documentType = document.text("documentType")
+            val digestSRI = document.text("digestSRI") ?: document.text("digest")
+            val mediaType = document.text("mediaType")
+            val byteSize = document.long("byteSize")
+            if (documentId.isNullOrBlank() || documentType.isNullOrBlank() ||
+                digestSRI.isNullOrBlank() || mediaType.isNullOrBlank() || byteSize == null
+            ) {
+                null
+            } else {
+                DocumentEvidenceClaim(
+                    documentId = documentId,
+                    documentType = documentType,
+                    digestSRI = digestSRI,
+                    mediaType = mediaType,
+                    byteSize = byteSize
+                )
+            }
+        }.distinctBy { "${it.documentId}|${it.documentType}|${normalizeSri(it.digestSRI)}" }
     }
 
     private fun attachmentManifestItems(manifest: JsonElement?): JsonArray {
@@ -5959,7 +6256,11 @@ class WalletBridge(
         return base64UrlNoPadding(digest)
     }
 
-    private fun selectedSdJwtDisclosures(request: JsonObject, allDisclosures: List<String>): List<String> {
+    private fun selectedSdJwtDisclosures(
+        request: JsonObject,
+        issuerPayload: JsonObject,
+        allDisclosures: List<String>
+    ): List<String> {
         val selectedValues = request.array("selectedDisclosures")
             ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
             .orEmpty()
@@ -5973,19 +6274,37 @@ class WalletBridge(
                     .orEmpty()
             ).distinct()
         val explicitDisclosures = selectedValues.filter { isSdJwtDisclosureString(it) }
-        val selectedPaths = (requiredPaths + selectedValues.filterNot { isSdJwtDisclosureString(it) }).distinct()
+        val selectedDocumentPaths = if (request.array("selectedDocuments")?.isNotEmpty() == true) {
+            listOf("documentEvidence[]")
+        } else {
+            emptyList()
+        }
+        val selectedPaths = (requiredPaths + selectedDocumentPaths + selectedValues.filterNot { isSdJwtDisclosureString(it) }).distinct()
         if (explicitDisclosures.isEmpty() && selectedPaths.isEmpty()) return allDisclosures
 
+        val disclosuresByDigest = allDisclosures
+            .mapNotNull { decodeSdJwtDisclosure(it) }
+            .associateBy { it.digest }
         val byPath = if (selectedPaths.isEmpty()) {
             emptyList()
         } else {
-            allDisclosures.filter { disclosure ->
+            selectedPaths.flatMap { path ->
+                selectSdJwtDisclosuresForPath(issuerPayload, path, disclosuresByDigest)
+            } + allDisclosures.filter { disclosure ->
                 disclosureMatchesAnyPath(disclosure, selectedPaths)
             }
         }
-        val output = (explicitDisclosures + byPath).distinct()
-        val missing = selectedPaths.filterNot { path ->
-            output.any { disclosure -> disclosureMatchesAnyPath(disclosure, listOf(path)) }
+        var output = (explicitDisclosures + byPath).distinct()
+        var missing = selectedPaths.filterNot { path ->
+            sdJwtPathIncluded(issuerPayload, output, path) ||
+                output.any { disclosure -> disclosureMatchesAnyPath(disclosure, listOf(path)) }
+        }
+        if (missing.isNotEmpty()) {
+            output = (output + allDisclosures).distinct()
+            missing = selectedPaths.filterNot { path ->
+                sdJwtPathIncluded(issuerPayload, output, path) ||
+                    output.any { disclosure -> disclosureMatchesAnyPath(disclosure, listOf(path)) }
+            }
         }
         if (missing.isNotEmpty()) {
             logBridgeFlow(
@@ -6002,8 +6321,12 @@ class WalletBridge(
                 "requiredPaths" to requiredPaths.joinToString(","),
                 "selectedPathCount" to selectedPaths.size,
                 "selectedDisclosureCount" to output.size,
-                "legalEntityNameIncluded" to output.any { disclosureMatchesAnyPath(it, listOf("legalEntity.name")) },
-                "legalEntityRegistrationNumberIncluded" to output.any { disclosureMatchesAnyPath(it, listOf("legalEntity.registrationNumber")) }
+                "legalEntityNameIncluded" to sdJwtPathIncluded(issuerPayload, output, "legalEntity.name"),
+                "legalEntityRegistrationNumberIncluded" to sdJwtPathIncluded(
+                    issuerPayload,
+                    output,
+                    "legalEntity.registrationNumber"
+                )
             )
         )
         return output.ifEmpty { allDisclosures }
@@ -6020,10 +6343,124 @@ class WalletBridge(
             ?: return false
         val key = (decoded.getOrNull(1) as? JsonPrimitive)?.contentOrNull ?: return false
         return paths.any { path ->
-            val normalized = path.removePrefix("$.").replace("/", ".").replace("[]", "")
-            val parts = normalized.split(".").filter { it.isNotBlank() }
+            val parts = normalizedDisclosurePathParts(path)
             key == parts.lastOrNull() || key in parts.dropLast(1)
         }
+    }
+
+    private fun selectSdJwtDisclosuresForPath(
+        issuerPayload: JsonObject,
+        path: String,
+        disclosuresByDigest: Map<String, DecodedSdJwtDisclosure>
+    ): List<String> {
+        val parts = normalizedDisclosurePathParts(path)
+        if (parts.isEmpty()) return emptyList()
+        return findSdJwtDisclosuresForPath(issuerPayload, parts, disclosuresByDigest).orEmpty()
+    }
+
+    private fun findSdJwtDisclosuresForPath(
+        element: JsonElement?,
+        pathParts: List<String>,
+        disclosuresByDigest: Map<String, DecodedSdJwtDisclosure>
+    ): List<String>? {
+        if (pathParts.isEmpty()) {
+            return collectSdJwtDisclosuresForElement(element, disclosuresByDigest).takeIf { it.isNotEmpty() }
+                ?: emptyList()
+        }
+        val part = pathParts.first()
+        val remaining = pathParts.drop(1)
+        return when (element) {
+            is JsonObject -> {
+                element[part]?.let { child ->
+                    if (remaining.isEmpty()) {
+                        collectSdJwtDisclosuresForElement(child, disclosuresByDigest)
+                            .takeIf { it.isNotEmpty() }
+                            ?.let { return it }
+                    }
+                    findSdJwtDisclosuresForPath(child, remaining, disclosuresByDigest)?.let { return it }
+                }
+                sdDigestStrings(element).forEach { digest ->
+                    val disclosure = disclosuresByDigest[digest] ?: return@forEach
+                    if (disclosure.key == part) {
+                        if (remaining.isEmpty()) return listOf(disclosure.raw)
+                        findSdJwtDisclosuresForPath(disclosure.value, remaining, disclosuresByDigest)?.let { child ->
+                            return listOf(disclosure.raw) + child
+                        }
+                    }
+                }
+                null
+            }
+            is JsonArray -> {
+                element.forEach { item ->
+                    findSdJwtDisclosuresForPath(item, pathParts, disclosuresByDigest)?.let { return it }
+                }
+                null
+            }
+            else -> null
+        }
+    }
+
+    private fun collectSdJwtDisclosuresForElement(
+        element: JsonElement?,
+        disclosuresByDigest: Map<String, DecodedSdJwtDisclosure>
+    ): List<String> {
+        return when (element) {
+            is JsonObject -> {
+                val own = buildList {
+                    sdArrayElementDigest(element)?.let { digest ->
+                        disclosuresByDigest[digest]?.raw?.let(::add)
+                    }
+                    sdDigestStrings(element).forEach { digest ->
+                        disclosuresByDigest[digest]?.raw?.let(::add)
+                    }
+                }
+                (own + element.values.flatMap { collectSdJwtDisclosuresForElement(it, disclosuresByDigest) }).distinct()
+            }
+            is JsonArray -> element.flatMap { collectSdJwtDisclosuresForElement(it, disclosuresByDigest) }.distinct()
+            else -> emptyList()
+        }
+    }
+
+    private fun sdJwtPathIncluded(
+        issuerPayload: JsonObject,
+        selectedDisclosures: List<String>,
+        path: String
+    ): Boolean {
+        val parts = normalizedDisclosurePathParts(path)
+        if (parts.isEmpty()) return false
+        val selectedByDigest = selectedDisclosures
+            .mapNotNull { decodeSdJwtDisclosure(it) }
+            .associateBy { it.digest }
+        return findSdJwtDisclosuresForPath(issuerPayload, parts, selectedByDigest) != null
+    }
+
+    private fun normalizedDisclosurePathParts(path: String): List<String> {
+        return path.removePrefix("$.")
+            .replace(Regex("""\[\d+]"""), "")
+            .replace("/", ".")
+            .replace("[]", "")
+            .split(".")
+            .filter { it.isNotBlank() }
+    }
+
+    private fun decodeSdJwtDisclosure(disclosure: String): DecodedSdJwtDisclosure? {
+        val decoded = runCatching {
+            Json.parseToJsonElement(decodeBase64UrlToString(disclosure)) as? JsonArray
+        }.getOrNull() ?: return null
+        val key = (decoded.getOrNull(1) as? JsonPrimitive)?.contentOrNull
+        val value = decoded.getOrNull(2) ?: decoded.getOrNull(1)
+        return DecodedSdJwtDisclosure(
+            raw = disclosure,
+            digest = disclosureDigest(disclosure),
+            key = key,
+            value = value
+        )
+    }
+
+    private fun sdDigestStrings(element: JsonObject): List<String> {
+        return element.array("_sd")
+            ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { digest -> digest.isNotBlank() } }
+            .orEmpty()
     }
 
     private fun buildSelectedSdJwt(issuerJwt: String, disclosures: List<String>): String {
@@ -6068,6 +6505,18 @@ class WalletBridge(
         val header: JsonObject,
         val issuerPayload: JsonObject,
         val payload: JsonObject
+    )
+
+    private data class DecodedSdJwtDisclosure(
+        val raw: String,
+        val digest: String,
+        val key: String?,
+        val value: JsonElement?
+    )
+
+    private data class DisclosureClaimForSubmit(
+        val path: String,
+        val value: String
     )
 
     private data class VpLoginPresentationResult(

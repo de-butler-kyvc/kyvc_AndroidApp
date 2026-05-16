@@ -3384,6 +3384,10 @@ class WalletBridge(
                     handleVpLoginQr(qrPayload)
                     return@launch
                 }
+                if (!qrData.isNullOrBlank() && isGeneralVpRequestQr(qrPayload)) {
+                    handleGeneralVpRequestQr(qrPayload, qrData)
+                    return@launch
+                }
                 val qrInfo = buildQrRequestInfo(request, qrPayload, qrData)
                 logBridgeFlow(
                     "vc.issue.qr.request",
@@ -3468,6 +3472,12 @@ class WalletBridge(
                 if (!qrData.isNullOrBlank() && isVpLoginQr(qrPayload)) {
                     withContext(Dispatchers.IO) {
                         handleVpLoginQr(qrPayload)
+                    }
+                    return@launch
+                }
+                if (!qrData.isNullOrBlank() && isGeneralVpRequestQr(qrPayload)) {
+                    withContext(Dispatchers.IO) {
+                        handleGeneralVpRequestQr(qrPayload, qrData)
                     }
                     return@launch
                 }
@@ -4218,6 +4228,10 @@ class WalletBridge(
         return normalizeQrAction(qrPayload.text("type") ?: qrPayload.text("actionType")) == "VP_LOGIN_REQUEST"
     }
 
+    private fun isGeneralVpRequestQr(qrPayload: JsonObject): Boolean {
+        return normalizeQrAction(qrPayload.text("type") ?: qrPayload.text("actionType")) == "VP_REQUEST"
+    }
+
     private suspend fun handleVpLoginQr(qrPayload: JsonObject) {
         val requestId = qrPayload.text("requestId")
         val qrToken = qrPayload.text("qrToken")
@@ -4359,6 +4373,329 @@ class WalletBridge(
         )
     }
 
+    private suspend fun handleGeneralVpRequestQr(qrPayload: JsonObject, rawQrPayload: String) {
+        val requestId = qrPayload.text("requestId")
+        val qrToken = qrPayload.text("qrToken")
+        try {
+            require(isGeneralVpRequestQr(qrPayload)) { "유효하지 않은 VP 요청 QR입니다." }
+            require(!requestId.isNullOrBlank() || !qrToken.isNullOrBlank()) { "유효하지 않은 VP 요청 QR입니다." }
+            require(walletStateStore.hasWallet()) { "로컬 지갑이 없습니다." }
+
+            val deviceId = getOrCreateDeviceId()
+            val resolveResponse = resolveGeneralVpRequestOrFallback(
+                qrPayload = rawQrPayload,
+                requestId = requestId,
+                hasQrToken = !qrToken.isNullOrBlank()
+            )
+            val resolvedRequestId = resolveResponse.requestId.ifBlank { requestId.orEmpty() }
+            require(resolvedRequestId.isNotBlank()) { "VP 요청을 확인할 수 없습니다." }
+            val vpRequest = getGeneralVpRequest(resolvedRequestId)
+            val nonce = vpRequest.nonce.ifBlank { vpRequest.challenge }
+            val challenge = vpRequest.challenge.ifBlank { nonce }
+            val domain = vpRequest.domain?.takeIf { it.isNotBlank() }
+                ?: vpRequest.aud?.takeIf { it.isNotBlank() }
+                ?: GENERAL_VP_FALLBACK_AUD
+            require(nonce.isNotBlank() && challenge.isNotBlank()) {
+                "VP 요청 challenge 정보를 확인할 수 없습니다."
+            }
+
+            storeVerifierChallenge(
+                challenge = nonce,
+                domain = domain,
+                issuedAt = nowUtcIso(),
+                expiresAt = vpRequest.expiresAt ?: Instant.now().plusSeconds(VP_LOGIN_LOCAL_CHALLENGE_TTL_SECONDS).toString(),
+                used = false
+            )
+
+            val credentialOptions = eligibleGeneralVpRequestCredentials()
+            val submitReview = requestVpLoginSubmitReview(
+                requestId = resolvedRequestId,
+                resolveResponse = vpRequest.toSubmitReviewData(domain),
+                credentials = credentialOptions
+            )
+            val selectedCredentialId = submitReview.text("selectedCredentialId")
+                ?: submitReview.text("selectedIssuerId")
+                ?: credentialOptions.first().credentialId
+            val credential = credentialOptions.firstOrNull { it.credentialId == selectedCredentialId }
+                ?: throw IllegalArgumentException("선택한 Credential을 찾을 수 없습니다.")
+            val backendCredentialId = credential.credentialId.toLongOrNull()
+                ?: throw IllegalArgumentException("제출 가능한 Credential 식별값이 올바르지 않습니다.")
+            logBridgeFlow(
+                "vp.request.credential.selected",
+                mapOf(
+                    "requestId" to resolvedRequestId,
+                    "credentialId" to credential.credentialId,
+                    "credentialType" to credential.credentialType,
+                    "localStatus" to credentialLocalStatus(credential).code,
+                    "selectedDocumentsCount" to ((submitReview["selectedDocuments"] as? JsonArray)?.size ?: 0),
+                    "selectedDisclosureCount" to ((submitReview["selectedDisclosures"] as? JsonArray)?.size ?: 0)
+                )
+            )
+
+            val presentationRequest = buildJsonObject {
+                put("credentialId", credential.credentialId)
+                put("challenge", challenge)
+                put("nonce", nonce)
+                put("domain", domain)
+                put("aud", vpRequest.aud?.takeIf { it.isNotBlank() } ?: domain)
+                put("presentationDefinition", vpRequest.presentationDefinition ?: defaultSdJwtPresentationDefinition())
+                put("requiredDisclosures", JsonArray(vpRequest.requiredDisclosures.map { JsonPrimitive(it) }))
+                vpRequest.documentRules?.let { put("documentRules", it) }
+                (submitReview["selectedDocuments"] as? JsonArray)?.let { put("selectedDocuments", it) }
+                (submitReview["selectedDisclosures"] as? JsonArray)?.let { put("selectedDisclosures", it) }
+            }
+            val presentationResult = buildVpLoginPresentationObject(presentationRequest)
+            submitGeneralVpPresentation(
+                requestId = resolvedRequestId,
+                credentialId = backendCredentialId,
+                nonce = nonce,
+                challenge = challenge,
+                presentation = presentationResult.presentation,
+                didDocument = presentationResult.didDocument,
+                deviceId = deviceId
+            )
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "VP 제출이 완료되었습니다.", Toast.LENGTH_LONG).show()
+                emitCallback("VP_REQUEST", true) {
+                    put("requestId", resolvedRequestId)
+                    put("credentialId", credential.credentialId)
+                    put("status", "submitted")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "general vp request flow failed", e)
+            withContext(Dispatchers.Main) {
+                val message = classifyGeneralVpRequestError(e)
+                Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                emitCallback("VP_REQUEST", false) {
+                    requestId?.let { put("requestId", it) }
+                    put("error", message)
+                }
+            }
+        }
+    }
+
+    private fun resolveGeneralVpRequest(qrPayload: String): GeneralVpResolveData {
+        val body = JSONObject()
+            .put("qrPayload", qrPayload)
+            .toString()
+        val responseBody = postJsonPublic(
+            "$VP_LOGIN_BACKEND_BASE_URL/api/mobile/qr/resolve",
+            body,
+            "VP request QR resolve"
+        )
+        val response = JSONObject(responseBody)
+        val data = unwrapCommonResponseData(response, "VP 요청 QR을 확인할 수 없습니다.")
+        val type = data.optString("type")
+        val nextAction = data.optString("nextAction").takeIf { it.isNotBlank() }
+        val requestId = data.optString("requestId").ifBlank { data.optString("targetId") }
+        require(normalizeQrAction(type) == "VP_REQUEST") { "유효하지 않은 VP 요청 QR입니다." }
+        require(nextAction.isNullOrBlank() || normalizeQrAction(nextAction) == "VP_REQUEST") {
+            "지원하지 않는 VP 요청 QR입니다."
+        }
+        require(requestId.isNotBlank()) { "VP 요청 ID를 확인할 수 없습니다." }
+        return GeneralVpResolveData(
+            type = type,
+            requestId = requestId,
+            nextAction = nextAction
+        )
+    }
+
+    private fun resolveGeneralVpRequestOrFallback(
+        qrPayload: String,
+        requestId: String?,
+        hasQrToken: Boolean
+    ): GeneralVpResolveData {
+        return runCatching {
+            resolveGeneralVpRequest(qrPayload)
+        }.getOrElse { error ->
+            if (hasQrToken || requestId.isNullOrBlank() || !isInvalidGeneralVpQrResolveError(error)) {
+                throw error
+            }
+            logBridgeFlow(
+                "vp.request.qr.resolve.fallback",
+                mapOf(
+                    "requestId" to requestId,
+                    "reason" to "missing_qr_token"
+                )
+            )
+            GeneralVpResolveData(
+                type = "VP_REQUEST",
+                requestId = requestId,
+                nextAction = "OPEN_VP_REQUEST"
+            )
+        }
+    }
+
+    private fun isInvalidGeneralVpQrResolveError(error: Throwable): Boolean {
+        val message = error.message.orEmpty()
+        return message.contains("(400)") ||
+            message.contains("QR Payload", ignoreCase = true) ||
+            message.contains("invalid", ignoreCase = true)
+    }
+
+    private fun getGeneralVpRequest(requestId: String): GeneralVpRequestData {
+        require(requestId.isNotBlank()) { "VP 요청 ID를 확인할 수 없습니다." }
+        val responseBody = getJsonPublic(
+            "$VP_LOGIN_BACKEND_BASE_URL/api/mobile/vp/requests/$requestId",
+            "VP request detail"
+        )
+        val response = JSONObject(responseBody)
+        val data = unwrapCommonResponseData(response, "VP 요청을 확인할 수 없습니다.")
+        val presentationDefinition = data.optJSONObject("presentationDefinition")
+            ?.let { Json.parseToJsonElement(it.toString()).jsonObject }
+        val requiredClaims = data.optJSONArray("requiredClaims")?.toStringList().orEmpty()
+        val requiredDisclosures = data.optJSONArray("requiredDisclosures")?.toStringList()
+            ?: data.optJSONObject("presentationDefinition")?.optJSONArray("requiredDisclosures")?.toStringList()
+            ?: requiredClaims
+        val documentRules = data.optJSONArray("documentRules")?.toJsonArray()
+            ?: (presentationDefinition?.get("documentRules") as? JsonArray)
+        val challenge = data.optString("challenge")
+        val nonce = data.optString("nonce")
+        val status = data.optString("status").takeIf { it.isNotBlank() }
+        val normalizedStatus = status?.uppercase(Locale.US)
+        require(challenge.isNotBlank() || nonce.isNotBlank()) {
+            "VP 요청 challenge 정보를 확인할 수 없습니다."
+        }
+        require(!data.optBoolean("expired", false)) {
+            "만료된 VP 요청입니다."
+        }
+        require(!data.optBoolean("submitted", false)) {
+            "이미 제출된 VP 요청입니다."
+        }
+        require(normalizedStatus == null || normalizedStatus !in GENERAL_VP_TERMINAL_STATUSES) {
+            "이미 제출 또는 취소된 VP 요청입니다."
+        }
+        return GeneralVpRequestData(
+            requestId = data.optString("requestId").ifBlank { requestId },
+            requesterName = data.optString("requesterName").takeIf { it.isNotBlank() },
+            purpose = data.optString("purpose").takeIf { it.isNotBlank() },
+            requiredClaims = requiredClaims,
+            requiredDisclosures = requiredDisclosures,
+            documentRules = documentRules,
+            presentationDefinition = presentationDefinition,
+            challenge = challenge,
+            nonce = nonce,
+            aud = data.optString("aud").takeIf { it.isNotBlank() },
+            domain = data.optString("domain").takeIf { it.isNotBlank() },
+            expiresAt = data.optString("expiresAt").takeIf { it.isNotBlank() },
+            expired = data.optBoolean("expired", false),
+            submitted = data.optBoolean("submitted", false),
+            status = normalizedStatus ?: status
+        )
+    }
+
+    private suspend fun eligibleGeneralVpRequestCredentials(): List<CredentialEntity> {
+        val walletState = walletStateStore.requireWalletState()
+        val activeCredentials = credentialRepository.getCredentialsByHolderAccount(walletState.account)
+            .filter { credential ->
+                credential.sdJwt?.isNotBlank() == true &&
+                    credential.revokedOrInactiveAt.isNullOrBlank() &&
+                    credential.credentialId.toLongOrNull() != null &&
+                    !credential.acceptedAt.isNullOrBlank() &&
+                    !credential.credentialAcceptHash.isNullOrBlank() &&
+                    credentialLocalStatus(credential).code == "active"
+            }
+        val kycCredentials = activeCredentials.filter { credential -> isKycCredential(credential) }
+        val credentials = kycCredentials.ifEmpty { activeCredentials }
+            .dedupeLatestByIssuer()
+        logBridgeFlow(
+            "vp.request.credential.candidates",
+            mapOf(
+                "activeCandidateCount" to activeCredentials.size,
+                "kycCandidateCount" to kycCredentials.size,
+                "selectedCandidateCount" to credentials.size,
+                "usedKycFallback" to (activeCredentials.isNotEmpty() && kycCredentials.isEmpty())
+            )
+        )
+        require(credentials.isNotEmpty()) { "이 기기에 제출 가능한 KYC VC가 없습니다." }
+        return credentials
+    }
+
+    private fun isKycCredential(credential: CredentialEntity): Boolean {
+        val raw = credential.sdJwt ?: credential.vcJwt ?: credential.vcJson
+        val payload = raw?.let { runCatching { parseCredentialEnvelope(it).payload }.getOrNull() }
+        val typeCandidates = buildList {
+            add(credential.credentialType)
+            payload?.text("vct")?.let { add(it) }
+            payload?.text("credentialType")?.let { add(it) }
+            payload?.obj("credentialStatus")?.text("credentialType")?.let { add(it) }
+            payload?.array("type")
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                ?.forEach { add(it) }
+        }
+        return typeCandidates.any { type ->
+            val normalized = type.uppercase(Locale.US)
+            normalized == "KYC_CREDENTIAL" ||
+                normalized == "LEGAL_ENTITY_KYC_CREDENTIAL" ||
+                normalized.contains("KYC")
+        }
+    }
+
+    private fun GeneralVpRequestData.toSubmitReviewData(domainFallback: String): VpLoginResolveData {
+        return VpLoginResolveData(
+            requestId = requestId,
+            nonce = nonce.ifBlank { challenge },
+            challenge = challenge.ifBlank { nonce },
+            aud = aud?.takeIf { it.isNotBlank() } ?: domainFallback,
+            domain = domain?.takeIf { it.isNotBlank() } ?: domainFallback,
+            expiresAt = expiresAt.orEmpty(),
+            presentationDefinition = presentationDefinition ?: defaultSdJwtPresentationDefinition(),
+            requiredDisclosures = requiredDisclosures.ifEmpty { requiredClaims },
+            requesterName = requesterName ?: "KYvC Finance",
+            purpose = purpose.orEmpty(),
+            requiredClaims = requiredClaims,
+            documentRules = documentRules,
+            actionType = "VP_REQUEST"
+        )
+    }
+
+    private fun submitGeneralVpPresentation(
+        requestId: String,
+        credentialId: Long,
+        nonce: String,
+        challenge: String,
+        presentation: JsonObject,
+        didDocument: JsonObject,
+        deviceId: String
+    ) {
+        val body = buildJsonObject {
+            put("requestId", requestId)
+            put("credentialId", credentialId)
+            put("nonce", nonce)
+            put("challenge", challenge)
+            put("format", "kyvc-sd-jwt-presentation-v1")
+            put("presentation", presentation)
+            presentation["attachmentManifest"]?.let { put("attachmentManifest", it) }
+            put("didDocument", didDocument)
+            put("deviceId", deviceId)
+        }.toString()
+        logBridgeFlow(
+            "vp.request.submit.request",
+            mapOf(
+                "requestId" to requestId,
+                "credentialId" to credentialId,
+                "hasPresentation" to true,
+                "hasDidDocument" to true
+            )
+        )
+        val responseBody = postJsonPublic(
+            "$VP_LOGIN_BACKEND_BASE_URL/api/mobile/vp/presentations",
+            body,
+            "VP request submit"
+        )
+        val response = JSONObject(responseBody)
+        unwrapCommonResponseData(response, "VP 제출에 실패했습니다.")
+        logBridgeFlow(
+            "vp.request.submit.completed",
+            mapOf(
+                "requestId" to requestId,
+                "credentialId" to credentialId
+            )
+        )
+    }
+
     private suspend fun eligibleVpLoginCredentials(): List<CredentialEntity> {
         val walletState = walletStateStore.requireWalletState()
         val credentials = credentialRepository.getCredentialsByHolderAccount(walletState.account)
@@ -4403,7 +4740,16 @@ class WalletBridge(
             put("action", "REQUEST_CREDENTIAL_SUBMIT")
             put("requestId", reviewRequestId)
             put("issuedAt", nowUtcIso())
-            put("requesterName", resolveResponse.domain.ifBlank { "PC 로그인 요청" })
+            put("actionType", resolveResponse.actionType)
+            put("requestType", resolveResponse.actionType)
+            put("vpRequestId", requestId)
+            put("requesterName", resolveResponse.requesterName.ifBlank { resolveResponse.domain.ifBlank { "PC 로그인 요청" } })
+            put("purpose", resolveResponse.purpose)
+            put("expiresAt", resolveResponse.expiresAt)
+            put("requiredClaims", JsonArray(resolveResponse.requiredClaims.map { JsonPrimitive(it) }))
+            put("requiredDisclosures", JsonArray(resolveResponse.requiredDisclosures.map { JsonPrimitive(it) }))
+            resolveResponse.documentRules?.let { put("documentRules", it) }
+            put("presentationDefinition", resolveResponse.presentationDefinition)
             put("issuerName", selectedIssuerName)
             put("issuerDid", selectedCredential.issuerDid)
             put("holderDid", selectedCredential.holderDid)
@@ -4600,7 +4946,7 @@ class WalletBridge(
         val disclosuresByDigest = sdCredential.disclosures
             .mapNotNull { decodeSdJwtDisclosure(it) }
             .associateBy { it.digest }
-        val requiredKeys = requiredDisclosures.map { disclosurePathKey(it) }.toSet()
+        val requiredKeys = requiredDisclosureKeys(requiredDisclosures)
         val claims = mutableListOf<DisclosureClaimForSubmit>()
         collectDisclosureClaimsForSubmit(
             element = sdCredential.issuerPayload,
@@ -4790,6 +5136,68 @@ class WalletBridge(
 
     private fun disclosurePathKey(path: String): String {
         return normalizedDisclosurePathParts(path).joinToString(".")
+    }
+
+    private fun requiredDisclosureKeys(requiredDisclosures: List<String>): Set<String> {
+        return requiredDisclosures
+            .flatMap { requiredDisclosurePathAliases(it) }
+            .map { disclosurePathKey(it) }
+            .toSet()
+    }
+
+    private fun requiredDisclosurePathAliases(path: String): List<String> {
+        val normalized = disclosurePathKey(path)
+        return when (normalized) {
+            "corporateName" -> listOf(
+                path,
+                "legalEntity.name",
+                "credentialSubject.legalEntity.name",
+                "claims.legalEntity.name"
+            )
+            "businessRegistrationNo",
+            "businessRegistrationNumber" -> listOf(
+                path,
+                "businessRegistrationNo",
+                "businessRegistrationNumber",
+                "legalEntity.registrationNumber",
+                "legalEntity.businessRegistrationNo",
+                "legalEntity.businessRegistrationNumber"
+            )
+            "corporateRegistrationNo",
+            "corporateRegistrationNumber" -> listOf(
+                path,
+                "corporateRegistrationNo",
+                "corporateRegistrationNumber",
+                "legalEntity.registrationNumber",
+                "legalEntity.corporateRegistrationNo",
+                "legalEntity.corporateRegistrationNumber"
+            )
+            "representativeName" -> listOf(
+                path,
+                "representative.name",
+                "representative.fullName",
+                "legalRepresentative.name"
+            )
+            "kycStatus" -> listOf(
+                path,
+                "kyc.status",
+                "credentialStatus.status",
+                "credentialStatus.credentialStatus"
+            )
+            "credentialIssuedAt" -> listOf(
+                path,
+                "issuedAt",
+                "validFrom",
+                "iat"
+            )
+            "credentialExpiresAt" -> listOf(
+                path,
+                "expiresAt",
+                "validUntil",
+                "exp"
+            )
+            else -> listOf(path)
+        }.distinct()
     }
 
     private fun String.documentTypeLabel(): String {
@@ -5072,6 +5480,28 @@ class WalletBridge(
                 message.contains("409") ||
                 message.contains("400") ||
                 message.contains("403") -> "VP 로그인 요청을 확인할 수 없습니다.\nQR이 만료되었거나 잘못된 요청입니다."
+            else -> message.ifBlank { "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요." }
+        }
+    }
+
+    private fun classifyGeneralVpRequestError(error: Exception): String {
+        val message = error.message.orEmpty()
+        return when {
+            message.contains("이 기기에 제출 가능한 KYC VC") -> "이 기기에 제출 가능한 KYC VC가 없습니다."
+            message.contains("Credential 식별값") || message.contains("credentialId", ignoreCase = true) ->
+                "제출 가능한 Credential 식별값이 올바르지 않습니다."
+            message.contains("410") || message.contains("만료") -> "만료된 VP 요청입니다."
+            message.contains("404") || message.contains("요청 없음") -> "VP 요청을 찾을 수 없습니다."
+            message.contains("409") ||
+                message.contains("이미 제출") ||
+                message.contains("취소") ||
+                message.contains("상태") -> "이미 제출 또는 취소된 VP 요청입니다."
+            message.contains("400") || message.contains("유효하지 않은 VP 요청 QR") -> "유효하지 않은 VP 요청 QR입니다."
+            message.contains("500") || message.contains("502") || message.contains("504") ->
+                "서버 또는 Core 검증 오류가 발생했습니다.\n잠시 후 다시 시도해주세요."
+            message.contains("challenge", ignoreCase = true) ||
+                message.contains("nonce", ignoreCase = true) -> "VP 요청 challenge 정보를 확인할 수 없습니다."
+            message.contains("submit", ignoreCase = true) -> "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요."
             else -> message.ifBlank { "VP 제출에 실패했습니다.\n잠시 후 다시 시도해주세요." }
         }
     }
@@ -5513,6 +5943,10 @@ class WalletBridge(
                 optString(index).takeIf { it.isNotBlank() }?.let(::add)
             }
         }
+    }
+
+    private fun org.json.JSONArray.toJsonArray(): JsonArray {
+        return Json.parseToJsonElement(toString()) as? JsonArray ?: JsonArray(emptyList())
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.putDidDocumentFromCore(
@@ -5963,6 +6397,54 @@ class WalletBridge(
         }
     }
 
+    private fun postJsonPublic(endpoint: String, body: String, requestLabel: String): String {
+        val url = endpoint.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid $requestLabel endpoint: $endpoint")
+        val request = Request.Builder()
+            .url(url)
+            .post(body.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("$requestLabel request failed (${response.code}): ${safeBackendErrorMessage(responseBody)}")
+            }
+            return responseBody
+        }
+    }
+
+    private fun getJsonPublic(endpoint: String, requestLabel: String): String {
+        val url = endpoint.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid $requestLabel endpoint: $endpoint")
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("$requestLabel request failed (${response.code}): ${safeBackendErrorMessage(responseBody)}")
+            }
+            return responseBody
+        }
+    }
+
+    private fun safeBackendErrorMessage(responseBody: String): String {
+        return runCatching {
+            val response = JSONObject(responseBody)
+            response.optString("message").takeIf { it.isNotBlank() }
+                ?: response.optString("error").takeIf { it.isNotBlank() }
+                ?: response.optString("code").takeIf { it.isNotBlank() }
+        }.getOrNull() ?: "backend request failed"
+    }
+
+    private fun unwrapCommonResponseData(response: JSONObject, fallbackMessage: String): JSONObject {
+        if (response.has("success") && !response.optBoolean("success", false)) {
+            throw IllegalStateException(response.optString("message").ifBlank { fallbackMessage })
+        }
+        return response.optJSONObject("data") ?: response
+    }
+
     private fun fetchJsonOrNull(endpoint: String): JsonObject? {
         val url = endpoint.toHttpUrlOrNull() ?: return null
         val request = Request.Builder()
@@ -6378,7 +6860,7 @@ class WalletBridge(
         val selectedValues = request.array("selectedDisclosures")
             ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
             .orEmpty()
-        val requiredPaths = (
+        val requestedRequiredPaths = (
             request.array("requiredDisclosures")
                 ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
                 .orEmpty() +
@@ -6387,6 +6869,11 @@ class WalletBridge(
                     ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.takeIf { value -> value.isNotBlank() } }
                     .orEmpty()
             ).distinct()
+        val requiredPaths = resolveRequiredDisclosurePathsForSdJwt(
+            requiredDisclosures = requestedRequiredPaths,
+            issuerPayload = issuerPayload,
+            allDisclosures = allDisclosures
+        )
         val explicitDisclosures = selectedValues.filter { isSdJwtDisclosureString(it) }
         val selectedDocumentPaths = if (request.array("selectedDocuments")?.isNotEmpty() == true) {
             listOf("documentEvidence[]")
@@ -6450,6 +6937,22 @@ class WalletBridge(
         return runCatching {
             Json.parseToJsonElement(decodeBase64UrlToString(value)) is JsonArray
         }.getOrDefault(false)
+    }
+
+    private fun resolveRequiredDisclosurePathsForSdJwt(
+        requiredDisclosures: List<String>,
+        issuerPayload: JsonObject,
+        allDisclosures: List<String>
+    ): List<String> {
+        return requiredDisclosures.flatMap { requiredPath ->
+            val aliases = requiredDisclosurePathAliases(requiredPath)
+            aliases.filter { alias ->
+                sdJwtPathIncluded(issuerPayload, allDisclosures, alias) ||
+                    allDisclosures.any { disclosure -> disclosureMatchesAnyPath(disclosure, listOf(alias)) }
+            }.ifEmpty {
+                listOf(requiredPath)
+            }
+        }.distinct()
     }
 
     private fun disclosureMatchesAnyPath(disclosure: String, paths: List<String>): Boolean {
@@ -6646,7 +7149,36 @@ class WalletBridge(
         val domain: String,
         val expiresAt: String,
         val presentationDefinition: JsonObject,
-        val requiredDisclosures: List<String>
+        val requiredDisclosures: List<String>,
+        val requesterName: String = "",
+        val purpose: String = "",
+        val requiredClaims: List<String> = emptyList(),
+        val documentRules: JsonArray? = null,
+        val actionType: String = "VP_LOGIN_REQUEST"
+    )
+
+    private data class GeneralVpResolveData(
+        val type: String,
+        val requestId: String,
+        val nextAction: String?
+    )
+
+    private data class GeneralVpRequestData(
+        val requestId: String,
+        val requesterName: String?,
+        val purpose: String?,
+        val requiredClaims: List<String>,
+        val requiredDisclosures: List<String>,
+        val documentRules: JsonArray?,
+        val presentationDefinition: JsonObject?,
+        val challenge: String,
+        val nonce: String,
+        val aud: String?,
+        val domain: String?,
+        val expiresAt: String?,
+        val expired: Boolean,
+        val submitted: Boolean,
+        val status: String?
     )
 
     private fun nowUtcIso(): String {
@@ -6988,7 +7520,16 @@ class WalletBridge(
         private const val FORMAT_VC_JWT = "vc+jwt"
         private const val FORMAT_JSON = "json"
         private const val VP_LOGIN_BACKEND_BASE_URL = "https://dev-api-kyvc.khuoo.synology.me"
+        private const val GENERAL_VP_FALLBACK_AUD = "kyvc-finance-vp"
         private const val VP_LOGIN_LOCAL_CHALLENGE_TTL_SECONDS = 24L * 60L * 60L
+        private val GENERAL_VP_TERMINAL_STATUSES = setOf(
+            "PRESENTED",
+            "VALID",
+            "INVALID",
+            "REPLAY_SUSPECTED",
+            "EXPIRED",
+            "CANCELLED"
+        )
         private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
             "dev-kyvc.khuoo.synology.me",

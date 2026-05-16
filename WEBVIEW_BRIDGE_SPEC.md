@@ -2,11 +2,16 @@
 
 이 문서는 웹이 Android WebView 브리지를 호출할 때 사용하는 최신 호출 규격 문서다. 브리지 함수가 바뀌면 이 문서를 같이 갱신한다.
 
-- Spec Version: `1.6.2`
-- Last Updated: `2026-05-13`
+- Spec Version: `1.6.3`
+- Last Updated: `2026-05-16`
 
 ## Changelog
 
+- `1.6.3` (2026-05-16)
+  - 증명서 제출 화면의 발급기관 선택명과 증명서 상세/발급확인 화면의 발급기관명을 backend 공통 DID 기관 조회 API 기준으로 표시
+  - 발급기관명 조회 API: `GET /api/common/dids/{issuerDid}/institution`
+  - 화면 요청 payload에 `issuerName`이 없거나 신뢰할 수 없는 경우 Android는 `credentialId`로 로컬 credential을 조회해 `issuerDid`를 복원하고 기관명을 조회
+  - `KYvC 인증기관`, `법원행정처`, `발급기관 1` 같은 테스트 fallback 이름은 사용하지 않고 실제 API 값 또는 `-`/실제 DID-account fallback만 표시
 - `1.6.2` (2026-05-13)
   - PC VP 로그인 submit body에 holder DID Document를 포함하는 기준 명시: `didDocument`, `didDocuments`, `did_documents`
   - VP 생성 전 holder binding 진단 로그 추가: `vp.login.holder.binding`
@@ -2181,6 +2186,8 @@ Android submit body:
 - 발급 확인 화면의 현재 잔액/등록 후 사용 가능 잔액은 Android가 활성 지갑의 XRPL account balance를 조회해 표시한다. 웹 payload의 `currentBalanceXrp`, `balanceXrp`, `usableBalanceXrp`는 조회 실패 시 fallback으로만 사용한다.
 - 발급 확인 화면의 `networkFeeXrp`/`feeXrp`가 `"0.000012 XRP"`처럼 XRP 단위면 그대로 사용하고, `"12"` 또는 `"12 drops"`처럼 drops 단위로 들어오면 `0.000012 XRP`로 정규화해 표시/계산한다.
 - 발급 확인 화면의 발급 상세 정보는 실제 offer/credential 응답값을 사용해야 한다. Android는 `corporateName/companyName/legalEntity.name`, `businessNumber/businessRegistrationNumber/legalEntity.registrationNumber`, `legalEntity.type`, `representative.name`, `beneficialOwners[].name`, `agent.name/authorizedAgent.name/delegate.name` alias를 함께 해석하며, 값이 없으면 테스트 값 대신 `-`로 표시한다.
+- 발급 확인/상세/제출 화면의 발급기관명은 `issuerDid` 기준 `GET /api/common/dids/{issuerDid}/institution` 응답의 `institutionName`을 사용한다. payload에 `issuerDid`가 없고 `credentialId`가 있으면 Android는 로컬 credential에서 `issuerDid`를 복원해 같은 API를 호출한다.
+- 발급기관명 API 조회 실패 시 Android는 테스트 기관명을 표시하지 않는다. 실제 API 값이 없으면 `-` 또는 로컬 credential의 실제 `issuerDid`/`issuerAccount`만 fallback으로 표시한다.
 - 증명서 상세 화면 카드의 큰 제목은 `법인 kyc 증명서`로 고정 표시한다. 카드 좌측 상단에는 `issuerDid`, 좌측 하단에는 `holderDid`, 우측 하단에는 발급일/만료일을 2줄로 표시한다.
 - 증명서 상세 화면은 `credentialId`로 로컬 저장된 credential을 찾을 수 있으면 저장된 `sdJwt`, `vcJwt`, `vcJson`, `selectiveDisclosureJson`의 claim key/value를 우선 펼쳐 표시한다. 저장 원문을 찾지 못하면 화면 요청 payload의 요약 필드를 fallback으로 표시한다.
 - 저장 credential claim은 KYvC legal entity KYC claim 포맷 기준으로 정렬/라벨링한다. 공통 메타 claim(`iss`, `sub`, `vct`, `jti`, `iat`, `exp`, `cnf.kid`, `credentialStatus.*`) 뒤에 `kyc.*`, `legalEntity.*`, `representative.*`, `beneficialOwners[]`, `delegate.*`, `delegation.*`, `establishmentPurpose.*`, `extra.aiAssessmentRef.*`, `documentEvidence[]` 순서로 표시한다.

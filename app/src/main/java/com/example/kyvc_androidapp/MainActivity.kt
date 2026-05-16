@@ -2051,7 +2051,7 @@ private data class SubmitDisclosureItem(
 )
 
 private data class CredentialUiData(
-    val issuerName: String = "법원행정처",
+    val issuerName: String = "-",
     val credentialId: String = "",
     val requesterName: String = "신한은행",
     val credentialTitle: String = "법인등록증명서",
@@ -2284,7 +2284,7 @@ private data class CredentialUiData(
                     ?: return listOf(
                         SubmitIssuerOption(
                             issuerId = firstText("default", "issuerId", "issuerAccount", "issuerDid"),
-                            issuerName = firstText("KYvC 인증기관", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
+                            issuerName = firstText("-", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
                             credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
                             selected = true,
                             submitDocuments = defaultDocuments,
@@ -2297,7 +2297,9 @@ private data class CredentialUiData(
                         val issuerName = item.optString("issuerName")
                             .ifBlank { item.optString("name") }
                             .ifBlank { item.optString("displayName") }
-                            .ifBlank { "발급기관 ${index + 1}" }
+                            .ifBlank { item.optString("issuerDid") }
+                            .ifBlank { item.optString("issuerAccount") }
+                            .ifBlank { "-" }
                         val issuerId = item.optString("issuerId")
                             .ifBlank { item.optString("id") }
                             .ifBlank { item.optString("issuerAccount") }
@@ -2324,7 +2326,7 @@ private data class CredentialUiData(
                         )
                     }
                 }.ifEmpty {
-                    listOf(SubmitIssuerOption("default", "KYvC 인증기관", "", true))
+                    listOf(SubmitIssuerOption("default", "-", "", true))
                 }
             }
             fun parseSubmitDocuments(): List<SubmitDocumentItem> {
@@ -2403,7 +2405,7 @@ private data class CredentialUiData(
                 "expiresAt"
             )
             return CredentialUiData(
-                issuerName = firstText("KYvC 인증기관", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
+                issuerName = firstText("-", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
                 credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
                 requesterName = text("requesterName", "-"),
                 credentialTitle = text("credentialTitle", "법인 kyc 증명서"),
@@ -2651,7 +2653,7 @@ private fun IssueConfirmDetailCard(data: CredentialUiData) {
             .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(13.dp)
     ) {
-        IssueConfirmInfoRow("발급 기관", data.issuerName.ifBlank { "KYvC 인증기관" })
+        IssueConfirmInfoRow("발급 기관", data.issuerName.ifBlank { "-" })
         IssueConfirmInfoRow("법인유형", data.companyType)
         IssueConfirmInfoRow("법인명", data.holderName)
         IssueConfirmInfoRow("법인등록번호", data.registrationNumber)

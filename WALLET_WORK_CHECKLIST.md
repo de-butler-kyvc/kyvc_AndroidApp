@@ -47,6 +47,9 @@
 - [x] QR 스캔 화면을 프레임 내부 카메라/외부 남색 불투명 배경으로 정리
 - [x] VC 저장 시 `documentAttachments[].contentBase64`를 암호화 저장하고 manifest 메타를 credential과 연결
 - [x] multipart VP 제출 시 `attachmentManifest` part와 `attachmentRef` 파일 part 전송
+- [x] 증명서 제출 화면의 발급기관 선택명을 `GET /api/common/dids/{issuerDid}/institution` 기반 실제 기관명으로 표시
+- [x] 증명서 상세/발급확인 화면의 발급기관명을 `credentialId` -> 로컬 credential `issuerDid` -> 기관 조회 API 순서로 보강
+- [x] 발급기관명 UI에서 테스트 fallback 이름(`KYvC 인증기관`, `법원행정처`, `발급기관 N`) 제거
 - [x] WebView 테스트 UI를 SD-JWT/nonce/KB-JWT 용어로 갱신
 - [x] `Wallet Implimentation Guide.md`를 SD-JWT 기준으로 갱신
 

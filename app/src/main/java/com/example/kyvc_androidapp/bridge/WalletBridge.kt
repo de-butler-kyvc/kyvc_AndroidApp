@@ -919,7 +919,14 @@ class WalletBridge(
                     allowedActions = setOf(action),
                     ttlSeconds = 30
                 )
-                launchCredentialNativeScreen(screen, jsonPayload)
+                val screenPayload = if (screen == "credentialDetail" || screen == "issueConfirm") {
+                    withContext(Dispatchers.IO) {
+                        enrichCredentialIssuerInstitutionName(request).toString()
+                    }
+                } else {
+                    jsonPayload
+                }
+                launchCredentialNativeScreen(screen, screenPayload)
             } catch (e: Exception) {
                 Log.e(TAG, "requestCredentialNativeScreen failed", e)
                 emitCallback(action, false) {
@@ -4384,14 +4391,20 @@ class WalletBridge(
         val submitDisclosuresByCredential = credentials.associate { credential ->
             credential.credentialId to credentialSubmitDisclosurePayload(credential, resolveResponse.requiredDisclosures)
         }
+        val issuerNamesByCredential = mutableMapOf<String, String>()
+        credentials.forEach { credential ->
+            issuerNamesByCredential[credential.credentialId] = resolveIssuerInstitutionName(credential)
+        }
         val submitDocuments = submitDocumentsByCredential[selectedCredential.credentialId] ?: JsonArray(emptyList())
         val submitDisclosures = submitDisclosuresByCredential[selectedCredential.credentialId] ?: JsonArray(emptyList())
+        val selectedIssuerName = issuerNamesByCredential[selectedCredential.credentialId]
+            ?: selectedCredential.issuerDisplayName()
         val payload = buildJsonObject {
             put("action", "REQUEST_CREDENTIAL_SUBMIT")
             put("requestId", reviewRequestId)
             put("issuedAt", nowUtcIso())
             put("requesterName", resolveResponse.domain.ifBlank { "PC 로그인 요청" })
-            put("issuerName", selectedCredential.issuerDisplayName())
+            put("issuerName", selectedIssuerName)
             put("issuerDid", selectedCredential.issuerDid)
             put("holderDid", selectedCredential.holderDid)
             put("credentialId", selectedCredential.credentialId)
@@ -4403,7 +4416,7 @@ class WalletBridge(
                     credentials.mapIndexed { index, credential ->
                         buildJsonObject {
                             put("issuerId", credential.credentialId)
-                            put("issuerName", credential.issuerDisplayName())
+                            put("issuerName", issuerNamesByCredential[credential.credentialId] ?: credential.issuerDisplayName())
                             put("credentialId", credential.credentialId)
                             put("selected", index == 0)
                             put("submitDocuments", submitDocumentsByCredential[credential.credentialId] ?: JsonArray(emptyList()))
@@ -4438,10 +4451,107 @@ class WalletBridge(
         }.sortedBy { it.issuerDisplayName() }
     }
 
+    private suspend fun resolveIssuerInstitutionName(credential: CredentialEntity): String {
+        val fallback = credential.issuerDisplayName()
+        val issuerDid = credential.issuerDid.takeIf { it.isNotBlank() } ?: return fallback
+        return resolveIssuerInstitutionNameByDid(issuerDid, fallback)
+    }
+
+    private suspend fun resolveIssuerInstitutionNameByDid(issuerDid: String, fallback: String): String {
+        val endpoint = resolveBackendEndpoint(
+            baseUrl = VP_LOGIN_BACKEND_BASE_URL,
+            endpoint = null,
+            defaultPath = "/api/common/dids/$issuerDid/institution"
+        )
+        logBridgeFlow(
+            "vp.login.issuerInstitution.request",
+            mapOf(
+                "issuerDid" to issuerDid,
+                "endpointPath" to endpoint.safeEndpointPath()
+            )
+        )
+        val response = fetchJsonOrNull(endpoint) ?: run {
+            logBridgeFlow(
+                "vp.login.issuerInstitution.fallback",
+                mapOf(
+                    "issuerDid" to issuerDid,
+                    "reason" to "empty_or_failed_response",
+                    "fallback" to fallback
+                )
+            )
+            return fallback
+        }
+        val data = response.obj("data")
+        val institutionName = response.text("institutionName")
+            ?: data?.text("institutionName")
+            ?: response.text("name")
+            ?: data?.text("name")
+        logBridgeFlow(
+            "vp.login.issuerInstitution.resolved",
+            mapOf(
+                "issuerDid" to issuerDid,
+                "institutionName" to (institutionName ?: fallback),
+                "status" to (response.text("status") ?: data?.text("status"))
+            )
+        )
+        return institutionName?.takeIf { it.isNotBlank() } ?: fallback
+    }
+
+    private suspend fun enrichCredentialIssuerInstitutionName(request: JsonObject): JsonObject {
+        val credentialId = firstText(request, "credentialId", "id")
+            ?: firstText(request.obj("metadata"), "credentialId")
+            ?: firstText(request.obj("credentialPayload")?.obj("metadata"), "credentialId")
+            ?: firstText(request.obj("data")?.obj("credentialPayload")?.obj("metadata"), "credentialId")
+        val storedCredential = credentialId?.let { credentialRepository.getCredentialById(it) }
+        val issuerDid = credentialIssuerDidFromRequest(request)
+            ?: storedCredential?.issuerDid?.takeIf { it.isNotBlank() }
+            ?: return request
+        val fallback = credentialIssuerNameFromRequest(request)
+            ?: storedCredential?.issuerDisplayName()
+            ?: issuerDid
+        val institutionName = resolveIssuerInstitutionNameByDid(issuerDid, fallback)
+        return buildJsonObject {
+            request.forEach { (key, value) -> put(key, value) }
+            put("issuerName", institutionName)
+            put("issuerDisplayName", institutionName)
+        }
+    }
+
+    private fun credentialIssuerDidFromRequest(request: JsonObject): String? {
+        val credentialPayload = request.obj("credentialPayload")
+        val payloadMetadata = credentialPayload?.obj("metadata")
+        val data = request.obj("data")
+        val dataCredentialPayload = data?.obj("credentialPayload")
+        val dataPayloadMetadata = dataCredentialPayload?.obj("metadata")
+        val metadata = request.obj("metadata")
+        return firstText(request, "issuerDid", "issuer")
+            ?: firstText(metadata, "issuerDid", "issuer")
+            ?: firstText(payloadMetadata, "issuerDid", "issuer")
+            ?: firstText(dataPayloadMetadata, "issuerDid", "issuer")
+            ?: firstText(credentialPayload, "issuerDid", "issuer")
+            ?: firstText(dataCredentialPayload, "issuerDid", "issuer")
+    }
+
+    private fun credentialIssuerNameFromRequest(request: JsonObject): String? {
+        val credentialPayload = request.obj("credentialPayload")
+        val payloadMetadata = credentialPayload?.obj("metadata")
+        val data = request.obj("data")
+        val dataCredentialPayload = data?.obj("credentialPayload")
+        val dataPayloadMetadata = dataCredentialPayload?.obj("metadata")
+        val metadata = request.obj("metadata")
+        val issuerObject = request.obj("issuer")
+        return firstText(request, "issuerName", "issuerDisplayName", "issuerCorporateName")
+            ?: firstText(issuerObject, "institutionName", "name", "displayName")
+            ?: firstText(metadata, "issuerName", "issuerDisplayName", "issuerCorporateName", "institutionName")
+            ?: firstText(payloadMetadata, "issuerName", "issuerDisplayName", "issuerCorporateName", "institutionName")
+            ?: firstText(dataPayloadMetadata, "issuerName", "issuerDisplayName", "issuerCorporateName", "institutionName")
+            ?: firstText(data, "issuerName", "issuerDisplayName", "issuerCorporateName", "institutionName")
+    }
+
     private fun CredentialEntity.issuerDisplayName(): String {
         return issuerDid.ifBlank {
             issuerAccount.ifBlank {
-                "발급기관"
+                ""
             }
         }
     }
@@ -5887,6 +5997,10 @@ class WalletBridge(
             .addPathSegments(defaultPath.trim('/'))
             .build()
             .toString()
+    }
+
+    private fun String.safeEndpointPath(): String {
+        return toHttpUrlOrNull()?.encodedPath ?: substringBefore("?").take(120)
     }
 
     private fun parseInstantOrNull(value: String): Instant? {

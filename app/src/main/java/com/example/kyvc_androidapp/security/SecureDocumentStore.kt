@@ -19,13 +19,14 @@ class SecureDocumentStore(
 
     fun encryptAndStore(rawBytes: ByteArray, originalFilename: String?): StoredBlob {
         val encrypted = encrypt(rawBytes)
-        val safeName = sanitizeFilename(originalFilename)
+        val displayName = displayFilename(originalFilename)
+        val safeName = sanitizeFilename(displayName)
         val fileName = "${System.currentTimeMillis()}-${UUID.randomUUID()}-$safeName.bin"
         val file = File(docsDir, fileName)
         file.writeBytes(encrypted.iv + encrypted.cipherText)
         return StoredBlob(
             blobPath = file.absolutePath,
-            originalFilename = safeName.ifBlank { "document" },
+            originalFilename = displayName.ifBlank { "document" },
             byteSize = rawBytes.size.toLong()
         )
     }
@@ -43,6 +44,16 @@ class SecureDocumentStore(
     private fun sanitizeFilename(name: String?): String {
         if (name.isNullOrBlank()) return "document"
         return name.replace(Regex("[^A-Za-z0-9._-]"), "_").take(64)
+    }
+
+    private fun displayFilename(name: String?): String {
+        if (name.isNullOrBlank()) return "document"
+        return name.substringAfterLast('/')
+            .substringAfterLast('\\')
+            .replace(Regex("[\\p{Cntrl}]"), "")
+            .trim()
+            .take(128)
+            .ifBlank { "document" }
     }
 
     private fun encrypt(bytes: ByteArray): EncryptedValue {

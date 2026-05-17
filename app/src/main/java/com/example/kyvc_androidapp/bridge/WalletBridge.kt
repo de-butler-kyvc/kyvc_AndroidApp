@@ -16,6 +16,7 @@ import com.example.kyvc_androidapp.data.repository.CredentialRepository
 import com.example.kyvc_androidapp.data.repository.HolderDocumentRepository
 import com.example.kyvc_androidapp.security.AppLockStore
 import com.example.kyvc_androidapp.security.SecureDocumentStore
+import com.example.kyvc_androidapp.util.DocumentDisplayMapper
 import com.example.kyvc_androidapp.wallet.core.VpSigner
 import com.example.kyvc_androidapp.wallet.core.WalletStateStore
 import com.example.kyvc_androidapp.wallet.core.XrplClientHelper
@@ -972,7 +973,7 @@ class WalletBridge(
                     allowedActions = setOf(action),
                     ttlSeconds = 30
                 )
-                val screenPayload = if (screen == "credentialDetail" || screen == "issueConfirm") {
+                val screenPayload = if (screen in setOf("issueComplete", "issueConfirm", "credentialDetail", "credentialSubmit")) {
                     withContext(Dispatchers.IO) {
                         enrichCredentialIssuerInstitutionName(request).toString()
                     }
@@ -1881,7 +1882,17 @@ class WalletBridge(
             require(digestMatched) {
                 "document attachment digest mismatch: docId=$documentId"
             }
-            val storedBlob = secureDocumentStore.encryptAndStore(rawBytes, item.text("fileName") ?: item.text("filename") ?: documentId)
+            val storedBlob = secureDocumentStore.encryptAndStore(
+                rawBytes,
+                item.text("originalFileName")
+                    ?: item.text("originalFilename")
+                    ?: item.text("fileName")
+                    ?: item.text("filename")
+                    ?: item.text("displayFileName")
+                    ?: item.text("attachmentName")
+                    ?: item.text("documentName")
+                    ?: documentId
+            )
             logBridgeFlow(
                 "VC_DOCUMENT_SAVE secure store saved",
                 mapOf(
@@ -1901,7 +1912,13 @@ class WalletBridge(
                 item.text("requirementId")?.let { put("requirementId", it) }
                 item.text("documentClass")?.let { put("documentClass", it) }
                 item.text("documentTypeCode")?.let { put("documentTypeCode", it) }
+                item.text("originalFileName")?.let { put("originalFileName", it) }
+                item.text("originalFilename")?.let { put("originalFilename", it) }
                 item.text("fileName")?.let { put("fileName", it) }
+                item.text("filename")?.let { put("filename", it) }
+                item.text("displayFileName")?.let { put("displayFileName", it) }
+                item.text("attachmentName")?.let { put("attachmentName", it) }
+                item.text("documentName")?.let { put("documentName", it) }
                 manifest?.let { put("documentAttachmentManifest", it) }
             }
             holderDocumentRepository.upsert(
@@ -1979,7 +1996,17 @@ class WalletBridge(
                 require(sriEquals(recomputed, digestSRI)) {
                     "digestSRI mismatch: evidence=$digestSRI, file=$recomputed"
                 }
-                val storedBlob = secureDocumentStore.encryptAndStore(rawBytes, request.text("filename") ?: sourceFile.name)
+                val storedBlob = secureDocumentStore.encryptAndStore(
+                    rawBytes,
+                    request.text("originalFileName")
+                        ?: request.text("originalFilename")
+                        ?: request.text("fileName")
+                        ?: request.text("filename")
+                        ?: request.text("displayFileName")
+                        ?: request.text("attachmentName")
+                        ?: request.text("documentName")
+                        ?: sourceFile.name
+                )
                 val credentialId = request.text("credentialId")
                 val sdJwtJti = request.text("sdJwtJti") ?: credentialId
                 val evidenceFor = request["evidenceFor"] as? JsonArray ?: JsonArray(emptyList())
@@ -3226,7 +3253,7 @@ class WalletBridge(
                                 "manifestLoaded" to (attachmentManifestInput != null),
                                 "filePartsCount" to attachmentPlan.attachments.size,
                                 "partNames" to attachmentPlan.attachments.joinToString(",") { it.attachmentRef },
-                                "fileNames" to attachmentPlan.attachments.joinToString(",") { it.sourceEntity.originalFilename },
+                                "displayFileNameCount" to attachmentPlan.attachments.count { it.sourceEntity.displayFileName().isNotBlank() },
                                 "documentTypes" to attachmentPlan.attachments.joinToString(",") { it.documentType },
                                 "documentIds" to attachmentPlan.attachments.joinToString(",") { it.documentId },
                                 "allFilesReadable" to true
@@ -4960,6 +4987,7 @@ class WalletBridge(
         val documents = holderDocumentRepository.findAllByCredentialId(credentialId)
         val payload = JsonArray(
             documents.map { document ->
+                val displayFileName = document.displayFileName()
                 buildJsonObject {
                     put("documentId", document.documentId)
                     put("documentType", document.documentType)
@@ -4967,8 +4995,9 @@ class WalletBridge(
                     put("digestSRI", document.digestSRI)
                     put("mediaType", document.mediaType)
                     put("byteSize", document.byteSize)
-                    put("fileName", document.originalFilename)
-                    put("originalFilename", document.originalFilename)
+                    put("fileName", displayFileName)
+                    put("originalFileName", displayFileName)
+                    put("originalFilename", displayFileName)
                     document.attachmentRefFromMetadata()?.let { put("attachmentRef", it) }
                     document.requirementIdFromMetadata()?.let { put("requirementId", it) }
                     put("required", true)
@@ -4981,10 +5010,10 @@ class WalletBridge(
             mapOf(
                 "credentialId" to credentialId,
                 "documentCount" to documents.size,
-                "fileNames" to documents.joinToString(",") { it.originalFilename },
+                "displayFileNameCount" to documents.count { it.displayFileName().isNotBlank() },
                 "documentTypes" to documents.joinToString(",") { it.documentType },
                 "attachmentRefs" to documents.mapNotNull { it.attachmentRefFromMetadata() }.joinToString(","),
-                "allHaveFileName" to documents.all { it.originalFilename.isNotBlank() }
+                "allHaveFileName" to documents.all { it.displayFileName().isNotBlank() }
             )
         )
         return payload
@@ -5291,21 +5320,41 @@ class WalletBridge(
     }
 
     private fun String.documentTypeLabel(): String {
-        return when (this) {
-            "SHAREHOLDER_LIST",
-            "KR_SHAREHOLDER_REGISTER" -> "주주명부"
-            "CORPORATE_SEAL_CERTIFICATE",
-            "KR_CORPORATE_SEAL_CERTIFICATE",
-            "KR_SEAL_CERTIFICATE" -> "법인인감증명서"
-            "CORPORATE_REGISTRY_CERTIFICATE",
-            "KR_CORPORATE_REGISTER_FULL_CERTIFICATE",
-            "CORPORATE_REGISTER" -> "등기사항전부증명서"
-            "BUSINESS_REGISTRATION_CERTIFICATE",
-            "KR_BUSINESS_REGISTRATION_CERTIFICATE" -> "사업자등록증"
-            "LEGAL_ENTITY_KYC_CREDENTIAL",
-            "KYC_CREDENTIAL" -> "법인 KYC 증명서"
-            else -> this
+        return DocumentDisplayMapper.documentTypeLabel(this)
+    }
+
+    private fun HolderDocumentEntity.displayFileName(): String {
+        return displayFileNameFromCandidates(
+            metadataText("originalFileName", "originalFilename"),
+            metadataText("fileName", "filename"),
+            metadataText("displayFileName"),
+            metadataText("attachmentName"),
+            metadataText("documentName"),
+            originalFilename
+        ) ?: documentType.documentTypeLabel()
+    }
+
+    private fun displayFileNameFromCandidates(vararg candidates: String?): String? {
+        return candidates.firstNotNullOfOrNull { candidate ->
+            normalizeDisplayFileName(candidate)
         }
+    }
+
+    private fun normalizeDisplayFileName(value: String?): String? {
+        var name = value?.trim().orEmpty()
+        if (name.isBlank()) return null
+        name = name.substringAfterLast('/').substringAfterLast('\\')
+        name = Regex("""(?i)(\.[a-z0-9]{1,8})\1$""").replace(name) { it.groupValues[1] }
+        if (name.startsWith("urn:", ignoreCase = true) || Regex("""document-\d+""").matches(name)) return null
+        return name.takeIf { it.isNotBlank() && !it.looksLikeMaskedFileName() }
+    }
+
+    private fun String.looksLikeMaskedFileName(): Boolean {
+        val stem = substringBeforeLast('.', this).trim()
+        if (stem.isBlank()) return true
+        val underscoreCount = stem.count { it == '_' }
+        val visibleCount = stem.count { !it.isWhitespace() && it != '_' }
+        return underscoreCount >= 3 && underscoreCount >= visibleCount * 2
     }
 
     private suspend fun buildVpLoginPresentationObject(request: JsonObject): VpLoginPresentationResult {
@@ -5349,7 +5398,7 @@ class WalletBridge(
                 "manifestAttachmentCount" to attachmentPlan.attachments.size,
                 "blockerCount" to attachmentPlan.blockers.size,
                 "attachmentRefs" to attachmentPlan.attachments.joinToString(",") { it.attachmentRef },
-                "fileNames" to attachmentPlan.attachments.joinToString(",") { it.sourceEntity.originalFilename },
+                "displayFileNameCount" to attachmentPlan.attachments.count { it.sourceEntity.displayFileName().isNotBlank() },
                 "submitMode" to "json_manifest_only"
             )
         )
@@ -5898,6 +5947,13 @@ class WalletBridge(
         return holderDocumentMetadata().text("requirementId")
     }
 
+    private fun HolderDocumentEntity.metadataText(vararg keys: String): String? {
+        val metadata = holderDocumentMetadata()
+        return keys.firstNotNullOfOrNull { key ->
+            metadata.text(key)?.takeIf { it.isNotBlank() }
+        }
+    }
+
     private fun HolderDocumentEntity.holderDocumentMetadata(): JsonObject {
         return runCatching { Json.parseToJsonElement(evidenceForJson).jsonObject }.getOrNull()
             ?: buildJsonObject { }
@@ -5974,7 +6030,7 @@ class WalletBridge(
             val media = attachment.mediaType.toMediaTypeOrNull() ?: OCTET_STREAM
             builder.addFormDataPart(
                 attachment.attachmentRef,
-                attachment.sourceEntity.originalFilename,
+                attachment.sourceEntity.displayFileName(),
                 tempFile.readBytes().toRequestBody(media)
             )
         }

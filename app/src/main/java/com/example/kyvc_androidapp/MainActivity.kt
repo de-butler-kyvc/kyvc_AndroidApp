@@ -32,6 +32,8 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -77,6 +79,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
@@ -98,8 +101,10 @@ import androidx.lifecycle.lifecycleScope
 import com.example.kyvc_androidapp.auth.BiometricAuthScreen
 import com.example.kyvc_androidapp.auth.UnlockActivity
 import com.example.kyvc_androidapp.bridge.WalletBridge
+import com.example.kyvc_androidapp.data.local.entity.HolderDocumentEntity
 import com.example.kyvc_androidapp.ui.main.MainViewModel
 import com.example.kyvc_androidapp.ui.theme.Kyvc_AndroidAppTheme
+import com.example.kyvc_androidapp.util.DocumentDisplayMapper
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -522,17 +527,17 @@ class MainActivity : FragmentActivity() {
                                 var issueConfirmBalance by remember(nativeCredentialRequest.requestJson) {
                                     mutableStateOf<IssueConfirmBalanceSnapshot?>(null)
                                 }
-                                var storedClaimRows by remember(nativeCredentialRequest.requestJson) {
-                                    mutableStateOf<List<Triple<String, String, String>>>(emptyList())
+                                var storedCredentialDisplayData by remember(nativeCredentialRequest.requestJson) {
+                                    mutableStateOf(StoredCredentialDisplayData())
                                 }
                                 LaunchedEffect(nativeCredentialRequest.screen, nativeCredentialRequest.requestJson) {
                                     issueConfirmBalance = null
-                                    storedClaimRows = emptyList()
+                                    storedCredentialDisplayData = StoredCredentialDisplayData()
                                     if (nativeCredentialRequest.screen == CredentialNativeScreen.IssueConfirm) {
                                         issueConfirmBalance = loadIssueConfirmBalance(baseUiData)
                                     }
                                     if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail) {
-                                        storedClaimRows = loadStoredCredentialClaimRows(baseUiData)
+                                        storedCredentialDisplayData = loadStoredCredentialDisplayData(baseUiData)
                                     }
                                 }
                                 var uiData = baseUiData
@@ -546,8 +551,13 @@ class MainActivity : FragmentActivity() {
                                         )
                                     } ?: uiData.copy(balanceWarning = "잔액 조회 중")
                                 }
-                                if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail && storedClaimRows.isNotEmpty()) {
-                                    uiData = uiData.copy(storedClaimRows = storedClaimRows)
+                                if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail &&
+                                    (storedCredentialDisplayData.claimRows.isNotEmpty() || storedCredentialDisplayData.documentEvidenceItems.isNotEmpty())
+                                ) {
+                                    uiData = uiData.copy(
+                                        storedClaimRows = storedCredentialDisplayData.claimRows,
+                                        documentEvidenceItems = storedCredentialDisplayData.documentEvidenceItems
+                                    )
                                 }
                                 NativeCredentialFlowScreen(
                                     screen = nativeCredentialRequest.screen,
@@ -665,19 +675,21 @@ class MainActivity : FragmentActivity() {
         }
     }
 
-    private suspend fun loadStoredCredentialClaimRows(baseData: CredentialUiData): List<Triple<String, String, String>> {
-        val credentialId = baseData.credentialId.takeIf { it.isNotBlank() } ?: return emptyList()
+    private suspend fun loadStoredCredentialDisplayData(baseData: CredentialUiData): StoredCredentialDisplayData {
+        val credentialId = baseData.credentialId.takeIf { it.isNotBlank() } ?: return StoredCredentialDisplayData()
         return withContext(Dispatchers.IO) {
             runCatching {
                 val credential = mainViewModel.appContainer.credentialRepository.getCredentialById(credentialId)
-                    ?: return@withContext emptyList()
-                storedCredentialClaims(
+                    ?: return@withContext StoredCredentialDisplayData()
+                val holderDocuments = mainViewModel.appContainer.holderDocumentRepository.findAllByCredentialId(credentialId)
+                storedCredentialDisplayData(
                     sdJwt = credential.sdJwt,
                     vcJwt = credential.vcJwt,
                     vcJson = credential.vcJson,
-                    selectiveDisclosureJson = credential.selectiveDisclosureJson
+                    selectiveDisclosureJson = credential.selectiveDisclosureJson,
+                    holderDocuments = holderDocuments
                 )
-            }.getOrDefault(emptyList())
+            }.getOrDefault(StoredCredentialDisplayData())
         }
     }
 
@@ -1486,26 +1498,28 @@ private fun formatXrpAmountLabel(value: BigDecimal): String {
     return "$amount XRP"
 }
 
-private fun storedCredentialClaims(
+private fun storedCredentialDisplayData(
     sdJwt: String?,
     vcJwt: String?,
     vcJson: String?,
-    selectiveDisclosureJson: String?
-): List<Triple<String, String, String>> {
+    selectiveDisclosureJson: String?,
+    holderDocuments: List<HolderDocumentEntity>
+): StoredCredentialDisplayData {
     val claims = linkedMapOf<String, String>()
     val disclosurePaths = selectiveDisclosureJson?.let(::extractDisclosablePaths).orEmpty()
     vcJson?.let { addJsonCredentialClaims(claims, it) }
     vcJwt?.let { addJwtCredentialClaims(claims, it) }
     sdJwt?.let { addSdJwtCredentialClaims(claims, it, disclosurePaths) }
     selectiveDisclosureJson?.let { addSelectiveDisclosureClaims(claims, it) }
-    val visibleClaims = filterHiddenDocumentDisclosureClaims(claims.entries)
+    val visibleClaims = claims.entries
+        .filter { (_, value) -> value.isNotBlank() }
+        .filterNot { (key, _) -> isDocumentEvidenceClaim(key) }
     val labelCounts = visibleClaims
         .map { it.key }
         .map(::claimDisplayLabel)
         .groupingBy { it }
         .eachCount()
-    return visibleClaims
-        .filter { (_, value) -> value.isNotBlank() }
+    val claimRows = visibleClaims
         .sortedWith(
             compareBy<Map.Entry<String, String>> { claimOrder(it.key) }
                 .thenBy { it.key }
@@ -1518,6 +1532,131 @@ private fun storedCredentialClaims(
                 claimDisplayValue(key, value)
             )
         }
+    return StoredCredentialDisplayData(
+        claimRows = claimRows,
+        documentEvidenceItems = documentEvidenceItemsFromClaims(claims, holderDocuments)
+    )
+}
+
+private fun isDocumentEvidenceClaim(key: String): Boolean {
+    return normalizeClaimKey(key).startsWith("documentEvidence")
+}
+
+private fun documentEvidenceItemsFromClaims(
+    claims: Map<String, String>,
+    holderDocuments: List<HolderDocumentEntity>
+): List<DocumentEvidenceUiItem> {
+    val grouped = linkedMapOf<String, MutableMap<String, String>>()
+    claims.forEach { (key, value) ->
+        val field = documentEvidenceFieldName(key) ?: return@forEach
+        if (value.isBlank()) return@forEach
+        val indexKey = documentEvidenceIndexKey(key)
+        grouped.getOrPut(indexKey) { linkedMapOf() }.putIfAbsent(field, value)
+    }
+    return grouped.entries
+        .sortedBy { it.key.toIntOrNull() ?: Int.MAX_VALUE }
+        .mapIndexed { index, entry ->
+            documentEvidenceUiItem(index, entry.value, holderDocuments)
+        }
+}
+
+private fun documentEvidenceIndexKey(key: String): String {
+    val indexed = Regex("""documentEvidence\[(\d+)]""").find(key)?.groupValues?.getOrNull(1)
+    return indexed ?: "0"
+}
+
+private fun documentEvidenceFieldName(key: String): String? {
+    val normalized = normalizeClaimKey(key)
+    val field = when {
+        normalized.startsWith("documentEvidence[].") -> normalized.substringAfter("documentEvidence[].")
+        normalized.startsWith("documentEvidence.") -> normalized.substringAfter("documentEvidence.")
+        else -> null
+    } ?: return null
+    return field.substringBefore("[").takeIf { it.isNotBlank() }
+}
+
+private fun documentEvidenceUiItem(
+    index: Int,
+    fields: Map<String, String>,
+    holderDocuments: List<HolderDocumentEntity>
+): DocumentEvidenceUiItem {
+    val matchedDocument = findMatchingHolderDocument(fields, holderDocuments)
+    val documentId = evidenceValue(fields, "documentId", "id") ?: matchedDocument?.documentId.orEmpty()
+    val documentType = evidenceValue(fields, "documentType", "documentTypeCode", "type")
+        ?: matchedDocument?.documentType.orEmpty()
+    val documentClass = evidenceValue(fields, "documentClass", "documentClassCode", "class").orEmpty()
+    val typeLabel = displayDocumentTypeOrNull(documentType)
+        ?: documentType.takeIf { it.isNotBlank() }
+        ?: displayDocumentTypeOrNull(documentClass)
+        ?: "문서"
+    val digest = evidenceValue(fields, "digestSRI", "hash", "digest", "documentHash")
+        ?: matchedDocument?.digestSRI.orEmpty()
+    val partName = evidenceValue(fields, "partName", "attachmentRef")
+        ?: matchedDocument?.metadataText("partName", "attachmentRef").orEmpty()
+    val requirementId = evidenceValue(fields, "requirementId")
+        ?: matchedDocument?.metadataText("requirementId").orEmpty()
+    val mediaType = evidenceValue(fields, "mediaType", "mimeType")
+        ?: matchedDocument?.mediaType.orEmpty()
+    val byteSize = evidenceValue(fields, "byteSize", "size")?.toLongOrNull()
+        ?: matchedDocument?.byteSize
+    val fileName = displayFileNameFromCandidates(
+        evidenceValue(fields, "originalFileName", "originalFilename"),
+        evidenceValue(fields, "fileName", "filename"),
+        evidenceValue(fields, "displayFileName"),
+        evidenceValue(fields, "attachmentName"),
+        evidenceValue(fields, "documentName"),
+        matchedDocument?.metadataText("originalFileName", "originalFilename"),
+        matchedDocument?.metadataText("fileName", "filename"),
+        matchedDocument?.metadataText("displayFileName"),
+        matchedDocument?.metadataText("attachmentName"),
+        matchedDocument?.metadataText("documentName"),
+        matchedDocument?.originalFilename
+    ) ?: documentFileNameFallback(documentId, documentType, typeLabel)
+    return DocumentEvidenceUiItem(
+        title = "제출 문서 ${index + 1}",
+        documentTypeLabel = typeLabel,
+        fileName = fileName,
+        documentId = documentId,
+        partName = partName,
+        mediaType = mediaType,
+        byteSize = byteSize,
+        digest = digest,
+        documentClassLabel = documentClassDisplayValue(documentClass),
+        requirementId = requirementId
+    )
+}
+
+private fun evidenceValue(fields: Map<String, String>, vararg names: String): String? {
+    return names.firstNotNullOfOrNull { name ->
+        fields[name]?.trim()?.takeIf { it.isNotBlank() }
+    }
+}
+
+private fun findMatchingHolderDocument(
+    fields: Map<String, String>,
+    holderDocuments: List<HolderDocumentEntity>
+): HolderDocumentEntity? {
+    val documentId = evidenceValue(fields, "documentId", "id")
+    val digest = evidenceValue(fields, "digestSRI", "hash", "digest", "documentHash")?.normalizeDigestForMatch()
+    val documentType = evidenceValue(fields, "documentType", "documentTypeCode", "type")
+    val partName = evidenceValue(fields, "partName", "attachmentRef")
+    val requirementId = evidenceValue(fields, "requirementId")
+    return holderDocuments.firstOrNull { documentId != null && it.documentId == documentId }
+        ?: holderDocuments.firstOrNull {
+            digest != null && it.digestSRI.normalizeDigestForMatch() == digest &&
+                (documentType == null || it.documentType == documentType)
+        }
+        ?: holderDocuments.firstOrNull { digest != null && it.digestSRI.normalizeDigestForMatch() == digest }
+        ?: holderDocuments.firstOrNull { partName != null && it.metadataText("partName", "attachmentRef") == partName }
+        ?: holderDocuments.firstOrNull { requirementId != null && it.metadataText("requirementId") == requirementId }
+        ?: holderDocuments.firstOrNull { documentType != null && it.documentType == documentType }
+}
+
+private fun HolderDocumentEntity.metadataText(vararg keys: String): String? {
+    val json = runCatching { JSONObject(evidenceForJson) }.getOrNull() ?: return null
+    return keys.firstNotNullOfOrNull { key ->
+        json.optString(key).trim().takeIf { it.isNotBlank() }
+    }
 }
 
 private fun filterHiddenDocumentDisclosureClaims(
@@ -1803,8 +1942,8 @@ private fun claimDisplayValue(key: String, value: String): String {
     return when (normalized) {
         "legalEntity.type" -> LEGAL_ENTITY_TYPE_LABELS[value] ?: value
         "kyc.assuranceLevel" -> ASSURANCE_LEVEL_LABELS[value] ?: value
-        "documentEvidence[].documentType" -> DOCUMENT_TYPE_LABELS[value] ?: value
-        "documentEvidence[].documentClass" -> DOCUMENT_CLASS_LABELS[value] ?: value
+        "documentEvidence[].documentType" -> displayDocumentType(value)
+        "documentEvidence[].documentClass" -> documentClassDisplayValue(value)
         "legalEntity.nonProfit",
         "legalEntity.purposeCheckRequired",
         "delegation.kycApplication",
@@ -1816,10 +1955,69 @@ private fun claimDisplayValue(key: String, value: String): String {
 }
 
 private fun documentDisplayTitle(rawTitle: String, documentType: String, index: Int): String {
-    val typeLabel = DOCUMENT_TYPE_LABELS[documentType]
+    val rawTitleLabel = displayDocumentTypeOrNull(rawTitle)
+    val typeLabel = displayDocumentTypeOrNull(documentType)
     val fallback = "제출 문서 ${index + 1}"
-    val title = rawTitle.ifBlank { typeLabel ?: documentType.ifBlank { fallback } }
-    return if (title == documentType && !typeLabel.isNullOrBlank()) typeLabel else title
+    val cleanRawTitle = rawTitle.trim().takeIf { it.isNotBlank() && !it.looksLikeDocumentCode() }
+    return rawTitleLabel ?: cleanRawTitle ?: typeLabel ?: documentType.ifBlank { fallback }
+}
+
+private fun displayDocumentType(code: String?, blankFallback: String = "문서"): String {
+    return DocumentDisplayMapper.documentTypeLabel(code, blankFallback)
+}
+
+private fun displayDocumentTypeOrNull(code: String?): String? {
+    return DocumentDisplayMapper.documentTypeLabelOrNull(code)
+}
+
+private fun documentClassDisplayValue(code: String): String {
+    val raw = code.trim()
+    if (raw.isBlank()) return ""
+    return DOCUMENT_CLASS_LABELS[raw]
+        ?: DOCUMENT_CLASS_LABELS[raw.uppercase()]
+        ?: displayDocumentTypeOrNull(raw)
+        ?: raw
+}
+
+private fun String.looksLikeDocumentCode(): Boolean {
+    val trimmed = trim()
+    return trimmed.length > 2 && trimmed.all { it.isUpperCase() || it.isDigit() || it == '_' || it == '-' }
+}
+
+private fun displayFileNameFromCandidates(vararg candidates: String?): String? {
+    return candidates.firstNotNullOfOrNull { candidate ->
+        normalizeDisplayFileName(candidate)
+    }
+}
+
+private fun normalizeDisplayFileName(value: String?): String? {
+    var name = value?.trim().orEmpty()
+    if (name.isBlank()) return null
+    name = name.substringAfterLast('/').substringAfterLast('\\')
+    name = Regex("""(?i)(\.[a-z0-9]{1,8})\1$""").replace(name) { it.groupValues[1] }
+    if (name.startsWith("urn:", ignoreCase = true) || Regex("""document-\d+""").matches(name)) return null
+    return name.takeIf { it.isNotBlank() && !it.looksLikeMaskedFileName() }
+}
+
+private fun String.looksLikeMaskedFileName(): Boolean {
+    val stem = substringBeforeLast('.', this).trim()
+    if (stem.isBlank()) return true
+    val underscoreCount = stem.count { it == '_' }
+    val visibleCount = stem.count { !it.isWhitespace() && it != '_' }
+    return underscoreCount >= 3 && underscoreCount >= visibleCount * 2
+}
+
+private fun documentFileNameFallback(documentId: String, documentType: String, typeLabel: String = displayDocumentType(documentType)): String {
+    return when {
+        typeLabel.isNotBlank() && typeLabel != "문서" && typeLabel != documentType -> typeLabel
+        documentId.isNotBlank() && !documentId.startsWith("document-") -> "문서 ID $documentId"
+        typeLabel.isNotBlank() -> typeLabel
+        else -> "문서 파일"
+    }
+}
+
+private fun String.normalizeDigestForMatch(): String {
+    return trim().lowercase()
 }
 
 private fun booleanDisplayValue(value: String): String {
@@ -1867,8 +2065,8 @@ private fun isHiddenDisclosureDocumentTypeValue(path: String, value: String): Bo
 private fun isHiddenDisclosureDocumentType(value: String): Boolean {
     val trimmed = value.trim()
     if (trimmed.isBlank()) return false
-    val code = trimmed.uppercase()
-    return code in HIDDEN_DISCLOSURE_DOCUMENT_TYPES || trimmed in HIDDEN_DISCLOSURE_DOCUMENT_LABELS
+    return DocumentDisplayMapper.documentTypeLabelOrNull(trimmed) != null ||
+        trimmed in DocumentDisplayMapper.documentTypeLabels.values
 }
 
 private fun claimOrder(key: String): Int {
@@ -2034,73 +2232,7 @@ private val DOCUMENT_CLASS_LABELS = mapOf(
     "EXTRACTED" to "추출 데이터"
 )
 
-private val HIDDEN_DISCLOSURE_DOCUMENT_TYPES = setOf(
-    "BUSINESS_REGISTRATION",
-    "BUSINESS_REGISTRATION_CERTIFICATE",
-    "KR_BUSINESS_REGISTRATION_CERTIFICATE",
-    "CORPORATE_REGISTRY",
-    "CORPORATE_REGISTRY_CERTIFICATE",
-    "CORPORATE_REGISTER",
-    "KR_CORPORATE_REGISTER_FULL_CERTIFICATE",
-    "SHAREHOLDER_REGISTRY",
-    "SHAREHOLDER_LIST",
-    "KR_SHAREHOLDER_REGISTER",
-    "STOCK_CHANGE_STATEMENT",
-    "INVESTOR_REGISTRY",
-    "MEMBER_REGISTRY",
-    "BOARD_REGISTRY",
-    "ARTICLES_OF_ASSOCIATION",
-    "OPERATING_RULES",
-    "REGULATIONS",
-    "MEETING_MINUTES",
-    "OFFICIAL_LETTER",
-    "PURPOSE_PROOF_DOCUMENT",
-    "ORGANIZATION_IDENTITY_CERTIFICATE",
-    "INVESTMENT_REGISTRATION_CERTIFICATE",
-    "BENEFICIAL_OWNER_PROOF_DOCUMENT",
-    "POWER_OF_ATTORNEY",
-    "SEAL_CERTIFICATE",
-    "CORPORATE_SEAL_CERTIFICATE",
-    "KR_CORPORATE_SEAL_CERTIFICATE",
-    "KR_SEAL_CERTIFICATE"
-)
-
-private val HIDDEN_DISCLOSURE_DOCUMENT_LABELS = setOf(
-    "사업자등록증",
-    "등기사항전부증명서",
-    "주주명부",
-    "주식변동상황명세서",
-    "투자자명부",
-    "사원명부",
-    "임원명부",
-    "정관",
-    "운영규정",
-    "규정",
-    "회의록",
-    "공문",
-    "설립목적 증빙서류",
-    "고유번호증",
-    "외국인투자등록증명서",
-    "실소유자 증빙서류",
-    "위임장",
-    "인감증명서",
-    "법인인감증명서"
-)
-
-private val DOCUMENT_TYPE_LABELS = mapOf(
-    "SHAREHOLDER_LIST" to "주주명부",
-    "KR_SHAREHOLDER_REGISTER" to "주주명부",
-    "CORPORATE_SEAL_CERTIFICATE" to "법인인감증명서",
-    "KR_CORPORATE_SEAL_CERTIFICATE" to "법인인감증명서",
-    "KR_SEAL_CERTIFICATE" to "법인인감증명서",
-    "CORPORATE_REGISTRY_CERTIFICATE" to "등기사항전부증명서",
-    "KR_CORPORATE_REGISTER_FULL_CERTIFICATE" to "등기사항전부증명서",
-    "CORPORATE_REGISTER" to "등기사항전부증명서",
-    "BUSINESS_REGISTRATION_CERTIFICATE" to "사업자등록증",
-    "KR_BUSINESS_REGISTRATION_CERTIFICATE" to "사업자등록증",
-    "LEGAL_ENTITY_KYC_CREDENTIAL" to "법인 KYC 증명서",
-    "KYC_CREDENTIAL" to "법인 KYC 증명서"
-)
+private val DOCUMENT_TYPE_LABELS = DocumentDisplayMapper.documentTypeLabels
 
 private fun JSONObject.childObject(pathPart: String): JSONObject? {
     val arrayMarkerIndex = pathPart.indexOf('[')
@@ -2161,6 +2293,24 @@ private data class SubmitDisclosureItem(
     val selected: Boolean
 )
 
+private data class StoredCredentialDisplayData(
+    val claimRows: List<Triple<String, String, String>> = emptyList(),
+    val documentEvidenceItems: List<DocumentEvidenceUiItem> = emptyList()
+)
+
+private data class DocumentEvidenceUiItem(
+    val title: String,
+    val documentTypeLabel: String,
+    val fileName: String,
+    val documentId: String,
+    val partName: String,
+    val mediaType: String,
+    val byteSize: Long?,
+    val digest: String,
+    val documentClassLabel: String,
+    val requirementId: String
+)
+
 private data class CredentialUiData(
     val issuerName: String = "-",
     val credentialId: String = "",
@@ -2191,7 +2341,8 @@ private data class CredentialUiData(
     val submitIssuerOptions: List<SubmitIssuerOption> = emptyList(),
     val submitDocuments: List<SubmitDocumentItem> = emptyList(),
     val submitDisclosures: List<SubmitDisclosureItem> = emptyList(),
-    val storedClaimRows: List<Triple<String, String, String>> = emptyList()
+    val storedClaimRows: List<Triple<String, String, String>> = emptyList(),
+    val documentEvidenceItems: List<DocumentEvidenceUiItem> = emptyList()
 ) {
     companion object {
         fun from(requestJson: String): CredentialUiData {
@@ -2331,11 +2482,19 @@ private data class CredentialUiData(
                             .ifBlank { item.optString("hash") }
                             .ifBlank { item.optString("digest") }
                             .ifBlank { item.optString("documentHash") }
-                        val fileName = item.optString("fileName")
-                            .ifBlank { item.optString("filename") }
-                            .ifBlank { item.optString("originalFilename") }
+                        val fileName = displayFileNameFromCandidates(
+                            item.optString("originalFileName"),
+                            item.optString("originalFilename"),
+                            item.optString("fileName"),
+                            item.optString("filename"),
+                            item.optString("displayFileName"),
+                            item.optString("attachmentName"),
+                            item.optString("documentName")
+                        ).orEmpty()
                         val byteSize = if (item.has("byteSize") && !item.isNull("byteSize")) {
                             runCatching { item.getLong("byteSize") }.getOrNull()
+                        } else if (item.has("size") && !item.isNull("size")) {
+                            runCatching { item.getLong("size") }.getOrNull()
                         } else {
                             null
                         }
@@ -2349,7 +2508,7 @@ private data class CredentialUiData(
                                 digest = digest.ifBlank { "-" },
                                 fileName = fileName,
                                 attachmentRef = item.optString("attachmentRef"),
-                                mediaType = item.optString("mediaType"),
+                                mediaType = item.optString("mediaType").ifBlank { item.optString("mimeType") },
                                 byteSize = byteSize,
                                 required = item.optBoolean("required", true),
                                 selected = item.optBoolean("selected", true)
@@ -2395,7 +2554,17 @@ private data class CredentialUiData(
                     ?: return listOf(
                         SubmitIssuerOption(
                             issuerId = firstText("default", "issuerId", "issuerAccount", "issuerDid"),
-                            issuerName = firstText("-", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
+                            issuerName = firstText(
+                                "-",
+                                "issuerName",
+                                "issuerDisplayName",
+                                "issuerCorporateName",
+                                "issuerInstitutionName",
+                                "institutionName",
+                                "issuer.institutionName",
+                                "issuer.name",
+                                "issuer.displayName"
+                            ),
                             credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
                             selected = true,
                             submitDocuments = defaultDocuments,
@@ -2408,6 +2577,10 @@ private data class CredentialUiData(
                         val issuerName = item.optString("issuerName")
                             .ifBlank { item.optString("name") }
                             .ifBlank { item.optString("displayName") }
+                            .ifBlank { item.optString("issuerInstitutionName") }
+                            .ifBlank { item.optString("institutionName") }
+                            .ifBlank { item.optJSONObject("issuer")?.optString("institutionName").orEmpty() }
+                            .ifBlank { item.optJSONObject("issuer")?.optString("name").orEmpty() }
                             .ifBlank { item.optString("issuerDid") }
                             .ifBlank { item.optString("issuerAccount") }
                             .ifBlank { "-" }
@@ -2457,11 +2630,19 @@ private data class CredentialUiData(
                             .ifBlank { item.optString("hash") }
                             .ifBlank { item.optString("digest") }
                             .ifBlank { item.optString("documentHash") }
-                        val fileName = item.optString("fileName")
-                            .ifBlank { item.optString("filename") }
-                            .ifBlank { item.optString("originalFilename") }
+                        val fileName = displayFileNameFromCandidates(
+                            item.optString("originalFileName"),
+                            item.optString("originalFilename"),
+                            item.optString("fileName"),
+                            item.optString("filename"),
+                            item.optString("displayFileName"),
+                            item.optString("attachmentName"),
+                            item.optString("documentName")
+                        ).orEmpty()
                         val byteSize = if (item.has("byteSize") && !item.isNull("byteSize")) {
                             runCatching { item.getLong("byteSize") }.getOrNull()
+                        } else if (item.has("size") && !item.isNull("size")) {
+                            runCatching { item.getLong("size") }.getOrNull()
                         } else {
                             null
                         }
@@ -2475,7 +2656,7 @@ private data class CredentialUiData(
                                 digest = digest.ifBlank { "-" },
                                 fileName = fileName,
                                 attachmentRef = item.optString("attachmentRef"),
-                                mediaType = item.optString("mediaType"),
+                                mediaType = item.optString("mediaType").ifBlank { item.optString("mimeType") },
                                 byteSize = byteSize,
                                 required = item.optBoolean("required", true),
                                 selected = item.optBoolean("selected", true)
@@ -2515,8 +2696,21 @@ private data class CredentialUiData(
                 "validUntil",
                 "expiresAt"
             )
+            val resolvedIssuerName = firstText(
+                "-",
+                "issuerName",
+                "issuerDisplayName",
+                "issuerCorporateName",
+                "issuerInstitutionName",
+                "institutionName",
+                "issuer.institutionName",
+                "issuer.name",
+                "issuer.displayName",
+                "metadata.institutionName",
+                "credentialPayload.metadata.institutionName"
+            )
             return CredentialUiData(
-                issuerName = firstText("-", "issuerName", "issuerDisplayName", "issuerCorporateName", "issuer.name"),
+                issuerName = resolvedIssuerName,
                 credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
                 requesterName = text("requesterName", "-"),
                 credentialTitle = text("credentialTitle", "법인 kyc 증명서"),
@@ -2530,7 +2724,7 @@ private data class CredentialUiData(
                 agentName = firstText("-", "agentName", "delegateName", "representativeAgentName", "agent.name", "agent.fullName", "delegate.name", "claims.delegate.name", "credentialSubject.delegate.name", "delegate.fullName", "authorizedAgent.name", "authorizedAgent.fullName", "proxy.name", "proxy.fullName"),
                 address = firstText("-", "address", "corporateAddress", "businessAddress", "legalEntity.address", "claims.legalEntity.address", "credentialSubject.legalEntity.address", "legalEntity.businessAddress", "legalEntity.headOfficeAddress"),
                 did = fallbackHolderDid,
-                issuerDid = text("issuerDid", "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc"),
+                issuerDid = firstText("did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc", "issuerDid", "issuer", "metadata.issuerDid", "credentialPayload.metadata.issuerDid"),
                 holderDid = fallbackHolderDid,
                 issuedAt = credentialDateOnly(rawIssuedAt),
                 issuedAtFull = rawIssuedAtFull,
@@ -2788,6 +2982,21 @@ private fun IssueConfirmInfoRow(label: String, value: String) {
 
 @Composable
 private fun IssueConfirmBalanceCard(data: CredentialUiData) {
+    var balanceVisible by rememberSaveable(
+        data.currentBalanceXrp,
+        data.networkFeeXrp,
+        data.usableBalanceXrp,
+        data.balanceWarning
+    ) { mutableStateOf(false) }
+    LaunchedEffect(data.currentBalanceXrp, data.networkFeeXrp, data.usableBalanceXrp, data.balanceWarning) {
+        balanceVisible = false
+        delay(80)
+        balanceVisible = true
+    }
+    val balanceAlpha by animateFloatAsState(
+        targetValue = if (balanceVisible) 1f else 0f,
+        animationSpec = tween(durationMillis = 450)
+    )
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2799,22 +3008,46 @@ private fun IssueConfirmBalanceCard(data: CredentialUiData) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("현재 잔액", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
             Spacer(modifier = Modifier.size(4.dp))
-            Text(data.balanceWarning, color = Color(0xFFFF3B30), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
+            Text(
+                data.balanceWarning,
+                modifier = Modifier.alpha(balanceAlpha),
+                color = Color(0xFFFF3B30),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.ExtraBold
+            )
         }
         Spacer(modifier = Modifier.height(7.dp))
-        Text(data.currentBalanceXrp, color = Color(0xFF0B2A55), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
+        Text(
+            data.currentBalanceXrp,
+            modifier = Modifier.alpha(balanceAlpha),
+            color = Color(0xFF0B2A55),
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.ExtraBold
+        )
         Spacer(modifier = Modifier.height(17.dp))
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
         Spacer(modifier = Modifier.height(16.dp))
         Text("네트워크 수수료", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
         Spacer(modifier = Modifier.height(7.dp))
-        Text(data.networkFeeXrp, color = Color(0xFF0B2A55), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Text(
+            data.networkFeeXrp,
+            modifier = Modifier.alpha(balanceAlpha),
+            color = Color(0xFF0B2A55),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.ExtraBold
+        )
         Spacer(modifier = Modifier.height(17.dp))
         Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
         Spacer(modifier = Modifier.height(16.dp))
         Text("등록 후 사용 가능 잔액", color = Color(0xFF8A93A3), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.ExtraBold)
         Spacer(modifier = Modifier.height(7.dp))
-        Text(data.usableBalanceXrp, color = Color(0xFF2F7DFF), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Text(
+            data.usableBalanceXrp,
+            modifier = Modifier.alpha(balanceAlpha),
+            color = Color(0xFF2F7DFF),
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.ExtraBold
+        )
     }
 }
 
@@ -2851,6 +3084,10 @@ private fun CredentialDetailScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
         }
+        if (data.documentEvidenceItems.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            DocumentEvidenceSection(data.documentEvidenceItems)
+        }
     }
 
     if (showDeleteConfirm) {
@@ -2882,6 +3119,122 @@ private fun credentialDetailClaimRows(data: CredentialUiData): List<Triple<Strin
         Triple("H", "Holder DID", data.holderDid),
         Triple("Tx", "트랜잭션", data.transactionHash)
     )
+}
+
+@Composable
+private fun DocumentEvidenceSection(items: List<DocumentEvidenceUiItem>) {
+    var expanded by rememberSaveable(items.size) { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(16.dp))
+                .background(Color.White)
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LetterIcon("문", small = true)
+            Spacer(modifier = Modifier.size(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "제출 문서 (${items.size}건)",
+                    color = Color(0xFF0B1D40),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                Text(
+                    items.joinToString(" · ") { it.documentTypeLabel }.ifBlank { "문서" },
+                    color = Color(0xFF6B7280),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            DropdownChevron(
+                color = Color(0xFF8A93A3),
+                modifier = Modifier.rotate(if (expanded) 180f else 0f)
+            )
+        }
+        if (expanded) {
+            Spacer(modifier = Modifier.height(10.dp))
+            items.forEachIndexed { index, item ->
+                DocumentEvidenceCard(item)
+                if (index != items.lastIndex) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DocumentEvidenceCard(item: DocumentEvidenceUiItem) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFFA8B7FF)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("문", color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+            }
+            Spacer(modifier = Modifier.size(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    item.title,
+                    color = Color(0xFF0B1D40),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.ExtraBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    item.documentTypeLabel,
+                    color = Color(0xFF5F6877),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
+        Spacer(modifier = Modifier.height(10.dp))
+        DocumentMetaLine("문서 종류", item.documentTypeLabel)
+        DocumentMetaLine("실제 파일명", item.fileName)
+        if (item.documentId.isNotBlank()) {
+            DocumentMetaLine("문서 ID", item.documentId)
+        }
+        if (item.partName.isNotBlank()) {
+            DocumentMetaLine("파일 part name", item.partName)
+        }
+        if (item.mediaType.isNotBlank()) {
+            DocumentMetaLine("MIME 타입", item.mediaType)
+        }
+        item.byteSize?.let {
+            DocumentMetaLine("파일 크기", "$it bytes")
+        }
+        if (item.digest.isNotBlank()) {
+            DocumentMetaLine("문서 해시", item.digest)
+        }
+        if (item.documentClassLabel.isNotBlank()) {
+            DocumentMetaLine("원본 문서 분류", item.documentClassLabel)
+        }
+        if (item.requirementId.isNotBlank()) {
+            DocumentMetaLine("요구 문서 ID", item.requirementId)
+        }
+    }
 }
 
 @Composable
@@ -3412,7 +3765,9 @@ private fun SubmitDocumentRow(
     onToggle: () -> Unit
 ) {
     val requiredLabel = if (document.required) "필수" else "선택"
-    val fileName = document.fileName.ifBlank { "-" }
+    val documentTypeLabel = displayDocumentType(document.documentType)
+    val fileName = displayFileNameFromCandidates(document.fileName)
+        ?: documentFileNameFallback(document.documentId, document.documentType, documentTypeLabel)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -3477,7 +3832,7 @@ private fun SubmitDocumentRow(
             if (document.attachmentRef.isNotBlank()) {
                 DocumentMetaLine("파일 part name", document.attachmentRef)
             }
-            DocumentMetaLine("문서 유형", document.documentType)
+            DocumentMetaLine("문서 유형", documentTypeLabel)
             DocumentMetaLine("문서 ID", document.documentId)
             if (document.mediaType.isNotBlank()) {
                 DocumentMetaLine("MIME 타입", document.mediaType)

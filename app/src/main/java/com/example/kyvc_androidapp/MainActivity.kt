@@ -7,9 +7,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.net.http.SslError
+import android.os.Build
 import android.util.Base64
 import android.util.Log
 import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -1496,11 +1498,13 @@ private fun storedCredentialClaims(
     vcJwt?.let { addJwtCredentialClaims(claims, it) }
     sdJwt?.let { addSdJwtCredentialClaims(claims, it, disclosurePaths) }
     selectiveDisclosureJson?.let { addSelectiveDisclosureClaims(claims, it) }
-    val labelCounts = claims.keys
+    val visibleClaims = filterHiddenDocumentDisclosureClaims(claims.entries)
+    val labelCounts = visibleClaims
+        .map { it.key }
         .map(::claimDisplayLabel)
         .groupingBy { it }
         .eachCount()
-    return claims.entries
+    return visibleClaims
         .filter { (_, value) -> value.isNotBlank() }
         .sortedWith(
             compareBy<Map.Entry<String, String>> { claimOrder(it.key) }
@@ -1514,6 +1518,26 @@ private fun storedCredentialClaims(
                 claimDisplayValue(key, value)
             )
         }
+}
+
+private fun filterHiddenDocumentDisclosureClaims(
+    entries: Iterable<Map.Entry<String, String>>
+): List<Map.Entry<String, String>> {
+    val hiddenPrefixes = entries.mapNotNull { (key, value) ->
+        val normalized = normalizeClaimKey(key)
+        if (normalized.startsWith("documentEvidence") &&
+            normalized.endsWith(".documentType") &&
+            isHiddenDisclosureDocumentType(value)
+        ) {
+            key.substringBeforeLast(".")
+        } else {
+            null
+        }
+    }.toSet()
+    return entries.filter { (key, value) ->
+        val hiddenByPrefix = hiddenPrefixes.any { prefix -> key == prefix || key.startsWith("$prefix.") }
+        !hiddenByPrefix && !isHiddenDisclosureDocumentTypeValue(key, value)
+    }
 }
 
 private fun addJsonCredentialClaims(claims: MutableMap<String, String>, rawJson: String) {
@@ -1813,6 +1837,40 @@ private fun normalizeClaimKey(key: String): String {
         .replace(Regex("""\[\d+]"""), "[]")
 }
 
+private fun filterHiddenDocumentDisclosureItems(items: List<SubmitDisclosureItem>): List<SubmitDisclosureItem> {
+    val hiddenPrefixes = items.mapNotNull { item ->
+        val normalized = normalizeClaimKey(item.path)
+        if (normalized.startsWith("documentEvidence") &&
+            normalized.endsWith(".documentType") &&
+            isHiddenDisclosureDocumentType(item.value)
+        ) {
+            item.path.substringBeforeLast(".")
+        } else {
+            null
+        }
+    }.toSet()
+    return items.filter { item ->
+        val hiddenByPrefix = hiddenPrefixes.any { prefix ->
+            item.path == prefix || item.path.startsWith("$prefix.")
+        }
+        !hiddenByPrefix && !isHiddenDisclosureDocumentTypeValue(item.path, item.value)
+    }
+}
+
+private fun isHiddenDisclosureDocumentTypeValue(path: String, value: String): Boolean {
+    val normalized = normalizeClaimKey(path)
+    return normalized.startsWith("documentEvidence") &&
+        normalized.endsWith(".documentType") &&
+        isHiddenDisclosureDocumentType(value)
+}
+
+private fun isHiddenDisclosureDocumentType(value: String): Boolean {
+    val trimmed = value.trim()
+    if (trimmed.isBlank()) return false
+    val code = trimmed.uppercase()
+    return code in HIDDEN_DISCLOSURE_DOCUMENT_TYPES || trimmed in HIDDEN_DISCLOSURE_DOCUMENT_LABELS
+}
+
 private fun claimOrder(key: String): Int {
     val normalized = normalizeClaimKey(key)
     return CLAIM_ORDER.indexOf(normalized).takeIf { it >= 0 } ?: Int.MAX_VALUE
@@ -1974,6 +2032,59 @@ private val DOCUMENT_CLASS_LABELS = mapOf(
     "SUPPORTING" to "증빙",
     "SYSTEM_GENERATED" to "시스템 생성",
     "EXTRACTED" to "추출 데이터"
+)
+
+private val HIDDEN_DISCLOSURE_DOCUMENT_TYPES = setOf(
+    "BUSINESS_REGISTRATION",
+    "BUSINESS_REGISTRATION_CERTIFICATE",
+    "KR_BUSINESS_REGISTRATION_CERTIFICATE",
+    "CORPORATE_REGISTRY",
+    "CORPORATE_REGISTRY_CERTIFICATE",
+    "CORPORATE_REGISTER",
+    "KR_CORPORATE_REGISTER_FULL_CERTIFICATE",
+    "SHAREHOLDER_REGISTRY",
+    "SHAREHOLDER_LIST",
+    "KR_SHAREHOLDER_REGISTER",
+    "STOCK_CHANGE_STATEMENT",
+    "INVESTOR_REGISTRY",
+    "MEMBER_REGISTRY",
+    "BOARD_REGISTRY",
+    "ARTICLES_OF_ASSOCIATION",
+    "OPERATING_RULES",
+    "REGULATIONS",
+    "MEETING_MINUTES",
+    "OFFICIAL_LETTER",
+    "PURPOSE_PROOF_DOCUMENT",
+    "ORGANIZATION_IDENTITY_CERTIFICATE",
+    "INVESTMENT_REGISTRATION_CERTIFICATE",
+    "BENEFICIAL_OWNER_PROOF_DOCUMENT",
+    "POWER_OF_ATTORNEY",
+    "SEAL_CERTIFICATE",
+    "CORPORATE_SEAL_CERTIFICATE",
+    "KR_CORPORATE_SEAL_CERTIFICATE",
+    "KR_SEAL_CERTIFICATE"
+)
+
+private val HIDDEN_DISCLOSURE_DOCUMENT_LABELS = setOf(
+    "사업자등록증",
+    "등기사항전부증명서",
+    "주주명부",
+    "주식변동상황명세서",
+    "투자자명부",
+    "사원명부",
+    "임원명부",
+    "정관",
+    "운영규정",
+    "규정",
+    "회의록",
+    "공문",
+    "설립목적 증빙서류",
+    "고유번호증",
+    "외국인투자등록증명서",
+    "실소유자 증빙서류",
+    "위임장",
+    "인감증명서",
+    "법인인감증명서"
 )
 
 private val DOCUMENT_TYPE_LABELS = mapOf(
@@ -2249,7 +2360,7 @@ private data class CredentialUiData(
             }
             fun parseSubmitDisclosuresArray(disclosures: JSONArray?): List<SubmitDisclosureItem> {
                 if (disclosures == null) return emptyList()
-                return buildList {
+                return filterHiddenDocumentDisclosureItems(buildList {
                     for (index in 0 until disclosures.length()) {
                         val item = disclosures.optJSONObject(index) ?: continue
                         val path = item.optString("path")
@@ -2275,7 +2386,7 @@ private data class CredentialUiData(
                             )
                         )
                     }
-                }
+                })
             }
             fun parseIssuerOptions(): List<SubmitIssuerOption> {
                 val defaultDocuments = parseSubmitDocumentsArray(firstArray("submitDocuments", "requiredDocuments", "documents", "attachmentDocuments"))
@@ -4474,10 +4585,12 @@ fun WebViewScreen(
     onWebViewCreated: (WebView) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    configureWebViewCookiePolicy()
     AndroidView(
         modifier = modifier.fillMaxSize(),
         factory = { context ->
             WebView(context).apply {
+                configureWebViewCookiePolicy(this)
                 var fallbackLoaded = false
                 fun loadFallbackIfNeeded(view: WebView?) {
                     if (!fallbackLoaded) {
@@ -4510,6 +4623,7 @@ fun WebViewScreen(
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
+                        flushWebViewCookies()
                         Log.d(WEBVIEW_TAG, "page finished: $url")
                         view?.evaluateJavascript(
                             """
@@ -4593,6 +4707,21 @@ fun WebViewScreen(
         },
         update = {}
     )
+}
+
+private fun configureWebViewCookiePolicy(webView: WebView? = null) {
+    val cookieManager = CookieManager.getInstance()
+    cookieManager.setAcceptCookie(true)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && webView != null) {
+        cookieManager.setAcceptThirdPartyCookies(webView, true)
+    }
+    flushWebViewCookies()
+}
+
+private fun flushWebViewCookies() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        CookieManager.getInstance().flush()
+    }
 }
 
 private fun shouldFallback(error: WebResourceError?): Boolean {

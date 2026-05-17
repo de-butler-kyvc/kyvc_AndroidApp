@@ -6,6 +6,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.os.Build
 import android.util.Log
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.Toast
@@ -100,6 +101,57 @@ class WalletBridge(
         "establishmentPurpose",
         "extra",
         "documentEvidence"
+    )
+    private val HIDDEN_SUBMIT_DISCLOSURE_DOCUMENT_TYPES = setOf(
+        "BUSINESS_REGISTRATION",
+        "BUSINESS_REGISTRATION_CERTIFICATE",
+        "KR_BUSINESS_REGISTRATION_CERTIFICATE",
+        "CORPORATE_REGISTRY",
+        "CORPORATE_REGISTRY_CERTIFICATE",
+        "CORPORATE_REGISTER",
+        "KR_CORPORATE_REGISTER_FULL_CERTIFICATE",
+        "SHAREHOLDER_REGISTRY",
+        "SHAREHOLDER_LIST",
+        "KR_SHAREHOLDER_REGISTER",
+        "STOCK_CHANGE_STATEMENT",
+        "INVESTOR_REGISTRY",
+        "MEMBER_REGISTRY",
+        "BOARD_REGISTRY",
+        "ARTICLES_OF_ASSOCIATION",
+        "OPERATING_RULES",
+        "REGULATIONS",
+        "MEETING_MINUTES",
+        "OFFICIAL_LETTER",
+        "PURPOSE_PROOF_DOCUMENT",
+        "ORGANIZATION_IDENTITY_CERTIFICATE",
+        "INVESTMENT_REGISTRATION_CERTIFICATE",
+        "BENEFICIAL_OWNER_PROOF_DOCUMENT",
+        "POWER_OF_ATTORNEY",
+        "SEAL_CERTIFICATE",
+        "CORPORATE_SEAL_CERTIFICATE",
+        "KR_CORPORATE_SEAL_CERTIFICATE",
+        "KR_SEAL_CERTIFICATE"
+    )
+    private val HIDDEN_SUBMIT_DISCLOSURE_DOCUMENT_LABELS = setOf(
+        "사업자등록증",
+        "등기사항전부증명서",
+        "주주명부",
+        "주식변동상황명세서",
+        "투자자명부",
+        "사원명부",
+        "임원명부",
+        "정관",
+        "운영규정",
+        "규정",
+        "회의록",
+        "공문",
+        "설립목적 증빙서류",
+        "고유번호증",
+        "외국인투자등록증명서",
+        "실소유자 증빙서류",
+        "위임장",
+        "인감증명서",
+        "법인인감증명서"
     )
     private val verifierPrefs: SharedPreferences = context.getSharedPreferences("kyvc-verifier", Context.MODE_PRIVATE)
     private val devicePrefs: SharedPreferences = context.getSharedPreferences("kyvc-device", Context.MODE_PRIVATE)
@@ -324,6 +376,7 @@ class WalletBridge(
                 walletStateStore.clearAllWalletsAndOwner()
                 appLockStore.clearSession()
                 clearCurrentWebUser()
+                flushWebViewCookies()
                 currentSeed = null
                 onSessionStatusChanged(false)
                 emitCallback("LOGOUT_AND_DELETE_LOCAL_WALLET_DATA", true) {
@@ -1340,6 +1393,7 @@ class WalletBridge(
                 )
                 appLockStore.clearSession()
                 clearCurrentWebUser()
+                flushWebViewCookies()
                 currentSeed = null
                 onSessionStatusChanged(false)
                 emitCallback("LOGOUT", true) {
@@ -4959,7 +5013,7 @@ class WalletBridge(
             prefix = "",
             out = claims
         )
-        val deduped = claims.distinctBy { it.path }
+        val deduped = filterHiddenDocumentDisclosureClaims(claims.distinctBy { it.path })
             .sortedWith(compareBy<DisclosureClaimForSubmit> { if (disclosurePathKey(it.path) in requiredKeys) 0 else 1 }
                 .thenBy { it.path })
         logBridgeFlow(
@@ -5136,6 +5190,42 @@ class WalletBridge(
 
     private fun disclosurePathKey(path: String): String {
         return normalizedDisclosurePathParts(path).joinToString(".")
+    }
+
+    private fun filterHiddenDocumentDisclosureClaims(
+        claims: List<DisclosureClaimForSubmit>
+    ): List<DisclosureClaimForSubmit> {
+        val hiddenPrefixes = claims.mapNotNull { claim ->
+            val normalized = disclosurePathKey(claim.path)
+            if (normalized.startsWith("documentEvidence") &&
+                normalized.endsWith(".documentType") &&
+                isHiddenSubmitDisclosureDocumentType(claim.value)
+            ) {
+                claim.path.substringBeforeLast(".")
+            } else {
+                null
+            }
+        }.toSet()
+        return claims.filter { claim ->
+            val hiddenByPrefix = hiddenPrefixes.any { prefix ->
+                claim.path == prefix || claim.path.startsWith("$prefix.")
+            }
+            !hiddenByPrefix && !isHiddenSubmitDisclosureDocumentTypeValue(claim.path, claim.value)
+        }
+    }
+
+    private fun isHiddenSubmitDisclosureDocumentTypeValue(path: String, value: String): Boolean {
+        val normalized = disclosurePathKey(path)
+        return normalized.startsWith("documentEvidence") &&
+            normalized.endsWith(".documentType") &&
+            isHiddenSubmitDisclosureDocumentType(value)
+    }
+
+    private fun isHiddenSubmitDisclosureDocumentType(value: String): Boolean {
+        val trimmed = value.trim()
+        if (trimmed.isBlank()) return false
+        return trimmed.uppercase() in HIDDEN_SUBMIT_DISCLOSURE_DOCUMENT_TYPES ||
+            trimmed in HIDDEN_SUBMIT_DISCLOSURE_DOCUMENT_LABELS
     }
 
     private fun requiredDisclosureKeys(requiredDisclosures: List<String>): Set<String> {
@@ -7247,6 +7337,16 @@ class WalletBridge(
             .remove(KEY_CURRENT_WEB_USER_DISPLAY_HINT)
             .remove(KEY_CURRENT_WEB_USER_ENVIRONMENT)
             .apply()
+    }
+
+    private fun flushWebViewCookies() {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                CookieManager.getInstance().flush()
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "WebView cookie flush failed: ${error.message}")
+        }
     }
 
     private fun requireCurrentWebUserHash(): String {

@@ -14,3 +14,17 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Android signing keys
+*.jks
+*.keystore
+
+# Android release outputs
+app/release/
+app/build/
+*.apk
+*.aab
+*.apks
+*.idsig
+*.dm
+output-metadata.json

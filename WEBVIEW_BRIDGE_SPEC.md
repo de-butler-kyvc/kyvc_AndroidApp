@@ -149,6 +149,10 @@
 | `getWalletDepositInfo` | stable | 입금 주소/QR 조회 |
 | `copyWalletAddress` | stable | 주소 클립보드 복사 |
 | `getWalletTransactions` | stable | account_tx 최근 내역 |
+| `estimateHolderDidSetFee` | stable | XRPL DIDSet 네트워크 수수료 추정 |
+| `getWalletActivityHistory` | stable | VC 발급/VP 제출/보안·경고 활동 이력 조회 |
+| `markWalletActivitiesRead` | stable | 활동 이력 읽음 처리 |
+| `recordWalletActivity` | stable | 웹 보안/경고 활동 이력 적재 |
 | `submitXrpPayment` | stable | 송금 전 네이티브 재인증 필요 |
 | `saveVC` | stable | VC/SD-JWT 저장 |
 | `getCredentialSummaries` | stable | 화면 표시용 증명서 요약 조회 |
@@ -1235,6 +1239,164 @@ Response 주요 필드:
 -> 최근 거래 요약을 onAndroidResult로 반환
 ```
 
+### 7-2. DIDSet 수수료 추정
+
+Method: `estimateHolderDidSetFee`
+
+Request:
+
+```json
+{
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "issuedAt": "2026-05-17T12:45:00Z"
+}
+```
+
+Response:
+
+```json
+{
+  "action": "ESTIMATE_HOLDER_DID_SET_FEE",
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "ok": true,
+  "feeDrops": "12",
+  "networkFeeDrops": "12"
+}
+```
+
+웹 처리 기준:
+
+- DID 등록 화면 진입 시 호출한다.
+- 실패 또는 브릿지 미지원 시 기존 fallback `12 drops`를 사용한다.
+- `getWalletAssets`의 `availableXrpDrops`, `availableDrops`, `spendableDrops`는 reserve를 선차감한 값이 아니라 현재 XRPL 잔액 기준이다.
+- 등록 후 사용 가능 잔액은 웹에서 `현재 잔액 - DID 객체 준비금 증가분 - network fee`로 한 번만 계산한다.
+- Android는 XRPL base reserve / owner reserve를 중복 차감해서 넘기지 않는다.
+
+### 7-3. 지갑 활동 내역 조회
+
+Method: `getWalletActivityHistory`
+
+Request:
+
+```json
+{
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "issuedAt": "2026-05-17T12:45:00Z",
+  "limit": 50,
+  "types": ["VC_ISSUED", "VP_SUBMITTED", "SECURITY_ALERT", "WALLET_WARNING"]
+}
+```
+
+Response:
+
+```json
+{
+  "action": "GET_WALLET_ACTIVITY_HISTORY",
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "ok": true,
+  "count": 2,
+  "activities": [
+    {
+      "id": "vc-35",
+      "type": "VC_ISSUED",
+      "title": "법인 KYC 증명서 발급",
+      "description": "KYvC 인증기관으로부터 증명서를 발급받았습니다.",
+      "credentialId": "35",
+      "credentialType": "법인 KYC 증명서",
+      "issuerDid": "did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc",
+      "issuerName": "KYvC",
+      "createdAtUtc": "2026-05-17T12:34:56Z",
+      "unread": true
+    },
+    {
+      "id": "vp-35-vp-login-req-...",
+      "type": "VP_SUBMITTED",
+      "title": "법인 KYC 증명서 제출",
+      "description": "요청 기관에 증명서를 제출했습니다.",
+      "credentialId": "35",
+      "credentialType": "법인 KYC 증명서",
+      "verifierName": "요청 기관",
+      "createdAtUtc": "2026-05-17T12:40:00Z",
+      "unread": true
+    }
+  ]
+}
+```
+
+저장 기준:
+
+- `saveVC` 성공 시 `VC_ISSUED`를 Room `wallet_activities`에 저장한다.
+- VP 로그인 제출, 일반 VP 제출, verifier 제출 성공 시 `VP_SUBMITTED`를 저장한다.
+- 중복 방지는 발급 `vc-{credentialId}`, 제출 `vp-{credentialId}-{requestId/challenge}` id로 처리한다.
+- 최신순(`createdAtUtc DESC`)으로 반환한다.
+- `types`가 비어 있으면 전체 활동을 반환한다.
+
+### 7-4. 지갑 활동 읽음 처리
+
+Method: `markWalletActivitiesRead`
+
+Request:
+
+```json
+{
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "activityIds": ["vc-35", "vp-35-vp-login-req-..."]
+}
+```
+
+Response:
+
+```json
+{
+  "action": "MARK_WALLET_ACTIVITIES_READ",
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "ok": true,
+  "markedCount": 2
+}
+```
+
+`activityIds`가 빈 배열이면 전체 활동을 읽음 처리한다.
+
+### 7-5. 보안/경고 활동 저장
+
+Method: `recordWalletActivity`
+
+Request:
+
+```json
+{
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "type": "SECURITY_ALERT",
+  "title": "보안 알림",
+  "description": "새 기기에서 로그인 시도가 감지되었습니다.",
+  "createdAtUtc": "2026-05-17T12:45:00Z",
+  "unread": true
+}
+```
+
+지원 타입:
+
+- `SECURITY_ALERT`
+- `WALLET_WARNING`
+
+Response:
+
+```json
+{
+  "action": "RECORD_WALLET_ACTIVITY",
+  "requestId": "3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+  "ok": true,
+  "activity": {
+    "id": "security_alert-3d6109ea-4a06-4c34-a9f8-5f9be4e3a8f5",
+    "type": "SECURITY_ALERT",
+    "title": "보안 알림",
+    "description": "새 기기에서 로그인 시도가 감지되었습니다.",
+    "createdAtUtc": "2026-05-17T12:45:00Z",
+    "unread": true
+  }
+}
+```
+
 ### 8. seed 내보내기
 
 Method: `exportWalletSeed`
@@ -2196,7 +2358,8 @@ Android submit body:
 - 증명서 상세 화면의 `증명서 삭제` 버튼은 네이티브 확인 다이얼로그를 한 번 더 표시한 뒤, 확정 시 Android 로컬 `credentials` row와 같은 `credentialId`의 `holder_documents` row를 삭제하고 `result=delete`를 반환한다.
 - 증명서 제출 화면은 `issuerOptions` 또는 `issuers` 배열을 받아 발급기관 선택 UI로 표시한다. 발급기관 선택은 제출할 credential 선택과 같은 의미이며, 확정 응답의 `selectedCredentialId`가 VP submit에 사용된다.
 - 같은 발급기관의 credential은 하나만 존재해야 하며, 새 회사명/새 VC가 발급되면 같은 발급기관의 기존 credential은 교체되어야 한다. Native VP 로그인 제출 흐름에서는 같은 발급기관 후보가 여러 개면 `acceptedAt`, `validFrom`, `credentialId` 기준 최신 1개만 화면에 표시한다.
-- 증명서 제출 화면은 `submitDocuments`, `requiredDocuments`, `documents`, `attachmentDocuments` 중 하나의 배열을 받아 제출 문서 목록으로 표시한다. 문서를 누르면 원본 내용은 보여주지 않고 hash/digest 값만 표시한다.
+- 증명서 제출 화면은 `submitDocuments`, `requiredDocuments`, `documents`, `attachmentDocuments` 중 하나의 배열을 받아 제출 서류 목록으로 표시한다.
+- 현재 증명서 제출 화면의 제출 문서 영역 표기명은 `제출할 서류`이며, 각 서류 row에는 서류명만 표시한다. 파일명, documentId, DID성 식별값, hash/digest, MIME, byteSize, attachmentRef 같은 디테일은 화면에 표시하지 않는다.
 - 제출 문서 예시는 `주주명부`, `법인인감증명서`, `등기사항전부증명서`, `사업자등록증`, `법인 KYC 증명서`이다.
 - 제출 문서 원본은 API 또는 별도 브릿지로 수신한 뒤 Android 로컬 저장소에 저장해야 한다. 화면 payload에는 원본 bytes/base64를 넣지 않고 `documentId`, `documentType`, `digestSRI/hash`, `mediaType`, `byteSize` 같은 메타만 넣는다.
 - VC 저장 브릿지는 prepare 응답에서 분리된 `documentAttachments`와 `documentAttachmentManifest`를 받을 수 있다. `credentialPayload`는 기존 VC 저장에 사용하고, `documentAttachments[].contentBase64`는 Android 내부 암호화 저장소에 저장한다.
@@ -2204,6 +2367,8 @@ Android submit body:
 - VP multipart 제출 시 `attachmentManifest` part에는 prepare 때 받은 manifest를 그대로 보내고, 파일 part name은 반드시 manifest의 `attachmentRef` 값과 같아야 한다.
 - 기존 테스트 페이지 호환을 위해 `requestCredentialIssueConfirm1`, `requestCredentialIssueConfirm2`는 남겨두지만, 둘 다 동일한 발급 확인 화면을 연다. 신규 웹은 `requestCredentialIssueConfirm`을 사용한다.
 - 화면은 PNG 시안을 기준으로 네이티브 Compose에서 재현한다.
+- 발급 확인 화면은 발급기관, 법인명, 법인등록번호만 표시한다. 법인유형, 대표자, 실소유자, 대리인 정보는 발급 확인 화면에 표시하지 않는다.
+- 발급 저장/제출 진행 중 Android Toast는 표시하지 않고 WebView 콜백과 네이티브 화면 상태로만 결과를 전달한다.
 - 민감한 raw SD-JWT, disclosure 원문, seed는 이 화면 요청 payload에 넣지 않는다.
 
 공통 Response 예시:

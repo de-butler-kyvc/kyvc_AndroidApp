@@ -12,8 +12,10 @@ import android.webkit.WebView
 import android.widget.Toast
 import com.example.kyvc_androidapp.data.local.entity.CredentialEntity
 import com.example.kyvc_androidapp.data.local.entity.HolderDocumentEntity
+import com.example.kyvc_androidapp.data.local.entity.WalletActivityEntity
 import com.example.kyvc_androidapp.data.repository.CredentialRepository
 import com.example.kyvc_androidapp.data.repository.HolderDocumentRepository
+import com.example.kyvc_androidapp.data.repository.WalletActivityRepository
 import com.example.kyvc_androidapp.security.AppLockStore
 import com.example.kyvc_androidapp.security.SecureDocumentStore
 import com.example.kyvc_androidapp.util.DocumentDisplayMapper
@@ -80,6 +82,7 @@ class WalletBridge(
     private val xrplHelper: XrplClientHelper,
     private val credentialRepository: CredentialRepository,
     private val holderDocumentRepository: HolderDocumentRepository,
+    private val walletActivityRepository: WalletActivityRepository,
     private val secureDocumentStore: SecureDocumentStore,
     private val appLockStore: AppLockStore,
     private val launchQrScanner: (String) -> Unit,
@@ -975,7 +978,12 @@ class WalletBridge(
                 )
                 val screenPayload = if (screen in setOf("issueComplete", "issueConfirm", "credentialDetail", "credentialSubmit")) {
                     withContext(Dispatchers.IO) {
-                        enrichCredentialIssuerInstitutionName(request).toString()
+                        val credentialPayload = if (screen == "issueConfirm") {
+                            enrichCredentialIssueConfirmDetails(request)
+                        } else {
+                            request
+                        }
+                        enrichCredentialIssuerInstitutionName(credentialPayload).toString()
                     }
                 } else {
                     jsonPayload
@@ -1117,6 +1125,15 @@ class WalletBridge(
                             put("depositRequired", inactiveAccount)
                             result.xrpBalanceDrops?.let { put("xrpBalanceDrops", it) }
                             result.xrpBalanceXrp?.let { put("xrpBalanceXrp", it) }
+                            result.availableXrpDrops?.let {
+                                put("availableXrpDrops", it)
+                                put("availableDrops", it)
+                            }
+                            result.availableXrp?.let { put("availableXrp", it) }
+                            result.spendableDrops?.let { put("spendableDrops", it) }
+                            result.spendableXrp?.let { put("spendableXrp", it) }
+                            result.baseReserveDrops?.let { put("baseReserveDrops", it) }
+                            result.ownerReserveDrops?.let { put("ownerReserveDrops", it) }
                             result.ownerCount?.let { put("ownerCount", it) }
                             result.sequence?.let { put("sequence", it) }
                             put("trustLineCount", result.lines.size)
@@ -1148,6 +1165,35 @@ class WalletBridge(
                 Log.e(TAG, "getWalletAssets failed", e)
                 emitCallback("GET_WALLET_ASSETS", false) {
                     put("error", e.message ?: "Unknown error")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun estimateHolderDidSetFee(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            try {
+                requireTrustedBridgeOrigin("ESTIMATE_HOLDER_DID_SET_FEE")
+                requireWalletOwnerAccess()
+
+                val request = parseJsonObjectOrEmpty(jsonPayload)
+                withContext(Dispatchers.IO) {
+                    val feeDrops = xrplHelper.estimateNetworkFeeDrops()
+                    withContext(Dispatchers.Main) {
+                        emitCallback("ESTIMATE_HOLDER_DID_SET_FEE", true) {
+                            request.text("requestId")?.let { put("requestId", it) }
+                            put("feeDrops", feeDrops)
+                            put("networkFeeDrops", feeDrops)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "estimateHolderDidSetFee failed", e)
+                val request = parseJsonObjectOrEmpty(jsonPayload)
+                emitCallback("ESTIMATE_HOLDER_DID_SET_FEE", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "수수료 계산에 실패했습니다.")
                 }
             }
         }
@@ -1768,6 +1814,7 @@ class WalletBridge(
                 require(entity.holderAccount.isNotBlank()) { "holderAccount is required" }
                 require(entity.credentialType.isNotBlank()) { "credentialType is required" }
                 credentialRepository.insertCredential(entity)
+                recordVcIssuedActivity(entity, request)
                 val savedDocuments = saveCredentialDocumentAttachments(
                     request = request,
                     credentialId = entity.credentialId,
@@ -1791,7 +1838,6 @@ class WalletBridge(
                     )
                 )
                 scope.launch(Dispatchers.Main) {
-                    Toast.makeText(context, "VC Saved Successfully", Toast.LENGTH_SHORT).show()
                     emitCallback("SAVE_VC", true) {
                         requestId?.let { put("requestId", it) }
                         put("credentialId", entity.credentialId)
@@ -1810,7 +1856,6 @@ class WalletBridge(
             } catch (e: Exception) {
                 logBridgeFailure("vc.issue.saveVC.failed", requestId, e)
                 scope.launch(Dispatchers.Main) {
-                    Toast.makeText(context, "Failed to save VC: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback("SAVE_VC", false) {
                         requestId?.let { put("requestId", it) }
                         put("error", e.message ?: "Unknown error")
@@ -2628,7 +2673,6 @@ class WalletBridge(
                     }
 
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "XRPL submitted: $engineResult", Toast.LENGTH_LONG).show()
                         emitCallback("SUBMIT_TO_XRPL", ledgerApplied || alreadyExists) {
                             request.text("requestId")?.let { put("requestId", it) }
                             put("credentialId", savedCredential?.credentialId ?: request.text("credentialId").orEmpty())
@@ -2724,7 +2768,6 @@ class WalletBridge(
                 val ledgerApplied = engineResult == "tesSUCCESS"
                 val alreadyExists = engineResult == "tecDUPLICATE"
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "CredentialCreate submitted: $engineResult", Toast.LENGTH_LONG).show()
                     emitCallback("SUBMIT_CREDENTIAL_CREATE", ledgerApplied || alreadyExists) {
                         put("issuerAccount", issuerAccount)
                         put("subjectAccount", subjectAccount)
@@ -2741,7 +2784,6 @@ class WalletBridge(
             } catch (e: Exception) {
                 Log.e(TAG, "submitCredentialCreate failed", e)
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, "CredentialCreate failed: ${e.message}", Toast.LENGTH_LONG).show()
                     emitCallback("SUBMIT_CREDENTIAL_CREATE", false) {
                         put("error", e.message ?: "Unknown error")
                     }
@@ -3304,6 +3346,13 @@ class WalletBridge(
                     val failureInfo = if (ok) null else classifyVerifierFailure(responseJson, null)
                     if (ok) {
                         markVerifierChallengeUsed(nonce)
+                        recordVpSubmittedActivity(
+                            activityKey = request.text("requestId") ?: nonce,
+                            credentialId = request.text("credentialId"),
+                            verifierName = request.text("verifierName")
+                                ?: request.text("requesterName")
+                                ?: request.text("domain")
+                        )
                     }
 
                     withContext(Dispatchers.Main) {
@@ -3371,6 +3420,13 @@ class WalletBridge(
                 val failureInfo = if (ok) null else classifyVerifierFailure(responseJson, null)
                 if (ok) {
                     markVerifierChallengeUsed(challenge)
+                    recordVpSubmittedActivity(
+                        activityKey = request.text("requestId") ?: challenge,
+                        credentialId = request.text("credentialId"),
+                        verifierName = request.text("verifierName")
+                            ?: request.text("requesterName")
+                            ?: request.text("domain")
+                    )
                 }
 
                 withContext(Dispatchers.Main) {
@@ -3409,6 +3465,133 @@ class WalletBridge(
                         put("errorTitle", failureInfo.title)
                         put("errorHint", failureInfo.hint)
                     }
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun getWalletActivityHistory(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("GET_WALLET_ACTIVITY_HISTORY")
+                requireWalletOwnerAccess()
+                withContext(Dispatchers.IO) {
+                    val limit = request.text("limit")?.toIntOrNull()?.coerceIn(1, 100) ?: 50
+                    val supportedTypes = setOf("VC_ISSUED", "VP_SUBMITTED", "SECURITY_ALERT", "WALLET_WARNING")
+                    val types = request.array("types")
+                        ?.mapNotNull { it.jsonPrimitive.contentOrNull?.takeIf(String::isNotBlank) }
+                        ?.filter { it in supportedTypes }
+                        .orEmpty()
+                    val activities = walletActivityRepository.findRecent(limit = limit, types = types)
+                    logBridgeFlow(
+                        "wallet.activity.history.loaded",
+                        mapOf(
+                            "requestId" to request.text("requestId"),
+                            "limit" to limit,
+                            "types" to types.joinToString(","),
+                            "count" to activities.size
+                        )
+                    )
+                    withContext(Dispatchers.Main) {
+                        emitCallback("GET_WALLET_ACTIVITY_HISTORY", true) {
+                            request.text("requestId")?.let { put("requestId", it) }
+                            put("count", activities.size)
+                            put(
+                                "activities",
+                                JsonArray(activities.map { it.toJsonObject() })
+                            )
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "getWalletActivityHistory failed", e)
+                emitCallback("GET_WALLET_ACTIVITY_HISTORY", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "활동 내역을 조회할 수 없습니다.")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun recordWalletActivity(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("RECORD_WALLET_ACTIVITY")
+                requireWalletOwnerAccess()
+                withContext(Dispatchers.IO) {
+                    val type = request.text("type")
+                        ?.takeIf { it in setOf("SECURITY_ALERT", "WALLET_WARNING") }
+                        ?: throw IllegalArgumentException("지원하지 않는 활동 유형입니다.")
+                    val title = request.text("title") ?: if (type == "SECURITY_ALERT") "보안 알림" else "지갑 경고"
+                    val description = request.text("description") ?: title
+                    val activity = WalletActivityEntity(
+                        id = request.text("id")
+                            ?: "${type.lowercase(Locale.US)}-${request.text("requestId") ?: UUID.randomUUID()}",
+                        type = type,
+                        title = title,
+                        description = description,
+                        credentialId = request.text("credentialId"),
+                        credentialType = request.text("credentialType"),
+                        issuerDid = request.text("issuerDid"),
+                        issuerName = request.text("issuerName"),
+                        verifierName = request.text("verifierName"),
+                        createdAtUtc = request.text("createdAtUtc") ?: nowUtcIso(),
+                        unread = request.text("unread")?.toBooleanStrictOrNull() ?: true
+                    )
+                    walletActivityRepository.insert(activity)
+                    logBridgeFlow(
+                        "wallet.activity.saved",
+                        mapOf(
+                            "type" to activity.type,
+                            "activityId" to activity.id,
+                            "source" to "bridge"
+                        )
+                    )
+                    withContext(Dispatchers.Main) {
+                        emitCallback("RECORD_WALLET_ACTIVITY", true) {
+                            request.text("requestId")?.let { put("requestId", it) }
+                            put("activity", activity.toJsonObject())
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "recordWalletActivity failed", e)
+                emitCallback("RECORD_WALLET_ACTIVITY", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "활동 내역을 저장할 수 없습니다.")
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun markWalletActivitiesRead(jsonPayload: String) {
+        scope.launch(Dispatchers.Main) {
+            val request = parseJsonObjectOrEmpty(jsonPayload)
+            try {
+                requireTrustedBridgeOrigin("MARK_WALLET_ACTIVITIES_READ")
+                requireWalletOwnerAccess()
+                withContext(Dispatchers.IO) {
+                    val activityIds = request.array("activityIds")
+                        ?.mapNotNull { it.jsonPrimitive.contentOrNull?.takeIf(String::isNotBlank) }
+                        .orEmpty()
+                    walletActivityRepository.markRead(activityIds)
+                    withContext(Dispatchers.Main) {
+                        emitCallback("MARK_WALLET_ACTIVITIES_READ", true) {
+                            request.text("requestId")?.let { put("requestId", it) }
+                            put("markedCount", activityIds.size)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "markWalletActivitiesRead failed", e)
+                emitCallback("MARK_WALLET_ACTIVITIES_READ", false) {
+                    request.text("requestId")?.let { put("requestId", it) }
+                    put("error", e.message ?: "활동 내역을 읽음 처리할 수 없습니다.")
                 }
             }
         }
@@ -4084,6 +4267,83 @@ class WalletBridge(
         }
     }
 
+    private suspend fun recordVcIssuedActivity(credential: CredentialEntity, request: JsonObject) {
+        val issuerName = credentialIssuerNameFromRequest(request)
+            ?: runCatching { resolveIssuerInstitutionName(credential) }.getOrNull()
+            ?: "KYvC 인증기관"
+        val activity = WalletActivityEntity(
+            id = "vc-${credential.credentialId}",
+            type = "VC_ISSUED",
+            title = "법인 KYC 증명서 발급",
+            description = "${issuerName}으로부터 증명서를 발급받았습니다.",
+            credentialId = credential.credentialId,
+            credentialType = "법인 KYC 증명서",
+            issuerDid = credential.issuerDid,
+            issuerName = issuerName,
+            verifierName = null,
+            createdAtUtc = credential.validFrom.takeIf { it.isNotBlank() } ?: nowUtcIso(),
+            unread = true
+        )
+        walletActivityRepository.insert(activity)
+        logBridgeFlow(
+            "wallet.activity.saved",
+            mapOf(
+                "type" to activity.type,
+                "activityId" to activity.id,
+                "credentialId" to credential.credentialId
+            )
+        )
+    }
+
+    private suspend fun recordVpSubmittedActivity(
+        activityKey: String,
+        credentialId: String?,
+        verifierName: String?
+    ) {
+        val credential = credentialId?.let { credentialRepository.getCredentialById(it) }
+        val resolvedVerifierName = verifierName?.takeIf { it.isNotBlank() } ?: "요청 기관"
+        val issuerName = credential?.let { runCatching { resolveIssuerInstitutionName(it) }.getOrNull() }
+        val activity = WalletActivityEntity(
+            id = "vp-${credentialId.orEmpty().ifBlank { "unknown" }}-$activityKey",
+            type = "VP_SUBMITTED",
+            title = "법인 KYC 증명서 제출",
+            description = "${resolvedVerifierName}에 증명서를 제출했습니다.",
+            credentialId = credentialId,
+            credentialType = "법인 KYC 증명서",
+            issuerDid = credential?.issuerDid,
+            issuerName = issuerName,
+            verifierName = resolvedVerifierName,
+            createdAtUtc = nowUtcIso(),
+            unread = true
+        )
+        walletActivityRepository.insert(activity)
+        logBridgeFlow(
+            "wallet.activity.saved",
+            mapOf(
+                "type" to activity.type,
+                "activityId" to activity.id,
+                "credentialId" to credentialId,
+                "verifierName" to resolvedVerifierName
+            )
+        )
+    }
+
+    private fun WalletActivityEntity.toJsonObject(): JsonObject {
+        return buildJsonObject {
+            put("id", id)
+            put("type", type)
+            put("title", title)
+            put("description", description)
+            credentialId?.let { put("credentialId", it) }
+            credentialType?.let { put("credentialType", it) }
+            issuerDid?.let { put("issuerDid", it) }
+            issuerName?.let { put("issuerName", it) }
+            verifierName?.let { put("verifierName", it) }
+            put("createdAtUtc", createdAtUtc)
+            put("unread", unread)
+        }
+    }
+
     private data class CredentialLocalStatus(
         val code: String,
         val label: String
@@ -4398,6 +4658,13 @@ class WalletBridge(
                 didDocument = presentationResult.didDocument,
                 deviceId = deviceId
             )
+            recordVpSubmittedActivity(
+                activityKey = resolvedRequestId,
+                credentialId = credential.credentialId,
+                verifierName = resolveResponse.requesterName.ifBlank {
+                    resolveResponse.domain.ifBlank { "요청 기관" }
+                }
+            )
 
             withContext(Dispatchers.Main) {
                 launchVpLoginCompletion("VP 제출이 완료되었습니다.\nPC 화면에서 로그인이 완료됩니다.")
@@ -4534,6 +4801,13 @@ class WalletBridge(
                 presentation = presentationResult.presentation,
                 didDocument = presentationResult.didDocument,
                 deviceId = deviceId
+            )
+            recordVpSubmittedActivity(
+                activityKey = resolvedRequestId,
+                credentialId = credential.credentialId,
+                verifierName = vpRequest.requesterName?.takeIf { it.isNotBlank() }
+                    ?: vpRequest.domain?.takeIf { it.isNotBlank() }
+                    ?: "요청 기관"
             )
 
             withContext(Dispatchers.Main) {
@@ -4925,13 +5199,18 @@ class WalletBridge(
     }
 
     private suspend fun enrichCredentialIssuerInstitutionName(request: JsonObject): JsonObject {
-        val credentialId = firstText(request, "credentialId", "id")
+        val credentialId = firstText(request, "credentialId", "id", "jti")
+            ?: firstText(request.obj("data"), "credentialId", "id", "jti")
+            ?: firstText(request.obj("credential"), "credentialId", "id", "jti")
+            ?: firstText(request.obj("credentialOffer"), "credentialId", "id", "jti")
+            ?: firstText(request.obj("offer"), "credentialId", "id", "jti")
             ?: firstText(request.obj("metadata"), "credentialId")
             ?: firstText(request.obj("credentialPayload")?.obj("metadata"), "credentialId")
             ?: firstText(request.obj("data")?.obj("credentialPayload")?.obj("metadata"), "credentialId")
         val storedCredential = credentialId?.let { credentialRepository.getCredentialById(it) }
         val issuerDid = credentialIssuerDidFromRequest(request)
             ?: storedCredential?.issuerDid?.takeIf { it.isNotBlank() }
+            ?: storedCredential?.issuerAccount?.takeIf { it.isNotBlank() }?.let { "did:xrpl:1:$it" }
             ?: return request
         val fallback = credentialIssuerNameFromRequest(request)
             ?: storedCredential?.issuerDisplayName()
@@ -4941,6 +5220,76 @@ class WalletBridge(
             request.forEach { (key, value) -> put(key, value) }
             put("issuerName", institutionName)
             put("issuerDisplayName", institutionName)
+            put("issuerInstitutionName", institutionName)
+            put("institutionName", institutionName)
+        }
+    }
+
+    private fun credentialOfferIdFromRequest(request: JsonObject): String? {
+        val data = request.obj("data")
+        val offer = request.obj("offer")
+        val credentialOffer = request.obj("credentialOffer")
+        return firstText(request, "offerId", "credentialOfferId")
+            ?: firstText(data, "offerId", "credentialOfferId")
+            ?: firstText(offer, "offerId", "id", "credentialOfferId")
+            ?: firstText(credentialOffer, "offerId", "id", "credentialOfferId")
+    }
+
+    private suspend fun enrichCredentialIssueConfirmDetails(request: JsonObject): JsonObject {
+        val offerId = credentialOfferIdFromRequest(request) ?: return request
+        val endpoint = "$VP_LOGIN_BACKEND_BASE_URL/api/mobile/wallet/credential-offers/$offerId"
+        val responseBody = runCatching {
+            getJsonWithWebCookies(endpoint, "Credential offer detail")
+        }.recoverCatching { cookieError ->
+            logBridgeFlow(
+                "vc.issue.confirm.offerDetail.cookieFallback",
+                mapOf(
+                    "offerId" to offerId,
+                    "reason" to (cookieError.message ?: "cookie_request_failed")
+                )
+            )
+            getJsonViaWebView(endpoint, "Credential offer detail")
+        }.getOrElse { error ->
+            logBridgeFlow(
+                "vc.issue.confirm.offerDetail.fallback",
+                mapOf(
+                    "offerId" to offerId,
+                    "reason" to (error.message ?: "request_failed")
+                )
+            )
+            return request
+        }
+        val response = runCatching { Json.parseToJsonElement(responseBody).jsonObject }.getOrElse {
+            return request
+        }
+        val offerData = response.obj("data") ?: response
+        logBridgeFlow(
+            "vc.issue.confirm.offerDetail.loaded",
+            mapOf(
+                "offerId" to offerId,
+                "hasLegalEntity" to (offerData.obj("legalEntity") != null),
+                "hasRepresentative" to (offerData.obj("representative") != null),
+                "hasBeneficialOwners" to (offerData["beneficialOwners"] != null),
+                "hasDelegate" to (offerData.obj("delegate") != null)
+            )
+        )
+        return mergeCredentialIssueConfirmPayload(request, offerData)
+    }
+
+    private fun mergeCredentialIssueConfirmPayload(request: JsonObject, offerData: JsonObject): JsonObject {
+        val existingData = request.obj("data")
+        return buildJsonObject {
+            offerData.forEach { (key, value) -> put(key, value) }
+            request.forEach { (key, value) -> put(key, value) }
+            put("offer", offerData)
+            put("credentialOffer", offerData)
+            put(
+                "data",
+                buildJsonObject {
+                    offerData.forEach { (key, value) -> put(key, value) }
+                    existingData?.forEach { (key, value) -> put(key, value) }
+                }
+            )
         }
     }
 
@@ -4951,12 +5300,25 @@ class WalletBridge(
         val dataCredentialPayload = data?.obj("credentialPayload")
         val dataPayloadMetadata = dataCredentialPayload?.obj("metadata")
         val metadata = request.obj("metadata")
+        val credential = request.obj("credential")
+        val offer = request.obj("offer")
+        val credentialOffer = request.obj("credentialOffer")
         return firstText(request, "issuerDid", "issuer")
+            ?: firstText(data, "issuerDid", "issuer")
+            ?: firstText(credential, "issuerDid", "issuer")
+            ?: firstText(offer, "issuerDid", "issuer")
+            ?: firstText(credentialOffer, "issuerDid", "issuer")
             ?: firstText(metadata, "issuerDid", "issuer")
             ?: firstText(payloadMetadata, "issuerDid", "issuer")
             ?: firstText(dataPayloadMetadata, "issuerDid", "issuer")
             ?: firstText(credentialPayload, "issuerDid", "issuer")
             ?: firstText(dataCredentialPayload, "issuerDid", "issuer")
+            ?: firstText(request, "issuerAccount", "issuerAddress")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { "did:xrpl:1:$it" }
+            ?: firstText(data, "issuerAccount", "issuerAddress")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { "did:xrpl:1:$it" }
     }
 
     private fun credentialIssuerNameFromRequest(request: JsonObject): String? {
@@ -4967,8 +5329,10 @@ class WalletBridge(
         val dataPayloadMetadata = dataCredentialPayload?.obj("metadata")
         val metadata = request.obj("metadata")
         val issuerObject = request.obj("issuer")
+        val dataIssuerObject = data?.obj("issuer")
         return firstText(request, "issuerName", "issuerDisplayName", "issuerCorporateName")
             ?: firstText(issuerObject, "institutionName", "name", "displayName")
+            ?: firstText(dataIssuerObject, "institutionName", "name", "displayName")
             ?: firstText(metadata, "issuerName", "issuerDisplayName", "issuerCorporateName", "institutionName")
             ?: firstText(payloadMetadata, "issuerName", "issuerDisplayName", "issuerCorporateName", "institutionName")
             ?: firstText(dataPayloadMetadata, "issuerName", "issuerDisplayName", "issuerCorporateName", "institutionName")
@@ -6572,6 +6936,79 @@ class WalletBridge(
                 throw IllegalStateException("$requestLabel request failed (${response.code}): ${safeBackendErrorMessage(responseBody)}")
             }
             return responseBody
+        }
+    }
+
+    private fun getJsonWithWebCookies(endpoint: String, requestLabel: String): String {
+        val url = endpoint.toHttpUrlOrNull() ?: throw IllegalArgumentException("Invalid $requestLabel endpoint: $endpoint")
+        val builder = Request.Builder()
+            .url(url)
+            .get()
+        webViewCookieHeader(endpoint)?.let { cookie ->
+            builder.header("Cookie", cookie)
+        }
+        val request = builder.build()
+
+        httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw IllegalStateException("$requestLabel request failed (${response.code}): ${safeBackendErrorMessage(responseBody)}")
+            }
+            return responseBody
+        }
+    }
+
+    private suspend fun getJsonViaWebView(endpoint: String, requestLabel: String): String {
+        val callbackResult = withContext(Dispatchers.Main) {
+            val webView = webViewRef?.get() ?: throw IllegalStateException("WebView is not attached")
+            val deferred = CompletableDeferred<String?>()
+            val script = """
+                (function() {
+                  return fetch(${JSONObject.quote(endpoint)}, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: { 'Accept': 'application/json' }
+                  }).then(function(response) {
+                    return response.text().then(function(body) {
+                      return JSON.stringify({ ok: response.ok, status: response.status, body: body });
+                    });
+                  }).catch(function(error) {
+                    return JSON.stringify({ ok: false, status: 0, error: String(error && error.message ? error.message : error) });
+                  });
+                })();
+            """.trimIndent()
+            webView.evaluateJavascript(script) { value ->
+                deferred.complete(value)
+            }
+            deferred.await()
+        } ?: throw IllegalStateException("$requestLabel WebView fetch returned empty")
+
+        val jsonText = runCatching {
+            JSONObject("{\"value\":$callbackResult}").optString("value")
+        }.getOrDefault("")
+        val result = runCatching { JSONObject(jsonText) }.getOrElse {
+            throw IllegalStateException("$requestLabel WebView fetch result is invalid")
+        }
+        val body = result.optString("body")
+        if (!result.optBoolean("ok", false)) {
+            val status = result.optInt("status")
+            val error = result.optString("error").ifBlank { safeBackendErrorMessage(body) }
+            throw IllegalStateException("$requestLabel WebView fetch failed ($status): $error")
+        }
+        return body
+    }
+
+    private fun webViewCookieHeader(endpoint: String): String? {
+        val cookieManager = CookieManager.getInstance()
+        return listOf(
+            endpoint,
+            VP_LOGIN_BACKEND_BASE_URL,
+            "https://dev-kyvc.khuoo.synology.me",
+            "https://kyvc.khuoo.synology.me"
+        ).firstNotNullOfOrNull { url ->
+            runCatching { cookieManager.getCookie(url) }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
         }
     }
 

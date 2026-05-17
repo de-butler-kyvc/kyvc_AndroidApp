@@ -136,6 +136,9 @@ UI/브리지 기본값 규칙:
 - **Native Overlay UI**: 지문 인증, QR 스캔, 복구 문구 백업, 지갑 복구 화면을 네이티브 오버레이로 구현하고 웹은 브릿지 호출/결과 처리만 담당
 - **Credential Native Screens**: `발급완료.png`, `발급확인1.png`/`발급확인2.png`, `증명서 상세.png`, `증명서 제출.png` 시안을 기준으로 발급/상세/제출 네이티브 화면과 브릿지 결과 콜백 추가. 발급 확인은 `requestCredentialIssueConfirm` 단일 브릿지를 사용하고, 기존 `requestCredentialIssueConfirm1/2`는 호환 alias로 유지
 - **Credential Screen Result Contract**: 발급 확인/제출 화면의 `reject`는 정상 사용자 선택으로 `ok=true, result=reject`를 반환하고, 뒤로가기/닫기만 `ok=false, result=cancel`로 반환
+- **Wallet Activity History**: `saveVC`, VP 제출 성공 시 `VC_ISSUED`/`VP_SUBMITTED` 활동을 Room `wallet_activities`에 저장하고, `getWalletActivityHistory`, `markWalletActivitiesRead`, `recordWalletActivity` 브릿지로 활동 탭 데이터를 제공
+- **DID Fee/Balance Bridge**: `estimateHolderDidSetFee` 브릿지로 XRPL `fee` RPC 기반 DIDSet 네트워크 수수료를 반환하고, `getWalletAssets`의 available/spendable 필드는 reserve 이중 차감을 막기 위해 실제 현재 잔액 기준으로 반환
+- **Credential UI Polish**: 발급 확인 화면은 핵심 항목만 표시하고, 증명서 제출 화면은 제출 서류명을 간결하게 표시하며, 발급/제출 중 중복 Toast 메시지를 제거
 - **App Icon**: `logo3.png` 기반 KYvC 런처 아이콘을 adaptive icon과 density별 mipmap 리소스로 반영
 - **VC Validation**: VC 저장/서명/상태조회 전에 `credentialSubject.id`, `credentialStatus.subject`, `validFrom/validUntil`을 검증하고 holder wallet과 맞지 않으면 차단
 - **XRPL Status**: credential ledger entry index를 계산해 `ledger_entry`로 status를 조회하고 active 여부를 `CHECK_CREDENTIAL_STATUS` 콜백으로 반환

@@ -5,6 +5,7 @@ import androidx.room.Room
 import com.example.kyvc_androidapp.data.local.AppDatabase
 import com.example.kyvc_androidapp.data.repository.CredentialRepository
 import com.example.kyvc_androidapp.data.repository.HolderDocumentRepository
+import com.example.kyvc_androidapp.data.repository.WalletActivityRepository
 import com.example.kyvc_androidapp.security.AppLockStore
 import com.example.kyvc_androidapp.security.SecureDocumentStore
 import com.example.kyvc_androidapp.wallet.core.WalletManager
@@ -19,10 +20,11 @@ class AppContainer(application: Application) {
         AppDatabase::class.java,
         DATABASE_NAME
     )
-        .addMigrations(AppDatabase.MIGRATION_2_3)
+        .addMigrations(AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
         .build()
     val credentialRepository: CredentialRepository = CredentialRepository(database.credentialDao())
     val holderDocumentRepository: HolderDocumentRepository = HolderDocumentRepository(database.holderDocumentDao())
+    val walletActivityRepository: WalletActivityRepository = WalletActivityRepository(database.walletActivityDao())
     val secureDocumentStore: SecureDocumentStore = SecureDocumentStore(application)
     val walletStateStore: WalletStateStore = WalletStateStore(application, walletManager)
     val appLockStore: AppLockStore = AppLockStore(application)

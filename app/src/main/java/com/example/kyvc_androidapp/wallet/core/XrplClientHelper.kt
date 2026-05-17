@@ -141,6 +141,39 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         return xrplClient.submit(signedTx)
     }
 
+    suspend fun estimateNetworkFeeDrops(): String {
+        val body = JSONObject()
+            .put("method", "fee")
+            .put("params", JSONArray().put(JSONObject()))
+            .toString()
+
+        val request = Request.Builder()
+            .url(rpcUrl)
+            .post(body.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        val json = httpClient.newCall(request).execute().use { response ->
+            val responseBody = response.body?.string().orEmpty()
+            runCatching { JSONObject(responseBody) }.getOrElse {
+                throw IllegalStateException("Invalid fee response")
+            }
+        }
+        val result = json.optJSONObject("result")
+            ?: throw IllegalStateException("fee result missing")
+        if (result.optString("status") == "error" || result.has("error")) {
+            val errorCode = result.optString("error")
+            throw IllegalStateException(result.optString("error_message", errorCode.ifBlank { "fee lookup failed" }))
+        }
+        val drops = result.optJSONObject("drops")
+            ?: throw IllegalStateException("fee drops missing")
+        return listOf(
+            drops.optString("open_ledger_fee"),
+            drops.optString("minimum_fee"),
+            drops.optString("median_fee")
+        ).firstOrNull { it.isNotBlank() && it.matches(Regex("^\\d+$")) }
+            ?: throw IllegalStateException("fee drops value missing")
+    }
+
     suspend fun getDidStatus(
         accountAddress: String,
         expectedDataHashHex: String? = null
@@ -588,12 +621,19 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         }.getOrDefault(emptyList())
 
         val balanceDrops = accountData.optString("Balance").takeIf { it.isNotBlank() }
+        val ownerCount = accountData.optLong("OwnerCount")
         return AccountAssetsResult(
             account = validatedAddress,
             accountActivated = true,
             xrpBalanceDrops = balanceDrops,
             xrpBalanceXrp = balanceDrops?.let(::dropsToXrpString),
-            ownerCount = accountData.optLong("OwnerCount"),
+            availableXrpDrops = balanceDrops,
+            availableXrp = balanceDrops?.let(::dropsToXrpString),
+            spendableDrops = balanceDrops,
+            spendableXrp = balanceDrops?.let(::dropsToXrpString),
+            baseReserveDrops = null,
+            ownerReserveDrops = null,
+            ownerCount = ownerCount,
             sequence = accountData.optLong("Sequence"),
             lines = lines,
             checkedAtUtc = checkedAt,
@@ -723,6 +763,12 @@ class XrplClientHelper(rpcUrl: String = "https://s.altnet.rippletest.net:51234/"
         val accountActivated: Boolean,
         val xrpBalanceDrops: String?,
         val xrpBalanceXrp: String?,
+        val availableXrpDrops: String? = null,
+        val availableXrp: String? = null,
+        val spendableDrops: String? = null,
+        val spendableXrp: String? = null,
+        val baseReserveDrops: String? = null,
+        val ownerReserveDrops: String? = null,
         val ownerCount: Long?,
         val sequence: Long?,
         val lines: List<TrustLine>,

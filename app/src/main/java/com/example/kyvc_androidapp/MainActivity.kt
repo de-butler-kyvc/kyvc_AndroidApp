@@ -20,6 +20,10 @@ import android.webkit.WebViewClient
 import android.webkit.SslErrorHandler
 import android.webkit.WebView
 import android.widget.Toast
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -233,6 +237,7 @@ class MainActivity : FragmentActivity() {
             xrplHelper = container.xrplHelper,
             credentialRepository = container.credentialRepository,
             holderDocumentRepository = container.holderDocumentRepository,
+            walletActivityRepository = container.walletActivityRepository,
             secureDocumentStore = container.secureDocumentStore,
             appLockStore = container.appLockStore,
             launchQrScanner = { requestJson ->
@@ -552,10 +557,13 @@ class MainActivity : FragmentActivity() {
                                     } ?: uiData.copy(balanceWarning = "잔액 조회 중")
                                 }
                                 if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail &&
-                                    (storedCredentialDisplayData.claimRows.isNotEmpty() || storedCredentialDisplayData.documentEvidenceItems.isNotEmpty())
+                                    (storedCredentialDisplayData.claimRows.isNotEmpty() ||
+                                        storedCredentialDisplayData.beneficialOwnerGroups.isNotEmpty() ||
+                                        storedCredentialDisplayData.documentEvidenceItems.isNotEmpty())
                                 ) {
                                     uiData = uiData.copy(
                                         storedClaimRows = storedCredentialDisplayData.claimRows,
+                                        beneficialOwnerGroups = storedCredentialDisplayData.beneficialOwnerGroups,
                                         documentEvidenceItems = storedCredentialDisplayData.documentEvidenceItems
                                     )
                                 }
@@ -645,7 +653,7 @@ class MainActivity : FragmentActivity() {
                 val assets = container.xrplHelper.getAccountAssets(walletState.account)
                 val currentBalance = assets.xrpBalanceXrp
                 val currentBalanceLabel = currentBalance?.let(::formatXrpLabel) ?: baseData.currentBalanceXrp
-                val networkFeeAmount = parseXrpFeeAmount(baseData.networkFeeXrp)
+                val networkFeeAmount = safeNetworkFeeAmount(baseData.networkFeeXrp)
                 val networkFeeLabel = formatXrpAmountLabel(networkFeeAmount)
                 val usableBalanceLabel = currentBalance
                     ?.let { calculateUsableXrp(it, networkFeeAmount) }
@@ -667,8 +675,11 @@ class MainActivity : FragmentActivity() {
             }.getOrElse {
                 IssueConfirmBalanceSnapshot(
                     currentBalanceXrp = baseData.currentBalanceXrp,
-                    networkFeeXrp = formatXrpAmountLabel(parseXrpFeeAmount(baseData.networkFeeXrp)),
-                    usableBalanceXrp = baseData.usableBalanceXrp,
+                    networkFeeXrp = formatXrpAmountLabel(safeNetworkFeeAmount(baseData.networkFeeXrp)),
+                    usableBalanceXrp = calculateUsableXrp(
+                        baseData.currentBalanceXrp,
+                        safeNetworkFeeAmount(baseData.networkFeeXrp)
+                    ),
                     balanceWarning = "* 잔액 조회를 완료하지 못했습니다"
                 )
             }
@@ -1449,6 +1460,9 @@ private fun CredentialNativeScreen.fallbackAction(): String {
 }
 
 private fun credentialDateOnly(value: String): String {
+    parseDisplayInstant(value)?.let {
+        return DETAIL_DATE_FORMATTER.format(it.atZone(ZoneId.systemDefault()))
+    }
     val date = value
         .trim()
         .substringBefore("T")
@@ -1459,6 +1473,32 @@ private fun credentialDateOnly(value: String): String {
         date
     }
 }
+
+private fun credentialDateTime(value: String): String {
+    parseDisplayInstant(value)?.let {
+        return DETAIL_DATE_TIME_FORMATTER.format(it.atZone(ZoneId.systemDefault()))
+    }
+    return value.trim()
+        .replace("T", " ")
+        .substringBefore("+")
+        .removeSuffix("Z")
+        .replace("-", ".")
+}
+
+private fun parseDisplayInstant(value: String): Instant? {
+    val trimmed = value.trim()
+    if (trimmed.isBlank()) return null
+    trimmed.toLongOrNull()?.let { epoch ->
+        return Instant.ofEpochSecond(epoch)
+    }
+    return runCatching { Instant.parse(trimmed) }.getOrNull()
+        ?: runCatching { LocalDateTime.parse(trimmed).atZone(ZoneId.systemDefault()).toInstant() }.getOrNull()
+}
+
+private val DETAIL_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy.MM.dd")
+private val DETAIL_DATE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm")
+private val DEFAULT_XRPL_NETWORK_FEE_XRP: BigDecimal = BigDecimal("0.000012")
+private val MAX_REASONABLE_XRPL_NETWORK_FEE_XRP: BigDecimal = BigDecimal("0.1")
 
 private fun parseXrpAmount(value: String): BigDecimal {
     val normalized = value
@@ -1479,14 +1519,20 @@ private fun parseXrpFeeAmount(value: String): BigDecimal {
         .trim()
         .ifBlank { "0" }
     val amount = normalized.toBigDecimalOrNull() ?: return BigDecimal.ZERO
-    val looksLikeDrops = trimmed.contains("drop", ignoreCase = true) ||
+    val explicitDrops = trimmed.contains("drop", ignoreCase = true)
+    val looksLikeDrops = (explicitDrops && !normalized.contains(".")) ||
         (!trimmed.contains("XRP", ignoreCase = true) && !normalized.contains(".") && amount >= BigDecimal.ONE)
     return if (looksLikeDrops) amount.movePointLeft(6) else amount
 }
 
+private fun safeNetworkFeeAmount(value: String): BigDecimal {
+    val fee = parseXrpFeeAmount(value)
+    return if (fee > MAX_REASONABLE_XRPL_NETWORK_FEE_XRP) DEFAULT_XRPL_NETWORK_FEE_XRP else fee
+}
+
 private fun calculateUsableXrp(balanceXrp: String, feeXrp: BigDecimal): String {
     val usable = parseXrpAmount(balanceXrp).subtract(feeXrp)
-    return if (usable < BigDecimal.ZERO) "0" else usable.stripTrailingZeros().toPlainString()
+    return formatXrpAmountLabel(if (usable < BigDecimal.ZERO) BigDecimal.ZERO else usable)
 }
 
 private fun formatXrpLabel(value: String): String {
@@ -1514,32 +1560,73 @@ private fun storedCredentialDisplayData(
     val visibleClaims = claims.entries
         .filter { (_, value) -> value.isNotBlank() }
         .filterNot { (key, _) -> isDocumentEvidenceClaim(key) }
-    val labelCounts = visibleClaims
-        .map { it.key }
-        .map(::claimDisplayLabel)
-        .groupingBy { it }
-        .eachCount()
-    val claimRows = visibleClaims
+        .filterNot { (key, _) -> isHiddenCredentialDetailClaim(key) }
+    val beneficialOwnerGroups = beneficialOwnerGroupsFromClaims(visibleClaims)
+    val generalClaims = visibleClaims.filterNot { (key, _) -> isBeneficialOwnerClaim(key) }
+    val claimRows = generalClaims
         .sortedWith(
-            compareBy<Map.Entry<String, String>> { claimOrder(it.key) }
-                .thenBy { it.key }
+            compareBy<Map.Entry<String, String>> { claimSortKey(it.key).sectionOrder }
+                .thenBy { claimSortKey(it.key).ownerIndex }
+                .thenBy { claimSortKey(it.key).fieldOrder }
+                .thenBy { claimSortKey(it.key).path }
         )
         .mapIndexed { index, (key, value) ->
             val label = claimDisplayLabel(key)
             Triple(
                 claimIcon(index, key),
-                if ((labelCounts[label] ?: 0) > 1) "$label (${normalizeClaimKey(key)})" else label,
+                label,
                 claimDisplayValue(key, value)
             )
-        }
+    }
     return StoredCredentialDisplayData(
         claimRows = claimRows,
+        beneficialOwnerGroups = beneficialOwnerGroups,
         documentEvidenceItems = documentEvidenceItemsFromClaims(claims, holderDocuments)
     )
 }
 
 private fun isDocumentEvidenceClaim(key: String): Boolean {
     return normalizeClaimKey(key).startsWith("documentEvidence")
+}
+
+private fun isBeneficialOwnerClaim(key: String): Boolean {
+    return normalizeClaimKey(key).startsWith("beneficialOwners[].") ||
+        key.startsWith("beneficialOwners[")
+}
+
+private fun beneficialOwnerGroupsFromClaims(
+    claims: List<Map.Entry<String, String>>
+): List<BeneficialOwnerUiGroup> {
+    val grouped = linkedMapOf<Int, MutableList<Map.Entry<String, String>>>()
+    claims.filter { (key, _) -> isBeneficialOwnerClaim(key) }
+        .forEach { entry ->
+            val ownerIndex = Regex("""^beneficialOwners\[(\d+)]""")
+                .find(entry.key)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: 0
+            grouped.getOrPut(ownerIndex) { mutableListOf() } += entry
+        }
+    return grouped.entries.sortedBy { it.key }.mapIndexed { displayIndex, entry ->
+        val rows = entry.value
+            .sortedWith(
+                compareBy<Map.Entry<String, String>> { claimSortKey(it.key).fieldOrder }
+                    .thenBy { it.key }
+            )
+            .mapIndexed { rowIndex, (key, value) ->
+                val label = claimDisplayLabel(key)
+                Triple(claimIcon(rowIndex, key), label, claimDisplayValue(key, value))
+            }
+        val title = rows.firstOrNull { it.second == "실소유자 이름" }?.third
+            ?.takeIf { it.isNotBlank() && it != "-" }
+            ?: "실소유자 ${displayIndex + 1}"
+        BeneficialOwnerUiGroup(title = title, rows = rows)
+    }
+}
+
+private fun isHiddenCredentialDetailClaim(key: String): Boolean {
+    return normalizeClaimKey(key) in HIDDEN_CREDENTIAL_DETAIL_CLAIMS
 }
 
 private fun documentEvidenceItemsFromClaims(
@@ -1613,7 +1700,7 @@ private fun documentEvidenceUiItem(
         matchedDocument?.originalFilename
     ) ?: documentFileNameFallback(documentId, documentType, typeLabel)
     return DocumentEvidenceUiItem(
-        title = "제출 문서 ${index + 1}",
+        title = fileName.ifBlank { typeLabel.ifBlank { "제출 문서 ${index + 1}" } },
         documentTypeLabel = typeLabel,
         fileName = fileName,
         documentId = documentId,
@@ -1941,6 +2028,7 @@ private fun claimDisplayValue(key: String, value: String): String {
     val normalized = normalizeClaimKey(key)
     return when (normalized) {
         "legalEntity.type" -> LEGAL_ENTITY_TYPE_LABELS[value] ?: value
+        "iat", "exp" -> credentialDateTime(value)
         "kyc.assuranceLevel" -> ASSURANCE_LEVEL_LABELS[value] ?: value
         "documentEvidence[].documentType" -> displayDocumentType(value)
         "documentEvidence[].documentClass" -> documentClassDisplayValue(value)
@@ -1995,6 +2083,7 @@ private fun normalizeDisplayFileName(value: String?): String? {
     if (name.isBlank()) return null
     name = name.substringAfterLast('/').substringAfterLast('\\')
     name = Regex("""(?i)(\.[a-z0-9]{1,8})\1$""").replace(name) { it.groupValues[1] }
+    name = name.replace(Regex("""(?i)\.pdf$"""), "")
     if (name.startsWith("urn:", ignoreCase = true) || Regex("""document-\d+""").matches(name)) return null
     return name.takeIf { it.isNotBlank() && !it.looksLikeMaskedFileName() }
 }
@@ -2074,6 +2163,43 @@ private fun claimOrder(key: String): Int {
     return CLAIM_ORDER.indexOf(normalized).takeIf { it >= 0 } ?: Int.MAX_VALUE
 }
 
+private data class ClaimSortKey(
+    val sectionOrder: Int,
+    val ownerIndex: Int,
+    val fieldOrder: Int,
+    val path: String
+)
+
+private fun claimSortKey(key: String): ClaimSortKey {
+    val normalized = normalizeClaimKey(key)
+    val ownerMatch = Regex("""^beneficialOwners\[(\d+)]\.(.+)$""").find(key)
+    if (ownerMatch != null || normalized.startsWith("beneficialOwners[].")) {
+        val ownerIndex = ownerMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+        val field = ownerMatch?.groupValues?.getOrNull(2)
+            ?: normalized.removePrefix("beneficialOwners[].")
+        return ClaimSortKey(
+            sectionOrder = claimOrder("beneficialOwners[].name"),
+            ownerIndex = ownerIndex,
+            fieldOrder = BENEFICIAL_OWNER_FIELD_ORDER.indexOf(field).takeIf { it >= 0 } ?: Int.MAX_VALUE,
+            path = key
+        )
+    }
+    return ClaimSortKey(
+        sectionOrder = claimOrder(key),
+        ownerIndex = -1,
+        fieldOrder = 0,
+        path = key
+    )
+}
+
+private val BENEFICIAL_OWNER_FIELD_ORDER = listOf(
+    "name",
+    "birthDate",
+    "nationality",
+    "englishName",
+    "ownershipPercentage"
+)
+
 private val COMMON_META_CLAIM_LABELS = setOf(
     "iss",
     "sub",
@@ -2094,6 +2220,24 @@ private val CLAIM_METADATA_KEYS = setOf(
     "requiredDisclosures",
     "paths",
     "selectiveDisclosure"
+)
+
+private val HIDDEN_CREDENTIAL_DETAIL_CLAIMS = setOf(
+    "jti",
+    "vct",
+    "credentialType",
+    "credentialStatus.type",
+    "credentialStatus.statusId",
+    "credentialStatus.credentialType",
+    "cnf.kid",
+    "kyc.assuranceLevel",
+    "kyc.verifiedAt",
+    "legalEntity.nonProfit",
+    "legalEntity.purposeCheckRequired",
+    "establishmentPurpose.checked",
+    "extra.aiAssessmentRef.assessmentId",
+    "extra.aiAssessmentRef.applicationId",
+    "extra.aiAssessmentRef.status"
 )
 
 private val CLAIM_ORDER = listOf(
@@ -2295,7 +2439,13 @@ private data class SubmitDisclosureItem(
 
 private data class StoredCredentialDisplayData(
     val claimRows: List<Triple<String, String, String>> = emptyList(),
+    val beneficialOwnerGroups: List<BeneficialOwnerUiGroup> = emptyList(),
     val documentEvidenceItems: List<DocumentEvidenceUiItem> = emptyList()
+)
+
+private data class BeneficialOwnerUiGroup(
+    val title: String,
+    val rows: List<Triple<String, String, String>>
 )
 
 private data class DocumentEvidenceUiItem(
@@ -2342,6 +2492,7 @@ private data class CredentialUiData(
     val submitDocuments: List<SubmitDocumentItem> = emptyList(),
     val submitDisclosures: List<SubmitDisclosureItem> = emptyList(),
     val storedClaimRows: List<Triple<String, String, String>> = emptyList(),
+    val beneficialOwnerGroups: List<BeneficialOwnerUiGroup> = emptyList(),
     val documentEvidenceItems: List<DocumentEvidenceUiItem> = emptyList()
 ) {
     companion object {
@@ -2364,10 +2515,39 @@ private data class CredentialUiData(
                 val candidatePaths = buildList {
                     add(path)
                     add("data.$path")
+                    add("data.claims.$path")
+                    add("data.credentialSubject.$path")
+                    add("data.metadata.$path")
+                    add("data.credentialPayload.$path")
+                    add("data.credentialPayload.claims.$path")
+                    add("data.credentialPayload.credentialSubject.$path")
+                    add("data.credentialPayload.metadata.$path")
+                    add("data.credentialPayload.metadata.claims.$path")
+                    add("data.credentialPayload.metadata.credentialSubject.$path")
+                    add("data.credentialPayload.credential.$path")
+                    add("data.credentialPayload.credential.claims.$path")
+                    add("data.credentialPayload.credential.credentialSubject.$path")
+                    add("data.credential.$path")
+                    add("data.credential.claims.$path")
+                    add("data.credential.credentialSubject.$path")
                     add("offer.$path")
+                    add("offer.claims.$path")
+                    add("offer.credentialSubject.$path")
+                    add("offer.credentialPayload.$path")
+                    add("offer.credentialPayload.metadata.$path")
+                    add("offer.credentialPayload.metadata.claims.$path")
                     add("credentialOffer.$path")
+                    add("credentialOffer.claims.$path")
+                    add("credentialOffer.credentialSubject.$path")
+                    add("credentialOffer.credentialPayload.$path")
+                    add("credentialOffer.credentialPayload.metadata.$path")
+                    add("credentialOffer.credentialPayload.metadata.claims.$path")
                     add("credentialPayload.$path")
+                    add("credentialPayload.claims.$path")
+                    add("credentialPayload.credentialSubject.$path")
                     add("credentialPayload.metadata.$path")
+                    add("credentialPayload.metadata.claims.$path")
+                    add("credentialPayload.metadata.credentialSubject.$path")
                     add("credentialPayload.credential.$path")
                     add("credentialPayload.credential.claims.$path")
                     add("credentialPayload.credential.credentialSubject.$path")
@@ -2392,10 +2572,39 @@ private data class CredentialUiData(
                 val candidatePaths = buildList {
                     add(path)
                     add("data.$path")
+                    add("data.claims.$path")
+                    add("data.credentialSubject.$path")
+                    add("data.metadata.$path")
+                    add("data.credentialPayload.$path")
+                    add("data.credentialPayload.claims.$path")
+                    add("data.credentialPayload.credentialSubject.$path")
+                    add("data.credentialPayload.metadata.$path")
+                    add("data.credentialPayload.metadata.claims.$path")
+                    add("data.credentialPayload.metadata.credentialSubject.$path")
+                    add("data.credentialPayload.credential.$path")
+                    add("data.credentialPayload.credential.claims.$path")
+                    add("data.credentialPayload.credential.credentialSubject.$path")
+                    add("data.credential.$path")
+                    add("data.credential.claims.$path")
+                    add("data.credential.credentialSubject.$path")
                     add("offer.$path")
+                    add("offer.claims.$path")
+                    add("offer.credentialSubject.$path")
+                    add("offer.credentialPayload.$path")
+                    add("offer.credentialPayload.metadata.$path")
+                    add("offer.credentialPayload.metadata.claims.$path")
                     add("credentialOffer.$path")
+                    add("credentialOffer.claims.$path")
+                    add("credentialOffer.credentialSubject.$path")
+                    add("credentialOffer.credentialPayload.$path")
+                    add("credentialOffer.credentialPayload.metadata.$path")
+                    add("credentialOffer.credentialPayload.metadata.claims.$path")
                     add("credentialPayload.$path")
+                    add("credentialPayload.claims.$path")
+                    add("credentialPayload.credentialSubject.$path")
                     add("credentialPayload.metadata.$path")
+                    add("credentialPayload.metadata.claims.$path")
+                    add("credentialPayload.metadata.credentialSubject.$path")
                     add("credentialPayload.credential.$path")
                     add("credentialPayload.credential.claims.$path")
                     add("credentialPayload.credential.credentialSubject.$path")
@@ -2709,19 +2918,31 @@ private data class CredentialUiData(
                 "metadata.institutionName",
                 "credentialPayload.metadata.institutionName"
             )
+            val resolvedCurrentBalance = text("currentBalanceXrp", text("balanceXrp", "0 XRP"))
+            val resolvedNetworkFee = firstText(
+                "0.000012 XRP",
+                "networkFeeXrp",
+                "feeXrp",
+                "didRegistrationFeeXrp",
+                "didSetFeeXrp",
+                "networkFeeDrops",
+                "feeDrops",
+                "didRegistrationFeeDrops",
+                "didSetFeeDrops"
+            )
             return CredentialUiData(
                 issuerName = resolvedIssuerName,
                 credentialId = firstText("", "credentialId", "id", "jti", "credentialPayload.metadata.credentialId", "metadata.credentialId"),
                 requesterName = text("requesterName", "-"),
                 credentialTitle = text("credentialTitle", "법인 kyc 증명서"),
                 submitCredentialTitle = text("submitCredentialTitle", "법인 KYC 증명서"),
-                holderName = firstText("-", "legalEntity.name", "holderName", "corporateName", "companyName", "businessName", "legalEntity.corporateName"),
-                registrationNumber = firstText("-", "legalEntity.registrationNumber", "legalEntity.businessRegistrationNumber", "registrationNumber", "businessNumber", "businessRegistrationNumber", "corporateRegistrationNumber"),
-                companyType = claimDisplayValue("legalEntity.type", firstText("-", "companyType", "corporateType", "legalEntityType", "legalEntity.type", "claims.legalEntity.type", "credentialSubject.legalEntity.type", "legalEntity.companyType", "legalEntity.corporateType")),
+                holderName = firstText("-", "legalEntity.name", "holderName", "corporateName", "companyName", "businessName", "corporate.name", "company.name", "business.name", "legalEntity.corporateName"),
+                registrationNumber = firstText("-", "legalEntity.registrationNumber", "legalEntity.businessRegistrationNumber", "registrationNumber", "businessNumber", "businessRegistrationNumber", "corporateRegistrationNumber", "corporate.registrationNumber", "company.registrationNumber", "business.registrationNumber"),
+                companyType = claimDisplayValue("legalEntity.type", firstText("-", "companyType", "corporateType", "corporationType", "corpType", "businessType", "corporateForm", "legalEntityType", "legalEntity.type", "claims.legalEntity.type", "credentialSubject.legalEntity.type", "legalEntity.companyType", "legalEntity.corporateType", "legalEntity.legalEntityType", "corporate.type", "company.type", "business.type", "corporateInfo.type")),
                 establishedAt = firstText("-", "establishedAt", "establishmentDate", "foundedAt", "legalEntity.establishedAt", "claims.legalEntity.establishedAt", "credentialSubject.legalEntity.establishedAt", "legalEntity.establishmentDate", "legalEntity.foundedAt"),
-                representativeName = firstText("-", "representativeName", "ceoName", "legalRepresentativeName", "representative.name", "claims.representative.name", "credentialSubject.representative.name", "representative.fullName", "legalRepresentative.name"),
-                beneficialOwnerName = firstText("-", "beneficialOwnerName", "beneficialOwner", "ownerName", "beneficialOwner.name", "beneficialOwner.fullName", "beneficialOwners[].name", "beneficialOwners[0].name", "claims.beneficialOwners[].name", "claims.beneficialOwners[0].name", "credentialSubject.beneficialOwners[].name", "credentialSubject.beneficialOwners[0].name", "beneficialOwners[].fullName", "beneficialOwners[0].fullName"),
-                agentName = firstText("-", "agentName", "delegateName", "representativeAgentName", "agent.name", "agent.fullName", "delegate.name", "claims.delegate.name", "credentialSubject.delegate.name", "delegate.fullName", "authorizedAgent.name", "authorizedAgent.fullName", "proxy.name", "proxy.fullName"),
+                representativeName = firstText("-", "representativeName", "ceoName", "legalRepresentativeName", "corporateRepresentativeName", "representative.name", "claims.representative.name", "credentialSubject.representative.name", "representative.fullName", "representative.koreanName", "representative.legalName", "legalRepresentative.name", "legalRepresentative.fullName", "legalRepresentative.koreanName", "corporateRepresentative.name", "corporateRepresentative.fullName", "ceo.name", "ceo.fullName", "ceo.koreanName"),
+                beneficialOwnerName = firstText("-", "beneficialOwnerName", "beneficialOwner", "ownerName", "beneficialOwner.name", "beneficialOwner.fullName", "beneficialOwner.koreanName", "beneficialOwner.englishName", "beneficialOwners[].name", "beneficialOwners[0].name", "claims.beneficialOwners[].name", "claims.beneficialOwners[0].name", "credentialSubject.beneficialOwners[].name", "credentialSubject.beneficialOwners[0].name", "beneficialOwners[].fullName", "beneficialOwners[0].fullName", "beneficialOwners[].koreanName", "beneficialOwners[0].koreanName", "beneficialOwnerList[].name", "beneficialOwnerList[0].name", "beneficialOwnerList[].fullName", "beneficialOwnerList[0].fullName", "owners[].name", "owners[0].name", "owners[].fullName", "owners[0].fullName"),
+                agentName = firstText("-", "agentName", "delegateName", "representativeAgentName", "applicantName", "agent.name", "agent.fullName", "agent.koreanName", "delegate.name", "claims.delegate.name", "credentialSubject.delegate.name", "delegate.fullName", "delegate.koreanName", "authorizedAgent.name", "authorizedAgent.fullName", "authorizedAgent.koreanName", "representativeAgent.name", "representativeAgent.fullName", "proxy.name", "proxy.fullName", "applicant.name", "applicant.fullName", "delegation.delegate.name"),
                 address = firstText("-", "address", "corporateAddress", "businessAddress", "legalEntity.address", "claims.legalEntity.address", "credentialSubject.legalEntity.address", "legalEntity.businessAddress", "legalEntity.headOfficeAddress"),
                 did = fallbackHolderDid,
                 issuerDid = firstText("did:xrpl:1:rpseLKeHEoLDWBnTJvRJgh1mSNz7vJVENc", "issuerDid", "issuer", "metadata.issuerDid", "credentialPayload.metadata.issuerDid"),
@@ -2730,9 +2951,9 @@ private data class CredentialUiData(
                 issuedAtFull = rawIssuedAtFull,
                 expiresAt = rawExpiresAt,
                 transactionHash = text("transactionHash", "0x7f3a92e1c4d28b1a..."),
-                currentBalanceXrp = text("currentBalanceXrp", text("balanceXrp", "0 XRP")),
-                networkFeeXrp = text("networkFeeXrp", text("feeXrp", "0.000012 XRP")),
-                usableBalanceXrp = text("usableBalanceXrp", text("availableBalanceXrp", "0 XRP")),
+                currentBalanceXrp = resolvedCurrentBalance,
+                networkFeeXrp = resolvedNetworkFee,
+                usableBalanceXrp = calculateUsableXrp(resolvedCurrentBalance, safeNetworkFeeAmount(resolvedNetworkFee)),
                 balanceWarning = text("balanceWarning", "* 잔액이 부족합니다"),
                 statusText = text("statusText", "정상 · 검증 가능"),
                 didRegistrationLabel = text("didRegistrationLabel", "did 등록하기"),
@@ -2959,12 +3180,8 @@ private fun IssueConfirmDetailCard(data: CredentialUiData) {
         verticalArrangement = Arrangement.spacedBy(13.dp)
     ) {
         IssueConfirmInfoRow("발급 기관", data.issuerName.ifBlank { "-" })
-        IssueConfirmInfoRow("법인유형", data.companyType)
         IssueConfirmInfoRow("법인명", data.holderName)
         IssueConfirmInfoRow("법인등록번호", data.registrationNumber)
-        IssueConfirmInfoRow("대표자", data.representativeName)
-        IssueConfirmInfoRow("실소유자", data.beneficialOwnerName)
-        IssueConfirmInfoRow("대리인", data.agentName)
     }
 }
 
@@ -3084,6 +3301,10 @@ private fun CredentialDetailScreen(
                 Spacer(modifier = Modifier.height(12.dp))
             }
         }
+        if (data.beneficialOwnerGroups.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            BeneficialOwnerSection(data.beneficialOwnerGroups)
+        }
         if (data.documentEvidenceItems.isNotEmpty()) {
             Spacer(modifier = Modifier.height(12.dp))
             DocumentEvidenceSection(data.documentEvidenceItems)
@@ -3119,6 +3340,80 @@ private fun credentialDetailClaimRows(data: CredentialUiData): List<Triple<Strin
         Triple("H", "Holder DID", data.holderDid),
         Triple("Tx", "트랜잭션", data.transactionHash)
     )
+}
+
+@Composable
+private fun BeneficialOwnerSection(groups: List<BeneficialOwnerUiGroup>) {
+    var expanded by rememberSaveable(groups.size) { mutableStateOf(false) }
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(16.dp))
+                .background(Color.White)
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            LetterIcon("실", small = true)
+            Spacer(modifier = Modifier.size(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    "실소유자 (${groups.size}명)",
+                    color = Color(0xFF0B1D40),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                Text(
+                    groups.joinToString(" · ") { it.title },
+                    color = Color(0xFF6B7280),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            DropdownChevron(
+                color = Color(0xFF8A93A3),
+                modifier = Modifier.rotate(if (expanded) 180f else 0f)
+            )
+        }
+        if (expanded) {
+            Spacer(modifier = Modifier.height(10.dp))
+            groups.forEachIndexed { groupIndex, group ->
+                BeneficialOwnerCard(group)
+                if (groupIndex != groups.lastIndex) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BeneficialOwnerCard(group: BeneficialOwnerUiGroup) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
+            .background(Color.White)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Text(
+            group.title,
+            color = Color(0xFF0B1D40),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.ExtraBold
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        group.rows.forEachIndexed { index, row ->
+            DocumentMetaLine(row.second, row.third)
+            if (index != group.rows.lastIndex) {
+                Spacer(modifier = Modifier.height(4.dp))
+            }
+        }
+    }
 }
 
 @Composable
@@ -3160,7 +3455,7 @@ private fun DocumentEvidenceSection(items: List<DocumentEvidenceUiItem>) {
         if (expanded) {
             Spacer(modifier = Modifier.height(10.dp))
             items.forEachIndexed { index, item ->
-                DocumentEvidenceCard(item)
+                DocumentEvidenceNameCard(item)
                 if (index != items.lastIndex) {
                     Spacer(modifier = Modifier.height(10.dp))
                 }
@@ -3170,70 +3465,34 @@ private fun DocumentEvidenceSection(items: List<DocumentEvidenceUiItem>) {
 }
 
 @Composable
-private fun DocumentEvidenceCard(item: DocumentEvidenceUiItem) {
-    Column(
+private fun DocumentEvidenceNameCard(item: DocumentEvidenceUiItem) {
+    Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
             .border(1.dp, Color(0xFFECECEA), RoundedCornerShape(18.dp))
             .background(Color.White)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFFA8B7FF)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("문", color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
-            }
-            Spacer(modifier = Modifier.size(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    item.title,
-                    color = Color(0xFF0B1D40),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.ExtraBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    item.documentTypeLabel,
-                    color = Color(0xFF5F6877),
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xFFA8B7FF)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("문", color = Color.White, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
         }
-        Spacer(modifier = Modifier.height(10.dp))
-        Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
-        Spacer(modifier = Modifier.height(10.dp))
-        DocumentMetaLine("문서 종류", item.documentTypeLabel)
-        DocumentMetaLine("실제 파일명", item.fileName)
-        if (item.documentId.isNotBlank()) {
-            DocumentMetaLine("문서 ID", item.documentId)
-        }
-        if (item.partName.isNotBlank()) {
-            DocumentMetaLine("파일 part name", item.partName)
-        }
-        if (item.mediaType.isNotBlank()) {
-            DocumentMetaLine("MIME 타입", item.mediaType)
-        }
-        item.byteSize?.let {
-            DocumentMetaLine("파일 크기", "$it bytes")
-        }
-        if (item.digest.isNotBlank()) {
-            DocumentMetaLine("문서 해시", item.digest)
-        }
-        if (item.documentClassLabel.isNotBlank()) {
-            DocumentMetaLine("원본 문서 분류", item.documentClassLabel)
-        }
-        if (item.requirementId.isNotBlank()) {
-            DocumentMetaLine("요구 문서 ID", item.requirementId)
-        }
+        Spacer(modifier = Modifier.size(12.dp))
+        Text(
+            item.title,
+            color = Color(0xFF0B1D40),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.ExtraBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -3350,16 +3609,20 @@ private fun CredentialSubmitScreen(
             }
         )
         Spacer(modifier = Modifier.height(22.dp))
-        Text("제출할 증명서 (${selectedCount}건)", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Text("제출할 서류 (${selectedCount}건)", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
         Spacer(modifier = Modifier.height(10.dp))
         submitDocuments.forEachIndexed { index, document ->
             SubmitDocumentRow(
                 document = document,
-                issuerName = selectedIssuer.issuerName,
                 selected = document.documentId in selectedDocumentIds,
-                expanded = expandedDocumentId == document.documentId,
                 onClick = {
-                    expandedDocumentId = if (expandedDocumentId == document.documentId) null else document.documentId
+                    if (!document.required) {
+                        if (document.documentId in selectedDocumentIds) {
+                            selectedDocumentIds.remove(document.documentId)
+                        } else {
+                            selectedDocumentIds.add(document.documentId)
+                        }
+                    }
                 },
                 onToggle = {
                     if (!document.required) {
@@ -3758,16 +4021,10 @@ private fun IssuerSelectRow(
 @Composable
 private fun SubmitDocumentRow(
     document: SubmitDocumentItem,
-    issuerName: String,
     selected: Boolean,
-    expanded: Boolean,
     onClick: () -> Unit,
     onToggle: () -> Unit
 ) {
-    val requiredLabel = if (document.required) "필수" else "선택"
-    val documentTypeLabel = displayDocumentType(document.documentType)
-    val fileName = displayFileNameFromCandidates(document.fileName)
-        ?: documentFileNameFallback(document.documentId, document.documentType, documentTypeLabel)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -3797,20 +4054,6 @@ private fun SubmitDocumentRow(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Text(
-                    "제출 파일: $fileName",
-                    color = Color(0xFF5F6877),
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    listOf(issuerName, requiredLabel).joinToString(" · "),
-                    color = Color(0xFF8A93A3),
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
             }
             Box(
                 modifier = Modifier
@@ -3822,25 +4065,6 @@ private fun SubmitDocumentRow(
             ) {
                 Text(if (selected) "✓" else "", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
             }
-        }
-        if (expanded) {
-            Spacer(modifier = Modifier.height(10.dp))
-            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFECECEA)))
-            Spacer(modifier = Modifier.height(10.dp))
-            DocumentMetaLine("제출 문서", document.title)
-            DocumentMetaLine("실제 파일명", fileName)
-            if (document.attachmentRef.isNotBlank()) {
-                DocumentMetaLine("파일 part name", document.attachmentRef)
-            }
-            DocumentMetaLine("문서 유형", documentTypeLabel)
-            DocumentMetaLine("문서 ID", document.documentId)
-            if (document.mediaType.isNotBlank()) {
-                DocumentMetaLine("MIME 타입", document.mediaType)
-            }
-            document.byteSize?.let {
-                DocumentMetaLine("파일 크기", "$it bytes")
-            }
-            DocumentMetaLine("문서 해시", document.digest)
         }
     }
 }

@@ -6,17 +6,20 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.kyvc_androidapp.data.local.dao.CredentialDao
 import com.example.kyvc_androidapp.data.local.dao.HolderDocumentDao
+import com.example.kyvc_androidapp.data.local.dao.WalletActivityDao
 import com.example.kyvc_androidapp.data.local.entity.CredentialEntity
 import com.example.kyvc_androidapp.data.local.entity.HolderDocumentEntity
+import com.example.kyvc_androidapp.data.local.entity.WalletActivityEntity
 
 @Database(
-    entities = [CredentialEntity::class, HolderDocumentEntity::class],
-    version = 3,
+    entities = [CredentialEntity::class, HolderDocumentEntity::class, WalletActivityEntity::class],
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun credentialDao(): CredentialDao
     abstract fun holderDocumentDao(): HolderDocumentDao
+    abstract fun walletActivityDao(): WalletActivityDao
 
     companion object {
         val MIGRATION_2_3 = object : Migration(2, 3) {
@@ -125,6 +128,31 @@ abstract class AppDatabase : RoomDatabase() {
                     "CREATE INDEX IF NOT EXISTS index_holder_documents_documentType_digestSRI " +
                         "ON holder_documents (documentType, digestSRI)"
                 )
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS wallet_activities (
+                        id TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        credentialId TEXT,
+                        credentialType TEXT,
+                        issuerDid TEXT,
+                        issuerName TEXT,
+                        verifierName TEXT,
+                        createdAtUtc TEXT NOT NULL,
+                        unread INTEGER NOT NULL,
+                        PRIMARY KEY(id)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wallet_activities_createdAtUtc ON wallet_activities (createdAtUtc)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_wallet_activities_type ON wallet_activities (type)")
             }
         }
     }

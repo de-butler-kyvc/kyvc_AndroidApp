@@ -135,6 +135,8 @@ KYvC Android App은 KYvC 모바일 사용자가 로컬 지갑을 생성하거나
 - 로그인/화면 라우팅/사용자 UI 처리
 - Android 브릿지 호출 및 콜백 처리
 - 지갑 owner mismatch, 이메일 인증 필요, 인증 실패 상태 UI 처리
+- 활동 탭에서 `getWalletTransactions`와 `getWalletActivityHistory` 결과를 통합 표시
+- 보안/경고성 활동은 필요 시 `recordWalletActivity` 브릿지로 Native 로컬 활동 이력에 적재
 
 ### frontend_admin 책임
 
@@ -150,6 +152,7 @@ KYvC Android App은 KYvC 모바일 사용자가 로컬 지갑을 생성하거나
 
 - 사용자 계정, 로그인, 일반 사용자 서비스 API 제공
 - Android 앱의 현재 로그인 사용자 식별값 제공
+- DID 발급기관명 조회 API와 credential offer/detail API 응답에 실제 화면 표시값 제공
 
 ### backend_admin 책임
 
@@ -194,6 +197,7 @@ KYvC Android App은 KYvC 모바일 사용자가 로컬 지갑을 생성하거나
 
 - 사용자 서비스가 VC 발급/검증/제출 등 Core 도메인 기능을 위임할 때 사용
 - Android 앱은 QR payload 또는 WebView 브릿지를 통해 해당 흐름에 참여
+- 증명서 발급/제출 성공 내역은 Android 로컬 DB `wallet_activities`에 저장되어 활동 탭 브릿지로 조회
 
 ### backend_admin → core 직접 호출 금지
 

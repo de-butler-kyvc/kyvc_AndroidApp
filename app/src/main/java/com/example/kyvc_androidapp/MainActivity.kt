@@ -369,7 +369,6 @@ class MainActivity : FragmentActivity() {
                         if (unlocked) {
                             WebViewScreen(
                                 url = PRIMARY_WEB_URL,
-                                fallbackUrl = LOCAL_TEST_WEB_URL,
                                 bridge = bridge,
                                 onWebViewCreated = { activeWebView = it },
                                 modifier = Modifier.padding(innerPadding)
@@ -1139,13 +1138,14 @@ class MainActivity : FragmentActivity() {
     companion object {
         private const val MIN_PATTERN_POINTS = 4
         private const val PRIMARY_WEB_URL = "https://dev-kyvc.khuoo.synology.me/m/"
-        private const val LOCAL_TEST_WEB_URL = "file:///android_asset/index.html"
     }
 }
 
 private const val SETUP_PIN_LENGTH = 4
 private const val WEB_HOST = "dev-kyvc.khuoo.synology.me"
 private const val WEBVIEW_TAG = "KYVC-WebView"
+private const val BLOCKED_TEMPORARY_PAGE_URL = "file:///android_asset/index.html"
+private const val INTERNET_REQUIRED_MESSAGE = "인터넷을 연결해주세요"
 private val WEBVIEW_DIAGNOSTICS_SCRIPT = """
 (function() {
   function summarize(selector) {
@@ -5159,7 +5159,6 @@ private fun PatternGrid(
 @Composable
 fun WebViewScreen(
     url: String,
-    fallbackUrl: String,
     bridge: WalletBridge,
     onWebViewCreated: (WebView) -> Unit = {},
     modifier: Modifier = Modifier
@@ -5170,11 +5169,13 @@ fun WebViewScreen(
         factory = { context ->
             WebView(context).apply {
                 configureWebViewCookiePolicy(this)
-                var fallbackLoaded = false
-                fun loadFallbackIfNeeded(view: WebView?) {
-                    if (!fallbackLoaded) {
-                        fallbackLoaded = true
-                        view?.loadUrl(fallbackUrl)
+                var internetMessageShown = false
+                fun showInternetRequired(view: WebView?) {
+                    view?.stopLoading()
+                    view?.loadUrl("about:blank")
+                    if (!internetMessageShown) {
+                        internetMessageShown = true
+                        Toast.makeText(context, INTERNET_REQUIRED_MESSAGE, Toast.LENGTH_LONG).show()
                     }
                 }
                 webViewClient = object : WebViewClient() {
@@ -5183,6 +5184,11 @@ fun WebViewScreen(
                         request: WebResourceRequest?
                     ): Boolean {
                         val requestedUrl = request?.url ?: return false
+                        if (isBlockedTemporaryPageUrl(requestedUrl.toString())) {
+                            Log.w(WEBVIEW_TAG, "blocked temporary page: $requestedUrl")
+                            showInternetRequired(view)
+                            return true
+                        }
                         if (requestedUrl.scheme == "http" && requestedUrl.host == WEB_HOST) {
                             view?.loadUrl(
                                 requestedUrl.buildUpon()
@@ -5198,6 +5204,10 @@ fun WebViewScreen(
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         Log.d(WEBVIEW_TAG, "page started: $url")
+                        if (isBlockedTemporaryPageUrl(url)) {
+                            Log.w(WEBVIEW_TAG, "blocked temporary page load: $url")
+                            showInternetRequired(view)
+                        }
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -5237,8 +5247,8 @@ fun WebViewScreen(
                                 "main frame error url=${request.url} code=${error?.errorCode} desc=${error?.description}"
                             )
                         }
-                        if (request?.isForMainFrame == true && !fallbackLoaded && shouldFallback(error)) {
-                            loadFallbackIfNeeded(view)
+                        if (request?.isForMainFrame == true && shouldShowInternetRequired(error)) {
+                            showInternetRequired(view)
                         }
                     }
 
@@ -5303,7 +5313,7 @@ private fun flushWebViewCookies() {
     }
 }
 
-private fun shouldFallback(error: WebResourceError?): Boolean {
+private fun shouldShowInternetRequired(error: WebResourceError?): Boolean {
     if (error == null) return false
     return when (error.errorCode) {
         WebViewClient.ERROR_HOST_LOOKUP,
@@ -5313,4 +5323,8 @@ private fun shouldFallback(error: WebResourceError?): Boolean {
         WebViewClient.ERROR_UNSUPPORTED_SCHEME -> true
         else -> false
     }
+}
+
+private fun isBlockedTemporaryPageUrl(url: String?): Boolean {
+    return url == BLOCKED_TEMPORARY_PAGE_URL
 }

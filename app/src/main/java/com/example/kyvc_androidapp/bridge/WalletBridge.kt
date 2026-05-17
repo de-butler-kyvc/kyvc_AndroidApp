@@ -334,7 +334,7 @@ class WalletBridge(
                     allowedActions = setOf("DELETE_LOCAL_WALLET_DATA"),
                     ttlSeconds = 60
                 )
-                require(appLockStore.isSessionUnlocked()) { "활성 인증 세션이 필요합니다." }
+                require(appLockStore.isSessionUnlocked()) { "설정에서 \"PIN설정\"을 완료해 주세요." }
                 val allowOwnerMismatch = request["allowOwnerMismatch"]?.jsonPrimitive?.booleanOrNull ?: false
                 if (!allowOwnerMismatch) {
                     requireWalletOwnerAccess()
@@ -376,7 +376,7 @@ class WalletBridge(
                     allowedActions = setOf("LOGOUT_AND_DELETE_LOCAL_WALLET_DATA"),
                     ttlSeconds = 60
                 )
-                require(appLockStore.isSessionUnlocked()) { "활성 인증 세션이 필요합니다." }
+                require(appLockStore.isSessionUnlocked()) { "설정에서 \"PIN설정\"을 완료해 주세요." }
                 walletStateStore.clearAllWalletsAndOwner()
                 appLockStore.clearSession()
                 clearCurrentWebUser()
@@ -856,7 +856,7 @@ class WalletBridge(
                     "이메일 인증이 필요한 상태에서는 비밀문구를 백업할 수 없습니다."
                 }
                 require(appLockStore.isSessionUnlocked()) {
-                    "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                    "설정에서 \"PIN설정\"을 완료해 주세요."
                 }
                 requireWalletOwnerAccess()
                 withContext(Dispatchers.IO) {
@@ -1051,7 +1051,7 @@ class WalletBridge(
                 requireTrustedBridgeOrigin("GET_WALLET_INFO")
 
                 withContext(Dispatchers.IO) {
-                    require(appLockStore.isSessionUnlocked()) { "활성 인증 세션이 필요합니다." }
+                    require(appLockStore.isSessionUnlocked()) { "설정에서 \"PIN설정\"을 완료해 주세요." }
                     requireWalletOwnerAccess()
                     val walletState = walletStateStore.requireWalletState()
                     currentSeed = walletStateStore.requireSeed()
@@ -1328,7 +1328,7 @@ class WalletBridge(
                         "이메일 인증이 필요한 상태에서는 송금을 진행할 수 없습니다."
                     }
                     require(appLockStore.isSessionUnlocked()) {
-                        "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                        "설정에서 \"PIN설정\"을 완료해 주세요."
                     }
                     require(appLockStore.consumeSensitiveActionAuthorization(SENSITIVE_REASON_XRP_PAYMENT)) {
                         "송금 전 재인증이 필요합니다."
@@ -1399,7 +1399,7 @@ class WalletBridge(
                         "이메일 인증이 필요한 상태에서는 seed를 내보낼 수 없습니다."
                     }
                     require(appLockStore.isSessionUnlocked()) {
-                        "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                        "설정에서 \"PIN설정\"을 완료해 주세요."
                     }
                     requireWalletOwnerAccess()
                     val walletState = walletStateStore.requireWalletState()
@@ -1591,7 +1591,7 @@ class WalletBridge(
                         "이메일 인증이 필요한 상태에서는 비밀문구를 내보낼 수 없습니다."
                     }
                     require(appLockStore.isSessionUnlocked()) {
-                        "활성 인증 세션이 필요합니다. 먼저 네이티브 인증을 완료하세요."
+                        "설정에서 \"PIN설정\"을 완료해 주세요."
                     }
                     requireWalletOwnerAccess()
                     val walletState = walletStateStore.requireWalletState()

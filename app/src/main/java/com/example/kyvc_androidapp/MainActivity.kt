@@ -6,6 +6,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
 import android.util.Base64
@@ -1137,12 +1138,12 @@ class MainActivity : FragmentActivity() {
 
     companion object {
         private const val MIN_PATTERN_POINTS = 4
-        private const val PRIMARY_WEB_URL = "https://dev-kyvc.khuoo.synology.me/m/"
+        private val PRIMARY_WEB_URL = BuildConfig.KYVC_WEB_URL
     }
 }
 
 private const val SETUP_PIN_LENGTH = 4
-private const val WEB_HOST = "dev-kyvc.khuoo.synology.me"
+private val WEB_HOST = BuildConfig.KYVC_WEB_HOST
 private const val WEBVIEW_TAG = "KYVC-WebView"
 private const val BLOCKED_TEMPORARY_PAGE_URL = "file:///android_asset/index.html"
 private const val INTERNET_REQUIRED_MESSAGE = "인터넷을 연결해주세요"
@@ -5185,11 +5186,17 @@ fun WebViewScreen(
                     ): Boolean {
                         val requestedUrl = request?.url ?: return false
                         if (isBlockedTemporaryPageUrl(requestedUrl.toString())) {
-                            Log.w(WEBVIEW_TAG, "blocked temporary page: $requestedUrl")
+                            Log.w(WEBVIEW_TAG, "blocked temporary page: ${safeWebViewUrlForLog(requestedUrl)}")
                             showInternetRequired(view)
                             return true
                         }
-                        if (requestedUrl.scheme == "http" && requestedUrl.host == WEB_HOST) {
+                        val scheme = requestedUrl.scheme?.lowercase()
+                        val isConfiguredHost = isConfiguredWebHost(requestedUrl.host)
+                        if ((scheme == "http" || scheme == "https") && !isConfiguredHost) {
+                            Log.w(WEBVIEW_TAG, "blocked external page host=${requestedUrl.host.orEmpty()}")
+                            return true
+                        }
+                        if (scheme == "http" && isConfiguredHost) {
                             view?.loadUrl(
                                 requestedUrl.buildUpon()
                                     .scheme("https")
@@ -5203,9 +5210,9 @@ fun WebViewScreen(
 
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         super.onPageStarted(view, url, favicon)
-                        Log.d(WEBVIEW_TAG, "page started: $url")
+                        Log.d(WEBVIEW_TAG, "page started: ${safeWebViewUrlForLog(url)}")
                         if (isBlockedTemporaryPageUrl(url)) {
-                            Log.w(WEBVIEW_TAG, "blocked temporary page load: $url")
+                            Log.w(WEBVIEW_TAG, "blocked temporary page load: ${safeWebViewUrlForLog(url)}")
                             showInternetRequired(view)
                         }
                     }
@@ -5213,7 +5220,7 @@ fun WebViewScreen(
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         flushWebViewCookies()
-                        Log.d(WEBVIEW_TAG, "page finished: $url")
+                        Log.d(WEBVIEW_TAG, "page finished: ${safeWebViewUrlForLog(url)}")
                         view?.evaluateJavascript(
                             """
                             (function() {
@@ -5244,7 +5251,7 @@ fun WebViewScreen(
                         if (request?.isForMainFrame == true) {
                             Log.w(
                                 WEBVIEW_TAG,
-                                "main frame error url=${request.url} code=${error?.errorCode} desc=${error?.description}"
+                                "main frame error url=${safeWebViewUrlForLog(request.url)} code=${error?.errorCode} desc=${error?.description}"
                             )
                         }
                         if (request?.isForMainFrame == true && shouldShowInternetRequired(error)) {
@@ -5259,11 +5266,11 @@ fun WebViewScreen(
                     ) {
                         super.onReceivedHttpError(view, request, errorResponse)
                         if (request?.isForMainFrame == true) {
-                            val message = "WebView HTTP ${errorResponse?.statusCode}: ${request.url}"
+                            val message = "WebView HTTP ${errorResponse?.statusCode}: ${safeWebViewUrlForLog(request.url)}"
                             Log.w(WEBVIEW_TAG, message)
                             Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                         } else if (errorResponse?.statusCode == 404) {
-                            Log.w(WEBVIEW_TAG, "resource 404: ${request?.url}")
+                            Log.w(WEBVIEW_TAG, "resource 404: ${safeWebViewUrlForLog(request?.url)}")
                         }
                         // 404/4xx/5xx는 서버 연결 자체는 성공이므로 fallback으로 넘기지 않는다.
                     }
@@ -5296,6 +5303,27 @@ fun WebViewScreen(
         },
         update = {}
     )
+}
+
+private fun isConfiguredWebHost(host: String?): Boolean {
+    return host?.equals(WEB_HOST, ignoreCase = true) == true
+}
+
+private fun safeWebViewUrlForLog(uri: Uri?): String {
+    return safeWebViewUrlForLog(uri?.toString())
+}
+
+private fun safeWebViewUrlForLog(url: String?): String {
+    if (url.isNullOrBlank()) return ""
+    val parsed = runCatching { Uri.parse(url) }.getOrNull() ?: return ""
+    val scheme = parsed.scheme.orEmpty()
+    val host = parsed.host
+    val path = parsed.encodedPath.orEmpty()
+    return if (host.isNullOrBlank()) {
+        listOf(scheme, path).filter { it.isNotBlank() }.joinToString(":")
+    } else {
+        "$scheme://$host$path"
+    }
 }
 
 private fun configureWebViewCookiePolicy(webView: WebView? = null) {

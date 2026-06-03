@@ -450,7 +450,7 @@
       </div>
       <p class="desc">신규 기본 흐름은 dc+sd-jwt credential과 SD-JWT+KB presentation입니다. Android holder 앱은 issuer secret/PEM을 다루지 않습니다.</p>
       <label>Core Base URL</label>
-      <input id="coreBaseUrl" value="https://dev-core-kyvc.khuoo.synology.me" />
+      <input id="coreBaseUrl" value="" />
       <div class="grid">
         <div>
           <label>Assurance Level</label>
@@ -539,7 +539,7 @@
       <label>Nonce</label>
       <input id="signMessage" />
       <label>Audience</label>
-      <input id="signDomain" value="https://dev-core-kyvc.khuoo.synology.me" />
+      <input id="signDomain" value="" />
       <div class="result-panel show" id="disclosureSelectionPanel" style="margin-top:10px;">
         <b>Selective Disclosure 선택</b><br/>
         <span id="disclosureCountText">선택 0 / 전체 0</span>
@@ -553,7 +553,7 @@
         <button class="warn" onclick="signMessage()">KB-JWT 생성 호출</button>
       </div>
       <label>Verifier Endpoint</label>
-      <input id="verifierEndpoint" value="https://dev-core-kyvc.khuoo.synology.me/verifier/presentations/verify" />
+      <input id="verifierEndpoint" value="" />
       <div class="mt8">
         <button class="ok" id="submitVerifierBtn" onclick="submitPresentationToVerifier()">Verifier 제출 호출</button>
       </div>

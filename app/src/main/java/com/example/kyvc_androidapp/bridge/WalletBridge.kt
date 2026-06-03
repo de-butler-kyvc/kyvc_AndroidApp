@@ -10,6 +10,7 @@ import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.widget.Toast
+import com.example.kyvc_androidapp.BuildConfig
 import com.example.kyvc_androidapp.data.local.entity.CredentialEntity
 import com.example.kyvc_androidapp.data.local.entity.HolderDocumentEntity
 import com.example.kyvc_androidapp.data.local.entity.WalletActivityEntity
@@ -4450,9 +4451,9 @@ class WalletBridge(
     private fun requireTrustedBridgeOrigin(action: String) {
         val currentUrl = webViewRef?.get()?.url ?: throw IllegalStateException("WebView is not attached")
         val trusted = currentUrl.startsWith("file:///android_asset/") ||
-            TRUSTED_BRIDGE_HOSTS.any { host ->
-                currentUrl.startsWith("https://$host") || currentUrl.startsWith("http://$host")
-            }
+            currentUrl.toHttpUrlOrNull()?.let { url ->
+                url.scheme == "https" && url.host in TRUSTED_BRIDGE_HOSTS
+            } == true
         require(trusted) { "Bridge origin is not allowed for $action: $currentUrl" }
     }
 
@@ -7003,8 +7004,8 @@ class WalletBridge(
         return listOf(
             endpoint,
             VP_LOGIN_BACKEND_BASE_URL,
-            "https://dev-kyvc.khuoo.synology.me",
-            "https://kyvc.khuoo.synology.me"
+            BuildConfig.KYVC_WEB_ORIGIN,
+            BuildConfig.KYVC_WEB_URL
         ).firstNotNullOfOrNull { url ->
             runCatching { cookieManager.getCookie(url) }
                 .getOrNull()
@@ -7047,21 +7048,30 @@ class WalletBridge(
     private fun resolveBackendEndpoint(baseUrl: String, endpoint: String?, defaultPath: String): String {
         val trimmedEndpoint = endpoint?.trim().orEmpty()
         if (trimmedEndpoint.isNotBlank()) {
-            return if (
+            val resolvedEndpoint = if (
                 trimmedEndpoint.startsWith("http://", ignoreCase = true) ||
                 trimmedEndpoint.startsWith("https://", ignoreCase = true)
             ) trimmedEndpoint else "https://$trimmedEndpoint"
+            return requireHttpsEndpointInRelease(resolvedEndpoint)
         }
         val normalizedBase = if (
             baseUrl.startsWith("http://", ignoreCase = true) ||
             baseUrl.startsWith("https://", ignoreCase = true)
         ) baseUrl.trim() else "https://${baseUrl.trim()}"
-        val baseHttpUrl = normalizedBase.toHttpUrlOrNull()
+        val baseHttpUrl = requireHttpsEndpointInRelease(normalizedBase).toHttpUrlOrNull()
             ?: throw IllegalArgumentException("Invalid backend base URL: $baseUrl")
         return baseHttpUrl.newBuilder()
             .addPathSegments(defaultPath.trim('/'))
             .build()
             .toString()
+    }
+
+    private fun requireHttpsEndpointInRelease(endpoint: String): String {
+        val url = endpoint.toHttpUrlOrNull() ?: return endpoint
+        if (url.scheme == "http" && !BuildConfig.DEBUG) {
+            throw IllegalArgumentException("HTTP endpoint is not allowed in release builds")
+        }
+        return endpoint
     }
 
     private fun String.safeEndpointPath(): String {
@@ -8112,7 +8122,7 @@ class WalletBridge(
         private const val FORMAT_DC_SD_JWT = "dc+sd-jwt"
         private const val FORMAT_VC_JWT = "vc+jwt"
         private const val FORMAT_JSON = "json"
-        private const val VP_LOGIN_BACKEND_BASE_URL = "https://dev-api-kyvc.khuoo.synology.me"
+        private val VP_LOGIN_BACKEND_BASE_URL = BuildConfig.KYVC_API_BASE_URL
         private const val GENERAL_VP_FALLBACK_AUD = "kyvc-finance-vp"
         private const val VP_LOGIN_LOCAL_CHALLENGE_TTL_SECONDS = 24L * 60L * 60L
         private val GENERAL_VP_TERMINAL_STATUSES = setOf(
@@ -8125,10 +8135,7 @@ class WalletBridge(
         )
         private val SENSITIVE_AUTH_REASONS = setOf(SENSITIVE_REASON_XRP_PAYMENT)
         private val TRUSTED_BRIDGE_HOSTS = setOf(
-            "dev-kyvc.khuoo.synology.me",
-            "dev-core-kyvc.khuoo.synology.me",
-            "demo.kyvc.local",
-            "dev-api-kyvc.khuoo.synology.me"
+            BuildConfig.KYVC_WEB_HOST
         )
     }
 }

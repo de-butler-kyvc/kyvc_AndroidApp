@@ -21,7 +21,17 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField("String", "KYVC_WEB_URL", "\"https://dev.kyvc.kr/m/\"")
+            buildConfigField("String", "KYVC_WEB_HOST", "\"dev.kyvc.kr\"")
+            buildConfigField("String", "KYVC_WEB_ORIGIN", "\"https://dev.kyvc.kr\"")
+            buildConfigField("String", "KYVC_API_BASE_URL", "\"https://dev-api.kyvc.kr\"")
+        }
         release {
+            buildConfigField("String", "KYVC_WEB_URL", "\"https://kyvc.kr/m/\"")
+            buildConfigField("String", "KYVC_WEB_HOST", "\"kyvc.kr\"")
+            buildConfigField("String", "KYVC_WEB_ORIGIN", "\"https://kyvc.kr\"")
+            buildConfigField("String", "KYVC_API_BASE_URL", "\"https://api.kyvc.kr\"")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -45,6 +55,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {

@@ -1803,11 +1803,11 @@ class WalletBridge(
                         ?: normalizedCredential.text("vcCoreHash")
                         ?: status?.text("vcCoreHash")
                         ?: computeVcCoreHash(normalizedCredential),
-                    validFrom = firstText(metadata, "issuedAt", "validFrom")
-                        ?: firstText(normalizedCredential, "validFrom", "issuanceDate", "issuedAt")
+                    validFrom = firstText(normalizedCredential, "validFrom", "issuanceDate", "issuedAt")
+                        ?: firstText(metadata, "issuedAt", "validFrom")
                         ?: nowUtcIso(),
-                    validUntil = firstText(metadata, "expiresAt", "validUntil", "expirationDate")
-                        ?: firstText(normalizedCredential, "validUntil", "expirationDate", "expiresAt")
+                    validUntil = firstText(normalizedCredential, "validUntil", "expirationDate", "expiresAt")
+                        ?: firstText(metadata, "expiresAt", "validUntil", "expirationDate")
                         ?: ""
                 )
                 require(entity.credentialId.isNotBlank()) { "credentialId or id is required" }
@@ -4200,10 +4200,10 @@ class WalletBridge(
             ?: firstText(metadata, "credentialId")
             ?: firstText(payload, "credentialId", "id", "jti")
             ?: firstText(request, "id")
-        val validFrom = firstText(metadata, "issuedAt", "validFrom")
-            ?: firstText(payload, "validFrom", "issuanceDate", "issuedAt")
-        val validUntil = firstText(metadata, "expiresAt", "validUntil", "expirationDate")
-            ?: firstText(payload, "validUntil", "expirationDate", "expiresAt")
+        val validFrom = firstText(payload, "validFrom", "issuanceDate", "issuedAt")
+            ?: firstText(metadata, "issuedAt", "validFrom")
+        val validUntil = firstText(payload, "validUntil", "expirationDate", "expiresAt")
+            ?: firstText(metadata, "expiresAt", "validUntil", "expirationDate")
 
         return buildJsonObject {
             payload.forEach { (key, value) -> put(key, value) }
@@ -4245,14 +4245,16 @@ class WalletBridge(
         val payload = envelope?.payload ?: buildJsonObject { }
         val status = credentialLocalStatus(credential)
         val credentialKind = credentialKindLabel(payload, credential.credentialType)
+        val issuedAt = firstText(payload, "validFrom", "issuanceDate", "issuedAt") ?: credential.validFrom
+        val expiresAt = firstText(payload, "validUntil", "expirationDate", "expiresAt") ?: credential.validUntil
         return buildJsonObject {
             put("credentialId", credential.credentialId)
             put("status", status.code)
             put("statusLabel", status.label)
-            put("issuedAt", credential.validFrom)
-            put("validFrom", credential.validFrom)
-            put("expiresAt", credential.validUntil)
-            put("validUntil", credential.validUntil)
+            put("issuedAt", issuedAt)
+            put("validFrom", issuedAt)
+            put("expiresAt", expiresAt)
+            put("validUntil", expiresAt)
             put("issuerDid", credential.issuerDid)
             put("issuerAccount", credential.issuerAccount)
             put("holderDid", credential.holderDid)

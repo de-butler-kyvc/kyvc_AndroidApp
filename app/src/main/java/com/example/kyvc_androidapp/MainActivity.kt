@@ -535,14 +535,19 @@ class MainActivity : FragmentActivity() {
                                 var storedCredentialDisplayData by remember(nativeCredentialRequest.requestJson) {
                                     mutableStateOf(StoredCredentialDisplayData())
                                 }
+                                var storedCredentialDisplayLoaded by remember(nativeCredentialRequest.requestJson) {
+                                    mutableStateOf(false)
+                                }
                                 LaunchedEffect(nativeCredentialRequest.screen, nativeCredentialRequest.requestJson) {
                                     issueConfirmBalance = null
                                     storedCredentialDisplayData = StoredCredentialDisplayData()
+                                    storedCredentialDisplayLoaded = false
                                     if (nativeCredentialRequest.screen == CredentialNativeScreen.IssueConfirm) {
                                         issueConfirmBalance = loadIssueConfirmBalance(baseUiData)
                                     }
                                     if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail) {
                                         storedCredentialDisplayData = loadStoredCredentialDisplayData(baseUiData)
+                                        storedCredentialDisplayLoaded = true
                                     }
                                 }
                                 var uiData = baseUiData
@@ -559,12 +564,36 @@ class MainActivity : FragmentActivity() {
                                 if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail &&
                                     (storedCredentialDisplayData.claimRows.isNotEmpty() ||
                                         storedCredentialDisplayData.beneficialOwnerGroups.isNotEmpty() ||
-                                        storedCredentialDisplayData.documentEvidenceItems.isNotEmpty())
+                                        storedCredentialDisplayData.documentEvidenceItems.isNotEmpty() ||
+                                        !storedCredentialDisplayData.issuedAt.isNullOrBlank() ||
+                                        !storedCredentialDisplayData.expiresAt.isNullOrBlank())
                                 ) {
                                     uiData = uiData.copy(
+                                        issuedAt = storedCredentialDisplayData.issuedAt ?: uiData.issuedAt,
+                                        issuedAtFull = storedCredentialDisplayData.issuedAtFull ?: uiData.issuedAtFull,
+                                        expiresAt = storedCredentialDisplayData.expiresAt ?: uiData.expiresAt,
                                         storedClaimRows = storedCredentialDisplayData.claimRows,
                                         beneficialOwnerGroups = storedCredentialDisplayData.beneficialOwnerGroups,
                                         documentEvidenceItems = storedCredentialDisplayData.documentEvidenceItems
+                                    )
+                                }
+                                if (nativeCredentialRequest.screen == CredentialNativeScreen.CredentialDetail) {
+                                    uiData = uiData.copy(
+                                        issuedAt = if (storedCredentialDisplayLoaded) {
+                                            storedCredentialDisplayData.issuedAt ?: "-"
+                                        } else {
+                                            "-"
+                                        },
+                                        issuedAtFull = if (storedCredentialDisplayLoaded) {
+                                            storedCredentialDisplayData.issuedAtFull ?: "-"
+                                        } else {
+                                            "-"
+                                        },
+                                        expiresAt = if (storedCredentialDisplayLoaded) {
+                                            storedCredentialDisplayData.expiresAt ?: "-"
+                                        } else {
+                                            "-"
+                                        }
                                     )
                                 }
                                 NativeCredentialFlowScreen(
@@ -698,7 +727,9 @@ class MainActivity : FragmentActivity() {
                     vcJwt = credential.vcJwt,
                     vcJson = credential.vcJson,
                     selectiveDisclosureJson = credential.selectiveDisclosureJson,
-                    holderDocuments = holderDocuments
+                    holderDocuments = holderDocuments,
+                    storedIssuedAt = credential.validFrom,
+                    storedExpiresAt = credential.validUntil
                 )
             }.getOrDefault(StoredCredentialDisplayData())
         }
@@ -1550,7 +1581,9 @@ private fun storedCredentialDisplayData(
     vcJwt: String?,
     vcJson: String?,
     selectiveDisclosureJson: String?,
-    holderDocuments: List<HolderDocumentEntity>
+    holderDocuments: List<HolderDocumentEntity>,
+    storedIssuedAt: String? = null,
+    storedExpiresAt: String? = null
 ): StoredCredentialDisplayData {
     val claims = linkedMapOf<String, String>()
     val disclosurePaths = selectiveDisclosureJson?.let(::extractDisclosablePaths).orEmpty()
@@ -1558,6 +1591,10 @@ private fun storedCredentialDisplayData(
     vcJwt?.let { addJwtCredentialClaims(claims, it) }
     sdJwt?.let { addSdJwtCredentialClaims(claims, it, disclosurePaths) }
     selectiveDisclosureJson?.let { addSelectiveDisclosureClaims(claims, it) }
+    val issuedAt = firstCredentialDateClaim(claims, "validFrom", "issuanceDate", "issuedAt", "iat")
+        ?: storedIssuedAt?.takeIf { it.isNotBlank() }
+    val expiresAt = firstCredentialDateClaim(claims, "validUntil", "expirationDate", "expiresAt", "exp")
+        ?: storedExpiresAt?.takeIf { it.isNotBlank() }
     val visibleClaims = claims.entries
         .filter { (_, value) -> value.isNotBlank() }
         .filterNot { (key, _) -> isDocumentEvidenceClaim(key) }
@@ -1580,10 +1617,21 @@ private fun storedCredentialDisplayData(
             )
     }
     return StoredCredentialDisplayData(
+        issuedAt = issuedAt?.let(::credentialDateOnly),
+        issuedAtFull = issuedAt?.let(::credentialDateTime),
+        expiresAt = expiresAt?.let(::credentialDateOnly),
         claimRows = claimRows,
         beneficialOwnerGroups = beneficialOwnerGroups,
         documentEvidenceItems = documentEvidenceItemsFromClaims(claims, holderDocuments)
     )
+}
+
+private fun firstCredentialDateClaim(claims: Map<String, String>, vararg keys: String): String? {
+    return keys.firstNotNullOfOrNull { key ->
+        claims[key]
+            ?: claims["claims.$key"]
+            ?: claims["credentialSubject.$key"]
+    }?.takeIf { it.isNotBlank() && it != "-" }
 }
 
 private fun isDocumentEvidenceClaim(key: String): Boolean {
@@ -2439,6 +2487,9 @@ private data class SubmitDisclosureItem(
 )
 
 private data class StoredCredentialDisplayData(
+    val issuedAt: String? = null,
+    val issuedAtFull: String? = null,
+    val expiresAt: String? = null,
     val claimRows: List<Triple<String, String, String>> = emptyList(),
     val beneficialOwnerGroups: List<BeneficialOwnerUiGroup> = emptyList(),
     val documentEvidenceItems: List<DocumentEvidenceUiItem> = emptyList()
@@ -2881,30 +2932,33 @@ private data class CredentialUiData(
             val fallbackHolderDid = text("holderDid", text("did", "did:xrpl:1:rHolder..."))
             val rawIssuedAt = firstText(
                 "-",
-                "displayIssuedAt",
-                "issuedDate",
-                "credentialIssuedAt",
                 "validFrom",
                 "issuanceDate",
+                "iat",
+                "credentialIssuedAt",
                 "issuedAtFull",
-                "issuedAt"
+                "issuedAt",
+                "displayIssuedAt",
+                "issuedDate"
             )
             val rawIssuedAtFull = firstText(
                 rawIssuedAt,
+                "validFrom",
+                "issuanceDate",
+                "iat",
                 "issuedAtFull",
                 "credentialIssuedAtFull",
                 "credentialIssuedAt",
-                "validFrom",
-                "issuanceDate",
                 "issuedAt"
             )
             val rawExpiresAt = firstText(
                 "-",
-                "displayExpiresAt",
-                "expiresDate",
-                "expirationDate",
                 "validUntil",
-                "expiresAt"
+                "expirationDate",
+                "exp",
+                "expiresAt",
+                "displayExpiresAt",
+                "expiresDate"
             )
             val resolvedIssuerName = firstText(
                 "-",

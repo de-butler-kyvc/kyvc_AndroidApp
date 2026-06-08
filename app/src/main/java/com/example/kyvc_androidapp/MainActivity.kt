@@ -39,6 +39,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -89,6 +90,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -1341,12 +1346,7 @@ private fun QrScannerOverlay(
                 .clickable { onClose() },
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = "<",
-                color = Color.White,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
+            WebBackIcon(color = Color.White)
         }
 
         Column(
@@ -3058,7 +3058,8 @@ private fun CredentialNativeScaffold(
                 .fillMaxSize()
                 .padding(bottom = if (bottomBar == null) 0.dp else 118.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 12.dp)
+                .padding(horizontal = 20.dp)
+                .padding(top = 8.dp, bottom = 12.dp)
         ) {
             CredentialTopBar(title = title, onBack = onBack)
             Spacer(modifier = Modifier.height(26.dp))
@@ -3101,7 +3102,7 @@ private fun CredentialTopBar(
                     .clickable { onBack() },
                 contentAlignment = Alignment.Center
             ) {
-                Text("<", color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                WebBackIcon(color = Color(0xFF0B1D40))
             }
         } else {
             Spacer(modifier = Modifier.size(34.dp))
@@ -3110,6 +3111,29 @@ private fun CredentialTopBar(
             Text(title, color = Color(0xFF0B1D40), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
         }
         Spacer(modifier = Modifier.size(34.dp))
+    }
+}
+
+@Composable
+private fun WebBackIcon(
+    color: Color,
+    modifier: Modifier = Modifier.size(20.dp)
+) {
+    Canvas(modifier = modifier) {
+        val path = Path().apply {
+            moveTo(size.width * 15f / 24f, size.height * 18f / 24f)
+            lineTo(size.width * 9f / 24f, size.height * 12f / 24f)
+            lineTo(size.width * 15f / 24f, size.height * 6f / 24f)
+        }
+        drawPath(
+            path = path,
+            color = color,
+            style = Stroke(
+                width = 1.6.dp.toPx(),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+        )
     }
 }
 
@@ -4596,22 +4620,22 @@ private fun MnemonicBackupScreen(
         Text(
             text = "12개의 복구 문구를 안전하게 기록하세요",
             color = Color(0xFF0B2A55),
-            style = MaterialTheme.typography.headlineLarge,
+            style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.ExtraBold,
-            lineHeight = MaterialTheme.typography.headlineLarge.lineHeight,
+            lineHeight = MaterialTheme.typography.titleLarge.lineHeight,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(12.dp))
         Text(
             text = "이 문구는 지갑을 복구할 수 있는 유일한 수단입니다. 온라인이나 클라우드에 저장하지 마세요.",
             color = Color(0xFF7B8493),
-            style = MaterialTheme.typography.titleMedium,
-            lineHeight = MaterialTheme.typography.titleMedium.lineHeight,
+            style = MaterialTheme.typography.bodyMedium,
+            lineHeight = MaterialTheme.typography.bodyMedium.lineHeight,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(modifier = Modifier.height(34.dp))
+        Spacer(modifier = Modifier.height(22.dp))
         MnemonicWordGrid(words = words)
-        Spacer(modifier = Modifier.height(36.dp))
+        Spacer(modifier = Modifier.height(22.dp))
         WarningCard(
             title = "절대 공유 금지",
             body = "복구 문구를 묻는 사람은 100% 사기꾼입니다."
@@ -4635,32 +4659,32 @@ private fun WalletRestoreScreen(
         Text(
             text = "지갑 복구",
             color = Color(0xFF0B2A55),
-            style = MaterialTheme.typography.headlineLarge,
+            style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.ExtraBold,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(modifier = Modifier.height(22.dp))
+        Spacer(modifier = Modifier.height(10.dp))
         Text(
             text = "지갑을 복구하려면 복구 문구를 입력하세요.",
             color = Color(0xFF7B8493),
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.fillMaxWidth()
         )
-        Spacer(modifier = Modifier.height(32.dp))
+        Spacer(modifier = Modifier.height(20.dp))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(18.dp))
+                .clip(RoundedCornerShape(14.dp))
                 .background(Color(0xFFF7F7F5))
-                .padding(6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                .padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             listOf(12, 24).forEach { count ->
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .height(56.dp)
-                        .clip(RoundedCornerShape(14.dp))
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(11.dp))
                         .background(if (wordCount == count) Color(0xFF0B2A55) else Color.Transparent)
                         .clickable { wordCount = count },
                     contentAlignment = Alignment.Center
@@ -4668,33 +4692,36 @@ private fun WalletRestoreScreen(
                     Text(
                         text = "$count 단어",
                         color = if (wordCount == count) Color.White else Color(0xFF7B8493),
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.ExtraBold
                     )
                 }
             }
         }
-        Spacer(modifier = Modifier.height(34.dp))
+        Spacer(modifier = Modifier.height(20.dp))
         OutlinedTextField(
             value = phrase,
             onValueChange = { phrase = it },
             modifier = Modifier
                 .fillMaxWidth()
-                .height(190.dp),
-            placeholder = { Text("복구 문구를 공백으로 구분해 입력하세요") },
-            shape = RoundedCornerShape(16.dp),
+                .height(150.dp),
+            placeholder = {
+                Text("복구 문구를 공백으로 구분해 입력하세요", style = MaterialTheme.typography.bodyMedium)
+            },
+            shape = RoundedCornerShape(14.dp),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
-            minLines = 5
+            textStyle = MaterialTheme.typography.bodyMedium,
+            minLines = 4
         )
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(10.dp))
         Text(
             text = "${normalizedWords.size} / $wordCount 단어",
             color = if (canSubmit) Color(0xFF2F7DFF) else Color(0xFF7B8493),
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.fillMaxWidth(),
             textAlign = TextAlign.End
         )
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
         WarningCard(
             title = "주의사항",
             body = "KYvC는 한 개의 지갑만 허용하므로 지갑 복구 시 발급되어있는 증명서와 지갑은 삭제됩니다."
@@ -4725,7 +4752,8 @@ private fun WalletNativeScaffold(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 14.dp)
+                .padding(horizontal = 20.dp)
+                .padding(top = 8.dp, bottom = 12.dp)
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -4733,46 +4761,46 @@ private fun WalletNativeScaffold(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(34.dp)
                         .clip(CircleShape)
                         .background(Color(0xFFF7F7F5))
                         .clickable { onBack() },
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("<", color = Color(0xFF0B2A55), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    WebBackIcon(color = Color(0xFF0B2A55))
                 }
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     Text(title, color = Color(0xFF0B2A55), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
                 }
-                Spacer(modifier = Modifier.size(38.dp))
+                Spacer(modifier = Modifier.size(34.dp))
             }
-            Spacer(modifier = Modifier.height(34.dp))
+            Spacer(modifier = Modifier.height(24.dp))
             content()
-            Spacer(modifier = Modifier.height(20.dp))
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
 
 @Composable
 private fun MnemonicWordGrid(words: List<String>) {
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         words.chunked(3).forEachIndexed { rowIndex, row ->
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 row.forEachIndexed { columnIndex, word ->
                     val index = rowIndex * 3 + columnIndex + 1
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .height(58.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(14.dp))
+                            .height(50.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(1.dp, Color(0xFFE5E7EB), RoundedCornerShape(12.dp))
                             .background(Color.White)
-                            .padding(horizontal = 12.dp),
+                            .padding(horizontal = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("$index", color = Color(0xFFA3A3A3), fontWeight = FontWeight.Bold)
-                        Spacer(modifier = Modifier.size(8.dp))
-                        Text(word, color = Color(0xFF0B2A55), fontWeight = FontWeight.ExtraBold)
+                        Text("$index", color = Color(0xFFA3A3A3), style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                        Spacer(modifier = Modifier.size(7.dp))
+                        Text(word, color = Color(0xFF0B2A55), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -4785,18 +4813,18 @@ private fun WarningCard(title: String, body: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .border(1.dp, Color(0xFFE5EDFF), RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(14.dp))
+            .border(1.dp, Color(0xFFE5EDFF), RoundedCornerShape(14.dp))
             .background(Color.White)
-            .padding(22.dp),
+            .padding(16.dp),
         verticalAlignment = Alignment.Top
     ) {
-        Text("?", color = Color(0xFF2F7DFF), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-        Spacer(modifier = Modifier.size(18.dp))
+        Text("?", color = Color(0xFF2F7DFF), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
+        Spacer(modifier = Modifier.size(12.dp))
         Column {
-            Text(title, color = Color(0xFF0B2A55), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(body, color = Color(0xFF7B8493), style = MaterialTheme.typography.bodyLarge)
+            Text(title, color = Color(0xFF0B2A55), style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(5.dp))
+            Text(body, color = Color(0xFF7B8493), style = MaterialTheme.typography.bodyMedium)
         }
     }
 }
@@ -4812,10 +4840,10 @@ private fun PrimaryBottomButton(
         enabled = enabled,
         modifier = Modifier
             .fillMaxWidth()
-            .height(72.dp),
-        shape = RoundedCornerShape(20.dp)
+            .height(52.dp),
+        shape = RoundedCornerShape(14.dp)
     ) {
-        Text(text, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+        Text(text, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold)
     }
 }
 
@@ -4856,12 +4884,7 @@ private fun PinSetupScreen(
                     .clickable { onCancel() },
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "<",
-                    color = Color(0xFF0B1D40),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                WebBackIcon(color = Color(0xFF0B1D40))
             }
             Box(
                 modifier = Modifier.weight(1f),

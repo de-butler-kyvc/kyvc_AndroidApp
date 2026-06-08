@@ -1,6 +1,7 @@
 package com.example.kyvc_androidapp.auth
 
 import android.graphics.BitmapFactory
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.Image
@@ -32,6 +33,10 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -87,12 +92,7 @@ fun BiometricAuthScreen(
                     .clickable { onCancel() },
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = "<",
-                    color = Color(0xFF0B1D40),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
+                WebBackIcon(color = Color(0xFF0B1D40))
             }
             Box(
                 modifier = Modifier.weight(1f),
@@ -157,6 +157,29 @@ fun BiometricAuthScreen(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun WebBackIcon(
+    color: Color,
+    modifier: Modifier = Modifier.size(20.dp)
+) {
+    Canvas(modifier = modifier) {
+        val path = Path().apply {
+            moveTo(size.width * 15f / 24f, size.height * 18f / 24f)
+            lineTo(size.width * 9f / 24f, size.height * 12f / 24f)
+            lineTo(size.width * 15f / 24f, size.height * 6f / 24f)
+        }
+        drawPath(
+            path = path,
+            color = color,
+            style = Stroke(
+                width = 1.6.dp.toPx(),
+                cap = StrokeCap.Round,
+                join = StrokeJoin.Round
+            )
+        )
     }
 }
 
